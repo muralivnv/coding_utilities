@@ -1,0 +1,3 @@
+--language cpp --file-exts .c .cpp .h .hpp .hh --query-definitions cpp/definitions.scm --query-references cpp/references.scm
+
+--language python --file-exts .py --query-definitions python/definitions.scm --query-references python/references.scm

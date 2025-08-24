@@ -23,10 +23,19 @@ CPMAddPackage(
     "mio.installation OFF"
 )
 
+CPMAddPackage(
+  NAME argy
+  VERSION 0.5.0
+  URL https://github.com/mshenoda/argy/archive/refs/tags/v0.5.0.tar.gz
+  OPTIONS
+    "BUILD_EXAMPLES OFF"
+)
+
 add_subdirectory(tree-sitter)
 add_library(external_libs INTERFACE)
 target_link_libraries(external_libs INTERFACE
                       # data-structures
                       tree-sitter-core
                       tree-sitter-parsers
-                      mio::mio)
+                      mio::mio
+                      argy)

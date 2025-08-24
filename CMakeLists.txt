@@ -13,7 +13,8 @@ set(CMAKE_INSTALL_MESSAGE LAZY)
 
 set(COMMON_FLAGS -fPIC -Wall -Wpedantic -Wextra -Wfloat-equal
     -Wno-sign-conversion -Wno-unused-function -Wno-unused-parameter
-    -fdiagnostics-color=always)
+    -fdiagnostics-color=always -Wno-unused-variable -Wno-unused-local-typedefs
+    -Wno-missing-field-initializers)
 
 set(DEBUG_COMPILER_FLAGS ${COMMON_FLAGS} -g3 -O0 -fno-omit-frame-pointer)
 set(RELEASE_COMPILER_FLAGS ${COMMON_FLAGS} -O3 -msse4.2 -mavx2 -march=native -flto)

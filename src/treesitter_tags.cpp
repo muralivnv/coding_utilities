@@ -5,22 +5,18 @@
 #include <unordered_map>
 #include <algorithm>
 #include <string_view>
-#include <tree_sitter/api.h>
-#include <mio/mmap.hpp>
 #include <charconv>
 
+#include <tree_sitter/api.h>
+#include <mio/mmap.hpp>
+#include <argy.hpp>
 #include "config.h"
+
+#define VERSION "25.09"
 
 namespace fs = std::filesystem;
 
 using ParserFunctionPtr = TSLanguage*(*)();
-
-struct InputArguments {
-  fs::path config_file;
-  std::vector<fs::path> input_files;
-  bool query_definitions{false};
-  bool query_references{false};
-};
 
 struct TreesitterQuery {
   TSLanguage* language{nullptr};
@@ -211,56 +207,21 @@ static void TreesitterParse(const fs::path& path,
   ts_parser_delete(parser);
 }
 
-static InputArguments ParseCliArgs(int argc, char** argv) {
-  InputArguments out;
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-    if (arg == "--config" && i + 1 < argc) {
-      out.config_file = argv[++i];
-    } else if (arg == "--definitions") {
-      out.query_definitions = true;
-    } else if (arg == "--references") {
-      out.query_references = true;
-    } else {
-      out.input_files.emplace_back(argv[i]);
-    }
-  }
-  return out;
-}
-
-static bool Validate(const InputArguments& input_args) {
-  if (input_args.config_file.empty()) {
-    std::cerr << "[ERROR] No --config file specified.\n";
-    return false;
-  }
-  if (!fs::exists(input_args.config_file)) {
-    std::cerr << "[ERROR] Config file does not exist: " << input_args.config_file << '\n';
-    return false;
-  }
-  if (input_args.input_files.empty()) {
-    std::cerr << "[ERROR] No input files specified.\n";
-    return false;
-  }
-  if (!input_args.query_definitions && !input_args.query_references) {
-    std::cerr << "[ERROR] No query type specified. Specify either or both of --definitions, --references\n";
-    return false;
-  }
-  return true;
-}
-
 static std::unordered_map<std::string, TreesitterQuery>
-InitializeQuery(const InputArguments& input_args,
+InitializeQuery(const Argy::ParsedArgs& parsed_args,
                 const std::unordered_map<std::string, LanguageInfo>& config) {
   std::unordered_map<std::string, TreesitterQuery> out;
+  const bool query_definitions = parsed_args.getBool("definitions");
+  const bool query_references = parsed_args.getBool("references");
 
   for (const auto& [lang, info] : config) {
 
     if (kFileExtensionToParserMap.contains(lang)) {
       std::string full_query;
-      if (input_args.query_definitions && info.query_definitions.has_value()) {
+      if (query_definitions && info.query_definitions.has_value()) {
         full_query.append(OpenFile(info.query_definitions.value()));
       }
-      if (input_args.query_references && info.query_references.has_value()) {
+      if (query_references && info.query_references.has_value()) {
         full_query.append(OpenFile(info.query_references.value()));
       }
 
@@ -283,15 +244,29 @@ InitializeQuery(const InputArguments& input_args,
 }
 
 int main(int argc, char** argv) {
-  const InputArguments cli_args = ParseCliArgs(argc, argv);
-  if (!Validate(cli_args)) {
-    std::cerr << "Usage: treesitter_tags --config <config_file> --definitions --references <source_file> <source_file> ...\n";
+  Argy::CliParser cli(argc, argv);
+  Argy::ParsedArgs parsed_args;
+  try {
+    cli.add<std::string>  ({"--config"}       , "Config file").validate(Argy::IsFile());
+    cli.add<bool>         ({"--definitions"}  , "List definitions"    , true);
+    cli.add<bool>         ({"--references"}   , "List references"     , false);
+    cli.add<bool>         ({"-v", "--version"}, "Print version number", false);
+    cli.add<Argy::Strings>({"--files"}        , "Input list of files");
+    parsed_args = cli.parse();
+  } catch (const Argy::Exception& ex) {
+    if (cli.getBool("version")) {
+      std::cout << VERSION << '\n';
+      return EXIT_SUCCESS;
+    }
+    std::cerr << "Error: " << ex.what() << '\n';
+    cli.printHelp(argv[0]);
     return EXIT_FAILURE;
   }
-  const std::unordered_map<std::string, LanguageInfo> config = ParseConfig(cli_args.config_file);
-  const std::unordered_map<std::string, TreesitterQuery> queries = InitializeQuery(cli_args, config);
-  for (const fs::path& file : cli_args.input_files) {
-    TreesitterParse(file, config, queries);
+
+  const std::unordered_map<std::string, LanguageInfo> config = ParseConfig(parsed_args.getString("config"));
+  const std::unordered_map<std::string, TreesitterQuery> queries = InitializeQuery(parsed_args, config);
+  for (const std::string& file : parsed_args.get<Argy::Strings>("files")) {
+    TreesitterParse(fs::path{file}, config, queries);
   }
   return EXIT_SUCCESS;
 }
