@@ -1,7 +1,7 @@
 CPMAddPackage(
   NAME tree-sitter
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter.git
-  VERSION 0.25.8
+  VERSION 0.25.9
   DOWNLOAD_ONLY YES
 )
 
@@ -70,7 +70,7 @@ target_link_libraries(tree-sitter-core
 #####################################################################################
 add_grammar_from_repo(tree-sitter-c      https://github.com/tree-sitter/tree-sitter-c         0.24.1)
 add_grammar_from_repo(tree-sitter-cpp    https://github.com/tree-sitter/tree-sitter-cpp       0.23.4)
-add_grammar_from_repo(tree-sitter-python https://github.com/tree-sitter/tree-sitter-python    0.23.6)
+add_grammar_from_repo(tree-sitter-python https://github.com/tree-sitter/tree-sitter-python    0.25.0)
 
 ################################# LANGUAGE INTERFACE ################################
 #####################################################################################

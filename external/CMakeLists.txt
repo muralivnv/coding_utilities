@@ -1,6 +1,6 @@
 ## Get CPM
 ##########
-set(CPM_VERSION 0.40.2)
+set(CPM_VERSION 0.42.0)
 set(CPM_PATH "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_VERSION}.cmake")
 
 if (NOT(EXISTS ${CPM_PATH}))
@@ -24,18 +24,23 @@ CPMAddPackage(
 )
 
 CPMAddPackage(
-  NAME argy
-  VERSION 0.5.0
-  URL https://github.com/mshenoda/argy/archive/refs/tags/v0.5.0.tar.gz
+  NAME pcre2
+  VERSION 10.46
+  URL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.46/pcre2-10.46.tar.gz
   OPTIONS
-    "BUILD_EXAMPLES OFF"
+    "PCRE2_SUPPORT_JIT ON"
+    "PCRE2_BUILD_PCRE2GREP OFF"
+    "PCRE2_BUILD_TESTS OFF"
 )
 
 add_subdirectory(tree-sitter)
 add_library(external_libs INTERFACE)
+target_include_directories(external_libs INTERFACE
+                           ${pcre2_SOURCE_DIR}/src)
 target_link_libraries(external_libs INTERFACE
                       # data-structures
                       tree-sitter-core
                       tree-sitter-parsers
                       mio::mio
-                      argy)
+                      pcre2-8-static)
+
