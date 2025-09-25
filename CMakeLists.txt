@@ -29,7 +29,7 @@ add_subdirectory(external)
 
 # common
 ########
-add_library(common STATIC common/args.cpp common/format.cpp)
+add_library(common STATIC common/args.cpp)
 target_include_directories(common PUBLIC ${CMAKE_SOURCE_DIR}/common)
 target_compile_options(common PRIVATE ${ADDITIONAL_COMPILER_FLAGS})
 

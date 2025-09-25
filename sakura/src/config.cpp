@@ -10,23 +10,20 @@ namespace fs = std::filesystem;
 template<typename T>
 static T ThrowIfNotValid(const common::Args& cli, std::string_view key) {
   if (!cli.Has(key)) {
-    std::string_view error_msg = common::FormatIntoStringView("Input flag %.*s is not specified\n",
-                                                              static_cast<int>(key.size()), key.data());
+    std::string_view error_msg = common::FormatIntoStringView<"Input flag %s is not specified\n">(key);
     throw std::runtime_error(std::string(error_msg));
   }
   if constexpr (std::is_same_v<T, std::string_view>) {
     std::optional<std::string_view> value = cli.Value({key});
     if (!value.has_value()) {
-      std::string_view error_msg = common::FormatIntoStringView("Input value to flag %.*s is not specified\n",
-                                                                static_cast<int>(key.size()), key.data());
+      std::string_view error_msg = common::FormatIntoStringView<"Input value to flag %s is not specified\n">(key);
       throw std::runtime_error(std::string(error_msg));
     }
     return value.value();
   } else if constexpr (std::is_same_v<T, std::vector<std::string_view>>) {
     std::optional<std::vector<std::string_view>> value = cli.MultiValue({key}, true);
     if (!value.has_value()) {
-      std::string_view error_msg = common::FormatIntoStringView("Input value to flag %.*s is not specified\n",
-                                                                static_cast<int>(key.size()), key.data());
+      std::string_view error_msg = common::FormatIntoStringView<"Input value to flag %s is not specified\n">(key);
       throw std::runtime_error(std::string(error_msg));      
     }
     return value.value();

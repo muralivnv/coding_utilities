@@ -75,9 +75,8 @@ Pcre2Compiled Compile(std::string_view pattern, bool jit_compile, bool enable_ut
   if (!compiled.p) {
     std::string msg(256, '.');
     pcre2_get_error_message(errornumber, reinterpret_cast<PCRE2_UCHAR*>(&msg[1]), msg.size()-1);
-    std::string_view error_msg = common::FormatIntoStringView("PCRE2 compilation failed on pattern.\nPattern: %.*s\nError Offset: %d\nError: %s\n",
-                                                              static_cast<int>(pattern.size()), pattern.data(),
-                                                              erroroffset, msg.c_str());
+    std::string_view error_msg = common::FormatIntoStringView<"PCRE2 compilation failed on pattern.\nPattern: %s\nError Offset: %d\nError: %s\n">(
+                                                              pattern, erroroffset, msg);
     throw std::runtime_error(std::string(error_msg));
   }
   return compiled;
@@ -130,7 +129,7 @@ std::string_view Substitute(const Pcre2Substitution& substitution, std::string_v
   if ((rc > 0) && out_length <= scratch_buffer.size()) {
     return {scratch_buffer.data(), out_length};
   } else {
-    std::string_view error_msg = common::FormatIntoStringView("Substitution requires more memory: needed %zu, scratch size %zu\n",
+    std::string_view error_msg = common::FormatIntoStringView<"Substitution requires more memory: needed %?, scratch size %zu\n">(
                                                               out_length, scratch_buffer.size());
     throw std::runtime_error(std::string(error_msg));
   }
