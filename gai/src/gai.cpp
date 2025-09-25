@@ -1,11 +1,11 @@
 #include <iostream>
-#include <cstdio>
 #include <functional>
 #include <streambuf>
 #include <mio/mmap.hpp>
 
 #include "args.h"
 #include "operation.h"
+#include "printx.hpp"
 
 constexpr const char* kVersion = "25.10.0";
 
@@ -58,7 +58,7 @@ static void Process(const std::vector<gai::Pcre2Regex>& filters,
 
 static void NormalPrint(std::string_view content, size_t linenum) {
   std::ignore = linenum;
-  printf("%.*s\n", static_cast<int>(content.size()), content.data());
+  rostd::printf<"%s\n">(content);
 }
 
 static gai::OutputFunc MakeOutputFunc(bool verbose, std::string_view delimiter,
@@ -66,12 +66,11 @@ static gai::OutputFunc MakeOutputFunc(bool verbose, std::string_view delimiter,
   if (!verbose) return gai::NormalPrint;
   if (filename.empty()) {
     return [delimiter](std::string_view c, size_t k) {
-      printf("%zu%.1s%.*s\n", k, delimiter.data(), static_cast<int>(c.size()), c.data());
+      rostd::printf<"%zu%s%s\n">(k, delimiter, c);
     };
   }
   return [filename, delimiter](std::string_view c, size_t k) {
-    printf("%.*s%.1s%zu%.1s%.*s\n", static_cast<int>(filename.size()), filename.data(),
-           delimiter.data(), k, delimiter.data(), static_cast<int>(c.size()), c.data());
+    rostd::printf<"%s%s%zu%s%s\n">(filename, delimiter, k, delimiter, c);
   };
 }
 
@@ -97,11 +96,11 @@ Options:
   )CLI";
 
   if (cli.Has("-h") || cli.Has("--help")) {
-    printf("%.*s", static_cast<int>(kCliHelpMessage.size()), kCliHelpMessage.data());
+    rostd::printf<"%s">(kCliHelpMessage);
     return EXIT_SUCCESS;
   }
   if (cli.Has("--version")) {
-    printf("%s", kVersion);
+    rostd::printf<"%s">(kVersion);
     return EXIT_SUCCESS;
   }
 
@@ -140,7 +139,7 @@ Options:
       }
     }
   } catch (const std::exception& ex) {
-    printf("Exception raise!!\nException: %s\n", ex.what());
+    rostd::printf<"Exception raised!!\nException: %s\n">(ex.what());
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;

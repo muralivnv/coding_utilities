@@ -6,10 +6,10 @@
 
 #include <tree_sitter/api.h>
 #include <mio/mmap.hpp>
-#include <cstdio>
 
 #include "args.h"
 #include "config.h"
+#include "printx.hpp"
 
 constexpr const char* kVersion = "25.10.0";
 namespace fs = std::filesystem;
@@ -43,8 +43,8 @@ static std::string OpenFile(const fs::path& filename) {
 
   std::string out;
   if (ec) {
-    printf("Error!! Unable to memory map input.\n\tFile %s\n\tError Code: %d\n\tError Msg: %s\n",
-           filename.c_str(), ec.value(), ec.message().c_str());
+    rostd::printf<"Error!! Unable to memory map input.\n\tFile: %s\n\tError Code: %d\n\tError Msg: %s\n">(
+      filename, ec.value(), ec.message());
     return out;
   }
   out.resize(contents.size());
@@ -101,8 +101,8 @@ static void TreesitterParse(const fs::path& path,
   std::error_code ec;
   contents.map(path.c_str(), ec);
   if (ec) {
-    printf("Error!! Unable to memory map input file.\n\tFile %s\n\tError Code: %d\n\tError Msg: %s\n",
-           path.c_str(), ec.value(), ec.message().c_str());
+    rostd::printf<"Error!! Unable to memory map input file.\n\tFile: %s\n\tError Code: %d\n\tError Msg: %s\n">(
+      path, ec.value(), ec.message());
     return;
   }  
   if (contents.empty()) {
@@ -116,7 +116,7 @@ static void TreesitterParse(const fs::path& path,
   parser_input.encoding = TSInputEncoding::TSInputEncodingUTF8;
   TSTree* tree = ts_parser_parse(parser, NULL, parser_input);
   if (!tree) {
-    printf("Error!! Parsing failed for file %s\n", path.c_str());
+    rostd::printf<"Error!! Parsing failed for file %s\n">(path);
     ts_parser_delete(parser);
     return;
   }
@@ -137,8 +137,7 @@ static void TreesitterParse(const fs::path& path,
       auto end_byte = ts_node_end_byte(node);
       std::string_view symbol_name(contents.begin() + start_byte, end_byte - start_byte);
       symbol_name = LStrip(symbol_name);
-      printf("%s@%u@%u@%.*s\n", path_native, start_point.row + 1, start_point.column + 1,
-             std::min<int>(50, static_cast<int>(symbol_name.size())), symbol_name.data());
+      rostd::printf<"%s@%u@%u@%s\n">(path, start_point.row + 1, start_point.column + 1, symbol_name);
     }
   }
   ts_query_cursor_delete(cursor);
@@ -170,8 +169,8 @@ InitializeQuery(const common::Args& cli,
       TSQuery* const query = ts_query_new(language, full_query.data(), full_query.size(),
                                           &error_offset, &error_type);
       if (query == nullptr) {
-        printf("Error!! Query failed.\n\tQuery: %s\n\tError Offset: %u\n\tError Type: %d\n",
-               full_query.c_str(), error_offset, static_cast<int>(error_type));
+        rostd::printf<"Error!! Query failed.\n\tQuery: %s\n\tError Offset: %u\n\tError Type: %?\n">(
+                      full_query, error_offset, error_type);
         continue;
       }
       auto it = out.insert({lang, TreesitterQuery()}).first;
@@ -197,15 +196,15 @@ Options:
     )CLI";
 
   if (cli.Has("-h") || cli.Has("--help")) {
-    printf("%.*s", static_cast<int>(kCliHelpMessage.size()), kCliHelpMessage.data());
+    rostd::printf<"%s">(kCliHelpMessage);
     return EXIT_SUCCESS;
   }
   if (cli.Has("--version")) {
-    printf("%s", kVersion);
+    rostd::printf<"%s">(kVersion);
     return EXIT_SUCCESS;
   }
   if (!cli.Has("--config")) {
-    printf("Error!! option --config is not specified");
+    rostd::printf<"Error!! Option --config is not specified.">();
     return EXIT_FAILURE;
   }
 
@@ -214,12 +213,11 @@ Options:
   const VecStringView files = cli.MultiValue({"--files"}, true).value_or(VecStringView{});
 
   if (!fs::exists(config_file)) {
-    printf("Error!! input --config file does not exist.\n\tFile: %.*s\n",
-           static_cast<int>(config_file.size()), config_file.data());
+    rostd::printf<"Error!! Input --config file does not exist.\n\tFile: %s\n">(config_file);
     return EXIT_FAILURE;
   }
   if (files.empty()) {
-    printf("Error!! input --files list is empty\n");
+    rostd::printf<"Error!! Input --files list is empty\n">();
     return EXIT_FAILURE;
   }
 
@@ -231,7 +229,7 @@ Options:
       TreesitterParse(fs::path{file}, config, queries);
     }
   } catch (const std::exception& ex) {
-    printf("Exception thrown!!\nException: %s\n", ex.what());
+    rostd::printf<"Exception thrown!!\nException: %s\n">(ex.what());
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;
