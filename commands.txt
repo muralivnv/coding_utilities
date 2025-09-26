@@ -1,0 +1,2 @@
+CXX=zig c++ -s -O3 -target x86_64-linux-musl
+CC=zig cc -s -O3 -target x86_64-linux-musl
