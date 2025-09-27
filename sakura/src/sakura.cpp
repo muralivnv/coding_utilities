@@ -182,6 +182,7 @@ InitializeQuery(const common::Args& cli,
 }
 
 int main(int argc, char** argv) {
+  setvbuf(stdout, nullptr, _IOFBF, 1 << 20);
   common::Args cli(argc, argv);
   constexpr std::string_view kCliHelpMessage = R"CLI(
 Usage: sakura [options]

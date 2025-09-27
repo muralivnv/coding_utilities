@@ -77,6 +77,7 @@ static gai::OutputFunc MakeOutputFunc(bool verbose, std::string_view delimiter,
 } // namespace gai
 
 int main(int argc, char** argv) {
+  setvbuf(stdout, nullptr, _IOFBF, 1 << 20);
   common::Args cli(argc, argv);
   constexpr std::string_view kCliHelpMessage = R"CLI(
 Usage: gai [options]
