@@ -6,7 +6,7 @@
 #include "input.h"
 #include "printx.hpp"
 
-constexpr const char* kVersion = "25.10.0";
+constexpr const char* kVersion = "25.10.1";
 
 namespace gai {
 using OutputFunc = std::function<void(std::string_view, size_t)>;
