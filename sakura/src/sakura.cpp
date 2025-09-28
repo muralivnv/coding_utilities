@@ -11,7 +11,7 @@
 #include "config.h"
 #include "printx.hpp"
 
-constexpr const char* kVersion = "25.10.0";
+constexpr const char* kVersion = "25.10.1";
 namespace fs = std::filesystem;
 
 using ParserFunctionPtr = TSLanguage*(*)();
@@ -76,6 +76,7 @@ static std::string_view LStrip(std::string_view v) {
 static void TreesitterParse(const fs::path& path,
                             const std::unordered_map<std::string, LanguageInfo>& config,
                             const std::unordered_map<std::string, TreesitterQuery>& queries) {
+  if (fs::file_size(path) == 0) return;
   std::string file_extension = path.extension().string();
   std::transform(file_extension.begin(), file_extension.end(), file_extension.begin(),
                  ::tolower);
@@ -94,9 +95,6 @@ static void TreesitterParse(const fs::path& path,
     return;
   }
 
-  TSParser *parser = ts_parser_new();
-  std::ignore = ts_parser_set_language(parser, language);
-
   mio::mmap_source contents;
   std::error_code ec;
   contents.map(path.c_str(), ec);
@@ -104,11 +102,10 @@ static void TreesitterParse(const fs::path& path,
     rostd::printf<"Error!! Unable to memory map input file.\n\tFile: %s\n\tError Code: %d\n\tError Msg: %s\n">(
       path, ec.value(), ec.message());
     return;
-  }  
-  if (contents.empty()) {
-    ts_parser_delete(parser);
-    return;
   }
+
+  TSParser *parser = ts_parser_new();
+  std::ignore = ts_parser_set_language(parser, language);
 
   TSInput parser_input{};
   parser_input.payload = static_cast<void*>(&contents);
@@ -230,7 +227,7 @@ Options:
       TreesitterParse(fs::path{file}, config, queries);
     }
   } catch (const std::exception& ex) {
-    rostd::printf<"Exception thrown!!\nException: %s\n">(ex.what());
+    rostd::printf<"Exception raised!!\nException: %s\n">(ex.what());
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;

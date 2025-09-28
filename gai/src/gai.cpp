@@ -6,7 +6,7 @@
 #include "input.h"
 #include "printx.hpp"
 
-constexpr const char* kVersion = "25.10.0";
+constexpr const char* kVersion = "25.10.1";
 
 namespace gai {
 using OutputFunc = std::function<void(std::string_view, size_t)>;
@@ -124,14 +124,13 @@ Options:
       gai::InputStream stream;
       gai::Process(filters, excludes, replacements, fn, range, &stream);
     } else {
-      gai::InputMemMappedFile mmap_stream;
       for (const std::string_view& f : files) {
         mio::mmap_source contents;
         std::error_code ec;
         contents.map(f, ec);
         if (ec) continue;
-        mmap_stream.Reset(&contents);
 
+        gai::InputMemMappedFile mmap_stream(contents.begin(), contents.end());
         if (range) range->Reset();
         const gai::OutputFunc fn = gai::MakeOutputFunc(verbose, delimiter, f);
         gai::Process(filters, excludes, replacements, fn, range, &mmap_stream);

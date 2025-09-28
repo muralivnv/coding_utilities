@@ -26,14 +26,12 @@ class InputStream : public InputBase {
 
 class InputMemMappedFile : public InputBase {
  public:
-  InputMemMappedFile() = default;
-  InputMemMappedFile(mio::mmap_source *mmap_file);
+  InputMemMappedFile() = delete;
+  InputMemMappedFile(const char* begin, const char* end);
   ~InputMemMappedFile() override = default;
 
   std::optional<std::string_view> GetLine() override;
-  void Reset(mio::mmap_source *mmap_file);
  private:
-  mio::mmap_source* file_{nullptr};
   const char* ptr_{nullptr};
   const char* end_{nullptr};
 };

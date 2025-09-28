@@ -1,6 +1,5 @@
-#include "input.h"
 #include <iostream>
-#include <immintrin.h>  // AVX2
+#include "input.h"
 
 namespace gai {
 
@@ -9,8 +8,7 @@ std::optional<std::string_view> InputStream::GetLine() {
   return std::nullopt;
 }
 
-InputMemMappedFile::InputMemMappedFile(mio::mmap_source *mmap_file)
-    : file_{mmap_file}, ptr_{mmap_file->data()}, end_{mmap_file->data() + mmap_file->size()} {}
+InputMemMappedFile::InputMemMappedFile(const char* begin, const char* end) : ptr_{begin}, end_{end} {}
 
 std::optional<std::string_view> InputMemMappedFile::GetLine() {
   if (ptr_ >= end_) return std::nullopt;
@@ -32,12 +30,6 @@ std::optional<std::string_view> InputMemMappedFile::GetLine() {
     return line;
   }
   return std::nullopt;
-}
-
-void InputMemMappedFile::Reset(mio::mmap_source *mmap_file) {
-  file_ = mmap_file;
-  ptr_ = file_->data();
-  end_ = ptr_ + file_->size();
 }
 
 } // namespace gai
