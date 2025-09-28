@@ -1,6 +1,7 @@
 add_library(gai_lib STATIC
             src/regex.cpp
-            src/operation.cpp)
+            src/operation.cpp
+            src/input.cpp)
 target_link_libraries(gai_lib PRIVATE external_libs common)
 target_compile_options(gai_lib PRIVATE ${ADDITIONAL_COMPILER_FLAGS})
           

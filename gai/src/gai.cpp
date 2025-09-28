@@ -1,10 +1,9 @@
-#include <iostream>
 #include <functional>
-#include <streambuf>
 #include <mio/mmap.hpp>
 
 #include "args.h"
 #include "operation.h"
+#include "input.h"
 #include "printx.hpp"
 
 constexpr const char* kVersion = "25.10.0";
@@ -12,25 +11,17 @@ constexpr const char* kVersion = "25.10.0";
 namespace gai {
 using OutputFunc = std::function<void(std::string_view, size_t)>;
 
-class MemMapStreambuf : public std::streambuf {
- public:
-  MemMapStreambuf(const char* base, std::size_t size) {
-    // NOTE: std::streambuf::setg requires non-const char*
-    char* p = const_cast<char*>(base);
-    this->setg(p, p, p+size);
-  }
-};
-
 static void Process(const std::vector<gai::Pcre2Regex>& filters,
                     const std::vector<gai::Pcre2Regex>& excludes,
                     const std::vector<gai::Pcre2Substitution>& replacements,
                     const OutputFunc& out_fn,
-                    std::optional<gai::Range>& range, std::istream& input) {
-  thread_local std::string buffer(4096, ' ');
-  std::string line;
+                    std::optional<gai::Range>& range, InputBase* const input) {
+  thread_local std::string replacement_buffer(1024, ' ');
+  thread_local std::string replacement_line(1024, ' ');
   size_t linenum = 0;
-  while (std::getline(input, line)) {
+  while (std::optional<std::string_view> line_opt = input->GetLine()) {
     ++linenum;
+    std::string_view& line = line_opt.value();
     if (range) {
       if (!range->IsStartReached(line, linenum)) continue;
       if (range->IsEndReached(line, linenum)) continue;
@@ -48,11 +39,16 @@ static void Process(const std::vector<gai::Pcre2Regex>& filters,
       continue;
     }
 
-    for (const Pcre2Substitution& r : replacements) {    
-      std::string_view replace = Substitute(r, line, buffer);
-      line.assign(replace);
+    if (!replacements.empty()) {
+      replacement_line.assign(line);
+      for (const Pcre2Substitution& r : replacements) {    
+        std::string_view replace = Substitute(r, replacement_line, replacement_buffer);
+        replacement_line.assign(replace);
+      }
+      out_fn(replacement_line, linenum);
+    } else {
+      out_fn(line, linenum);
     }
-    out_fn(line, linenum);
   }
 }
 
@@ -125,18 +121,20 @@ Options:
 
     if (files.empty()) {
       const gai::OutputFunc fn = gai::MakeOutputFunc(verbose, delimiter);
-      gai::Process(filters, excludes, replacements, fn, range, std::cin);
+      gai::InputStream stream;
+      gai::Process(filters, excludes, replacements, fn, range, &stream);
     } else {
+      gai::InputMemMappedFile mmap_stream;
       for (const std::string_view& f : files) {
         mio::mmap_source contents;
         std::error_code ec;
         contents.map(f, ec);
-        gai::MemMapStreambuf buf(contents.data(), contents.size());
-        std::istream in(&buf);
+        if (ec) continue;
+        mmap_stream.Reset(&contents);
 
         if (range) range->Reset();
         const gai::OutputFunc fn = gai::MakeOutputFunc(verbose, delimiter, f);
-        gai::Process(filters, excludes, replacements, fn, range, in);
+        gai::Process(filters, excludes, replacements, fn, range, &mmap_stream);
       }
     }
   } catch (const std::exception& ex) {
