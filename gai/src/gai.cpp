@@ -25,7 +25,7 @@ static void Process(const std::vector<gai::Pcre2Regex>& filters,
     if (range) {
       if (!range->IsStartReached(line, linenum)) continue;
       if (range->IsEndReached(line, linenum)) continue;
-    }
+    }  
 
     bool match = std::any_of(filters.begin(), filters.end(),
                              [&line](const auto& r) { return Find(r, line); });
@@ -100,7 +100,6 @@ Options:
     rostd::printf<"%s">(kVersion);
     return EXIT_SUCCESS;
   }
-
   try {
     using VecStringView = std::vector<std::string_view>;
     const bool jit = !cli.Has("--no-jit");

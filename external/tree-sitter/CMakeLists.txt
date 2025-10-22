@@ -1,7 +1,7 @@
 CPMAddPackage(
   NAME tree-sitter
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter.git
-  VERSION 0.25.9
+  VERSION 0.25.10
   DOWNLOAD_ONLY YES
 )
 

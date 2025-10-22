@@ -25,8 +25,8 @@ CPMAddPackage(
 
 CPMAddPackage(
   NAME pcre2
-  VERSION 10.46
-  URL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.46/pcre2-10.46.tar.gz
+  VERSION 10.47
+  URL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.47/pcre2-10.47.tar.gz
   OPTIONS
     "PCRE2_SUPPORT_JIT ON"
     "PCRE2_BUILD_PCRE2GREP OFF"
