@@ -195,5 +195,7 @@ int main() {
   EXPECT_TRUE(ParseRange("@1@end@", false, false).has_value());
   EXPECT_THROWS(ParseRange("@start@", false, false));
 
+  std::cout << "Done.\n";
+
   return EXIT_SUCCESS;
 }

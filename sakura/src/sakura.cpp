@@ -11,7 +11,7 @@
 #include "config.h"
 #include "printx.hpp"
 
-constexpr const char* kVersion = "25.10.1";
+constexpr const char* kVersion = PROJECT_VERSION; // define in root CMakeLists.txt
 namespace fs = std::filesystem;
 
 using ParserFunctionPtr = TSLanguage*(*)();

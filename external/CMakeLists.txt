@@ -43,4 +43,3 @@ target_link_libraries(external_libs INTERFACE
                       tree-sitter-parsers
                       mio::mio
                       pcre2-8-static)
-
