@@ -35,3 +35,4 @@ target_compile_options(common PRIVATE ${ADDITIONAL_COMPILER_FLAGS})
 
 add_subdirectory(sakura)
 add_subdirectory(gai)
+add_subdirectory(jack)
