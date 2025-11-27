@@ -1,6 +1,5 @@
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <regex>
 
 #include "args.h"
@@ -13,6 +12,12 @@ constexpr const char* kVersion = PROJECT_VERSION; // defined in root CMakeLists.
 
 namespace fs = std::filesystem;
 namespace jack {
+
+struct FileLineCol {
+  std::string_view file;
+  std::string_view line;
+  std::string_view col;
+};
 
 fs::path FindAlternatives(const fs::path& file) {
   const char* home_cstr = getenv("HOME");
@@ -32,50 +37,59 @@ fs::path FindAlternatives(const fs::path& file) {
   throw std::runtime_error(std::string{error_msg});
 }
 
-std::optional<std::string> ToFileLineCol(const std::string& content) {
+std::optional<FileLineCol> ToFileLineCol(std::string_view content) {
   static const std::regex pattern(R"(^([^@]+)@(\d+)(?:@(.*))?$)");
-  std::string output;
-  output.reserve(content.size());
 
-  std::smatch match;
-  std::string trimmed = content;
-  
-  // Trim leading/trailing whitespace
-  trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r"));
-  trimmed.erase(trimmed.find_last_not_of(" \t\n\r") + 1);
+  std::string_view trimmed = content;
+  const size_t first_char_pos = trimmed.find_first_not_of(" \t\n\r");
+  if (first_char_pos == std::string_view::npos) {
+    trimmed = ""; // Handle all-whitespace case
+  } else {
+    trimmed.remove_prefix(first_char_pos);
+    const size_t last_char_pos = trimmed.find_last_not_of(" \t\n\r");
+    trimmed.remove_suffix(trimmed.size() - (last_char_pos + 1));
+  }
 
-  if (!std::regex_match(trimmed, match, pattern)) return std::nullopt;
+  std::cmatch match;
+  if (!std::regex_match(trimmed.begin(), trimmed.end(), match, pattern)) {
+    return std::nullopt;
+  }
+ 
+  std::string_view filename_view(match[1].first, match[1].length());
+  std::string_view linenum_view(match[2].first, match[2].length());
+  std::string_view rest_view;
+  if (match[3].matched) {
+    rest_view = std::string_view(match[3].first, match[3].length());
+  }
 
-  const std::string filename{match[1].str()};
-  const std::string linenum{match[2].str()};
+  std::string_view colnum_view = "0"; // default value
+    if (!rest_view.empty()) {
+    auto pos = rest_view.find('@');
+    std::string_view first;
 
-  std::string rest{match[3].matched ? match[3].str() : ""};
-  std::string colnum{"0"};
-  if (!rest.empty()) {
-    // Split rest on first '@'
-    auto pos = rest.find('@');
-    std::string first = (pos == std::string::npos) ? rest : rest.substr(0, pos);
-
-    // Check if the first part is numeric
+    if (pos == std::string_view::npos) {
+      first = rest_view;
+    } else {
+      first = rest_view.substr(0, pos);
+    }
+    // Check if the first part is numeric. This still requires iterating,
+    // but avoids string allocation.
     if (!first.empty() && std::all_of(first.begin(), first.end(), ::isdigit)) {
-      colnum = first;
+      colnum_view = first;
     }
   }
-  output.append(filename);
-  output.append(":");
-  output.append(linenum);
-  output.append(":");
-  output.append(colnum);
-  return output;
+  return FileLineCol{filename_view, linenum_view, colnum_view};
 }
 
 void OpenFilesInEditor(const CommandOutput& output, std::string_view parent_id) {
   std::string_view cmd = common::FormatIntoStringView<"swaymsg '[con_id=%s] focus'">(parent_id);
   std::ignore = ShellExec(std::string{cmd});
-  for (const std::string& selection : output.user_selections) {
-    const std::optional<std::string> parsed = ToFileLineCol(selection);
+  for (std::string_view selection : output.user_selections) {
+    const std::optional<FileLineCol> parsed = ToFileLineCol(selection);
     if (parsed.has_value()) {
-      cmd = common::FormatIntoStringView<"wlrctl keyboard type ':open %s'">(parsed.value());
+      cmd = common::FormatIntoStringView<"wlrctl keyboard type ':open %s:%s:%s'">(parsed->file,
+                                                                                  parsed->line,
+                                                                                  parsed->col);
       std::ignore = ShellExec(std::string{cmd});
     }
   }
@@ -145,11 +159,18 @@ void OpenLastPicker(const fs::path& file_filter_file, const fs::path& treesitter
 
   auto ParseToArgv = [](const std::string& line) {
     Argv result;
-    std::istringstream iss(line);
-    std::string token;
-    result.strings.push_back("jack.cpp"); // program name
-    while (iss >> token) {
-      result.strings.push_back(token);
+    std::string_view line_view(line);    
+    result.strings.push_back("jack.out");
+    size_t current_pos = 0; 
+    while (current_pos < line_view.length()) {        
+      current_pos = line_view.find_first_not_of(" \t\n\r", current_pos);
+      if (current_pos == std::string_view::npos) break;
+      const size_t end_pos = line_view.find_first_of(" \t\n\r", current_pos);
+      const size_t length = (end_pos == std::string_view::npos) 
+                            ? (line_view.length() - current_pos) // Token runs to the end
+                            : (end_pos - current_pos);           // Token ends at whitespace
+      result.strings.emplace_back(line_view.substr(current_pos, length));
+      current_pos = end_pos;
     }
     for (std::string& s : result.strings) {
       result.argv_storage.push_back(s.data());

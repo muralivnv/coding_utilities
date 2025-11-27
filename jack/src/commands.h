@@ -2,19 +2,17 @@
 #define JACK_SRC_COMMANDS_H_
 
 #include <filesystem>
-#include <optional>
 #include <string>
+#include <string_view>
 
 namespace jack {
 namespace fs = std::filesystem;
 
 struct CommandOutput {
-  std::vector<std::string> user_selections{};
-  std::string user_query{};
+  std::vector<std::string_view> user_selections{};
+  std::string_view user_query{};
+  std::string storage;
 };
-
-std::optional<CommandOutput> OpenLastPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                                            const fs::path& last_picker_state_file);
 
 CommandOutput OpenFilePicker(const fs::path& file_filter_file, const std::string& query);
 

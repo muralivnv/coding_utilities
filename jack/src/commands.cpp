@@ -1,5 +1,4 @@
 #include <unordered_set>
-#include <fstream>
 #include <string_view>
 
 #include "format.h"
@@ -30,20 +29,25 @@ static std::vector<std::string_view> Split(std::string_view data, char delim) {
 }
 
 static CommandOutput ParseQueryAndSelection(const std::string& output) {
-  CommandOutput retval;
-  if (!output.empty()) {
-    const std::vector<std::string_view> lines = Split(output, '\n');
-    if (lines.size() == 1) {
-      auto& back = retval.user_selections.emplace_back();
-      back.assign(lines[0]);
-    } else {
-      retval.user_query.assign(lines[0]);
-      for (size_t i = 1; i < lines.size(); i++) {
-        auto& back = retval.user_selections.emplace_back();
-        back.assign(lines[i]);
-      }
+  CommandOutput retval;   
+  retval.storage = output;
+  if (retval.storage.empty()) {
+    return retval;
+  }
+  const std::vector<std::string_view> lines = Split(retval.storage, '\n');
+  if (lines.empty()) {
+    return retval;
+  }
+
+  if (lines.size() == 1) {
+    retval.user_selections.push_back(lines[0]);
+  } else {
+    retval.user_query = lines[0];
+    for (size_t i = 1; i < lines.size(); ++i) {
+      retval.user_selections.push_back(lines[i]);
     }
   }
+
   return retval;
 }
 
@@ -98,44 +102,6 @@ std::string Quote(const std::string &s) {
   }
   result.push_back('\'');
   return result;
-}
-
-std::optional<CommandOutput> OpenLastPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                                            const fs::path& last_picker_state_file) {
-  if (fs::exists(last_picker_state_file)) {
-    std::ifstream state_file(last_picker_state_file);
-    if (state_file.is_open()) {
-      std::string data;
-      std::getline(state_file, data);
-      const std::vector<std::string_view> parts = Split(data, ',');
-
-      if (parts.size() > 1) {
-        std::string query{parts[1]};
-        if (query.empty()) query = " ";
-
-        if (parts[0] == "OpenFilePicker"sv) {
-           return OpenFilePicker(file_filter_file, query);
-
-        } else if (parts[0] == "OpenContentPicker"sv) {
-          return OpenContentPicker(file_filter_file, query);
-
-        } else if (parts[0] == "OpenSymbolPicker"sv) {
-          if (parts.size() > 2) {
-            return OpenSymbolPicker(file_filter_file, treesitter_tags_file, query, parts[2]);
-          }
-
-        } else if (parts[0] == "GoToDefinition"sv) {
-          return GoToDefinition(file_filter_file, treesitter_tags_file, query);
-
-        } else if (parts[0] == "ShowReferences"sv) {
-          return ShowReferences(file_filter_file, treesitter_tags_file, query);
-        }
-      }
-
-      state_file.close();
-    }
-  }
-  return std::nullopt;
 }
 
 CommandOutput OpenFilePicker(const fs::path& file_filter_file, const std::string& query) {
