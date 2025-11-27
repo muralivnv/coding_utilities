@@ -151,16 +151,11 @@ void OpenPicker(const fs::path& file_filter_file, const fs::path& treesitter_tag
 
 void OpenLastPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
                     const fs::path& last_picker_state_file, common::Args& cli) {  
-  struct Argv {
-    int argc;
-    std::vector<char*> argv_storage;
-    std::vector<std::string> strings;
-  };
 
-  auto ParseToArgv = [](const std::string& line) {
-    Argv result;
+  auto SplitBySpace = [](const std::string& line) {
+    std::vector<std::string> strings;
     std::string_view line_view(line);    
-    result.strings.push_back("jack.out");
+    strings.emplace_back("jack.out");
     size_t current_pos = 0; 
     while (current_pos < line_view.length()) {        
       current_pos = line_view.find_first_not_of(" \t\n\r", current_pos);
@@ -169,14 +164,10 @@ void OpenLastPicker(const fs::path& file_filter_file, const fs::path& treesitter
       const size_t length = (end_pos == std::string_view::npos) 
                             ? (line_view.length() - current_pos) // Token runs to the end
                             : (end_pos - current_pos);           // Token ends at whitespace
-      result.strings.emplace_back(line_view.substr(current_pos, length));
+      strings.emplace_back(line_view.substr(current_pos, length));
       current_pos = end_pos;
     }
-    for (std::string& s : result.strings) {
-      result.argv_storage.push_back(s.data());
-    }
-    result.argc = static_cast<int>(result.argv_storage.size());
-    return result;
+    return strings;
   };
 
   if (fs::exists(last_picker_state_file)) {
@@ -184,14 +175,19 @@ void OpenLastPicker(const fs::path& file_filter_file, const fs::path& treesitter
     if (state_file.is_open()) {
       std::string data;
       std::getline(state_file, data);
-      Argv argv = ParseToArgv(data);
-      argv.strings.push_back("--parent-id");
-      argv.argv_storage.push_back(argv.strings.back().data());
-      argv.strings.emplace_back(cli.Value({"--parent-id"}).value_or(std::string_view{"0"}));
-      argv.argv_storage.push_back(argv.strings.back().data());
-      argv.argc += 2;
+      std::vector<std::string> strings = SplitBySpace(data);
+      strings.push_back("--parent-id");
 
-      common::Args pseudo_cli(argv.argc, argv.argv_storage.data());
+      // NOTE: Whether parent-id is passed or not is checked in main.
+      // so it is safe to be used with 'value_or' here
+      strings.emplace_back(cli.Value({"--parent-id"}).value_or(std::string_view{"0"}));
+
+      std::vector<char*> argv;
+      for (std::string& s : strings) {
+        argv.push_back(s.data());
+      }
+      int argc = static_cast<int>(argv.size());
+      common::Args pseudo_cli(argc, argv.data());
       OpenPicker(file_filter_file, treesitter_tags_file, last_picker_state_file, pseudo_cli);
       state_file.close();
     }
@@ -245,6 +241,7 @@ Options:
     const fs::path last_picker_state_file = fs::path(".ronin") / "last-picker-state.txt";
 
     if (cli.Has("--open-last-picker")) {
+      rostd::printf<"OPEN LAST PICKER\n">();
       jack::OpenLastPicker(file_filter_file, treesitter_tags_file, last_picker_state_file, cli);
     } else {
       jack::OpenPicker(file_filter_file, treesitter_tags_file, last_picker_state_file, cli);
