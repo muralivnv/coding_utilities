@@ -105,16 +105,16 @@ std::string Quote(const std::string &s) {
 }
 
 CommandOutput OpenFilePicker(const fs::path& file_filter_file, const std::string& query) {
-  std::string_view cmd = common::FormatIntoStringView<"bash %s | gai -r '/(\\S+)/$1@1/' | %s --nth=1 --tiebreak=pathname --query=%s">(
-                                                           file_filter_file, FZF_COMMAND, Quote(query));
-  std::string output = ShellExec(std::string{cmd});
+  const char* cmd = common::FormatIntoCString<"bash %s | gai -r '/(\\S+)/$1@1/' | %s --nth=1 --tiebreak=pathname --query=%s">(
+                                              file_filter_file, FZF_COMMAND, Quote(query));
+  std::string output = ShellExec(cmd);
   return ParseQueryAndSelection(output);
 }
 
 CommandOutput OpenContentPicker(const fs::path& file_filter_file, const std::string& query) {
-  std::string_view cmd = common::FormatIntoStringView<"bash %s | xargs gai -f '\\w' -v -d @ --files | %s --tiebreak=begin --query=%s">(
-                                                      file_filter_file, FZF_COMMAND, Quote(query));
-  std::string output = ShellExec(std::string{cmd});
+  const char* cmd = common::FormatIntoCString<"bash %s | xargs gai -f '\\w' -v -d @ --files | %s --tiebreak=begin --query=%s">(
+                                              file_filter_file, FZF_COMMAND, Quote(query));
+  std::string output = ShellExec(cmd);
   return ParseQueryAndSelection(output);
 }
 
@@ -122,30 +122,30 @@ CommandOutput OpenSymbolPicker(const fs::path& file_filter_file, const fs::path&
                                const std::string& query, const fs::path& file) {
   std::string output;
   if (file.empty()) { // open project wide symbol picker
-    std::string_view cmd = common::FormatIntoStringView<"bash %s | xargs sakura --config %s --definitions --files | %s --query=%s">(
-                                                        file_filter_file, treesitter_tags_file, FZF_COMMAND, Quote(query));
-    output = ShellExec(std::string{cmd});
+    const char* cmd = common::FormatIntoCString<"bash %s | xargs sakura --config %s --definitions --files | %s --query=%s">(
+                                                file_filter_file, treesitter_tags_file, FZF_COMMAND, Quote(query));
+    output = ShellExec(cmd);
   } else { // open file symbol picker
-    std::string_view cmd = common::FormatIntoStringView<"sakura --config %s --definitions --files %s | %s --with-nth=-1 --query=%s">(
-                                                        treesitter_tags_file, file, FZF_COMMAND, Quote(query));
-    output = ShellExec(std::string{cmd});
+    const char* cmd = common::FormatIntoCString<"sakura --config %s --definitions --files %s | %s --with-nth=-1 --query=%s">(
+                                                treesitter_tags_file, file, FZF_COMMAND, Quote(query));
+    output = ShellExec(cmd);
   }
   return ParseQueryAndSelection(output);
 }
 
 CommandOutput GoToDefinition(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
                              const std::string& symbol) {
-  std::string_view cmd = common::FormatIntoStringView<"bash %s | xargs sakura --config %s --definitions --files | gai -f '\\b%s\\b' | ifne %s --query=%s --select-1 --exit-0">(
-                                                      file_filter_file, treesitter_tags_file, symbol, FZF_COMMAND, Quote(symbol));
-  std::string output = ShellExec(std::string{cmd});
+  const char* cmd = common::FormatIntoCString<"bash %s | xargs sakura --config %s --definitions --files | gai -f '\\b%s\\b' | ifne %s --query=%s --select-1 --exit-0">(
+                                              file_filter_file, treesitter_tags_file, symbol, FZF_COMMAND, Quote(symbol));
+  std::string output = ShellExec(cmd);
   return ParseQueryAndSelection(output);
 }
 
 CommandOutput ShowReferences(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
                              const std::string& symbol) {
-  std::string_view cmd = common::FormatIntoStringView<"bash %s | xargs sakura --config %s --definitions --references --files | gai -f '\\b%s\\b' | ifne %s --query=%s">(
-                                                      file_filter_file, treesitter_tags_file, symbol, FZF_COMMAND, Quote(symbol));
-  std::string output = ShellExec(std::string{cmd});
+  const char* cmd = common::FormatIntoCString<"bash %s | xargs sakura --config %s --definitions --references --files | gai -f '\\b%s\\b' | ifne %s --query=%s">(
+                                              file_filter_file, treesitter_tags_file, symbol, FZF_COMMAND, Quote(symbol));
+  std::string output = ShellExec(cmd);
   return ParseQueryAndSelection(output);
 }
 

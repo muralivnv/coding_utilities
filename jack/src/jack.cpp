@@ -82,15 +82,15 @@ std::optional<FileLineCol> ToFileLineCol(std::string_view content) {
 }
 
 void OpenFilesInEditor(const CommandOutput& output, std::string_view parent_id) {
-  std::string_view cmd = common::FormatIntoStringView<"swaymsg '[con_id=%s] focus'">(parent_id);
-  std::ignore = ShellExec(std::string{cmd});
+  const char* cmd = common::FormatIntoCString<"swaymsg '[con_id=%s] focus'">(parent_id);
+  std::ignore = ShellExec(cmd);
   for (std::string_view selection : output.user_selections) {
     const std::optional<FileLineCol> parsed = ToFileLineCol(selection);
     if (parsed.has_value()) {
-      cmd = common::FormatIntoStringView<"wlrctl keyboard type ':open %s:%s:%s'">(parsed->file,
-                                                                                  parsed->line,
-                                                                                  parsed->col);
-      std::ignore = ShellExec(std::string{cmd});
+      cmd = common::FormatIntoCString<"wlrctl keyboard type ':open %s:%s:%s'">(parsed->file,
+                                                                               parsed->line,
+                                                                               parsed->col);
+      std::ignore = ShellExec(cmd);
     }
   }
 }

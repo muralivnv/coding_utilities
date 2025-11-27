@@ -26,9 +26,9 @@ void SetEnv() {
   }
 }
 
-std::string ShellExec(const std::string& cmd) {
+std::string ShellExec(const char* cmd) {
   static std::array<char, 256> buffer;
-  FILE* pipe = popen(cmd.c_str(), "r");
+  FILE* pipe = popen(cmd, "r");
   if (!pipe) {
     std::string_view error_msg = common::FormatIntoStringView<"popen failed to start command.\nCommand: %?">(cmd);
     throw std::runtime_error(std::string(error_msg));    
