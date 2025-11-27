@@ -241,7 +241,6 @@ Options:
     const fs::path last_picker_state_file = fs::path(".ronin") / "last-picker-state.txt";
 
     if (cli.Has("--open-last-picker")) {
-      rostd::printf<"OPEN LAST PICKER\n">();
       jack::OpenLastPicker(file_filter_file, treesitter_tags_file, last_picker_state_file, cli);
     } else {
       jack::OpenPicker(file_filter_file, treesitter_tags_file, last_picker_state_file, cli);
