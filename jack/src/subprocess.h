@@ -6,7 +6,6 @@
 namespace jack {
 
 void SetEnv();
-std::string Exec(const std::vector<std::string>& cmd);
 std::string ShellExec(const std::string& cmd);
 
 } // namespace jack

@@ -2,27 +2,32 @@
 #define JACK_SRC_COMMANDS_H_
 
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace jack {
-
 namespace fs = std::filesystem;
 
-std::string OpenLastPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                           const fs::path& last_picker_state_file);
+struct CommandOutput {
+  std::vector<std::string> user_selections{};
+  std::string user_query{};
+};
 
-std::string OpenFilePicker(const fs::path& file_filter_file, const std::string& query);
+std::optional<CommandOutput> OpenLastPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                                            const fs::path& last_picker_state_file);
 
-std::string OpenContentPicker(const fs::path& file_filter_file, const std::string& query);
+CommandOutput OpenFilePicker(const fs::path& file_filter_file, const std::string& query);
 
-std::string OpenSymbolPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                             const std::string& query, const fs::path& file);
+CommandOutput OpenContentPicker(const fs::path& file_filter_file, const std::string& query);
 
-std::string GoToDefinition(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                           const std::string& symbol);
+CommandOutput OpenSymbolPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                               const std::string& query, const fs::path& file);
 
-std::string ShowReferences(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                           const std::string& symbol);
+CommandOutput GoToDefinition(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                             const std::string& symbol);
+
+CommandOutput ShowReferences(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                             const std::string& symbol);
 
 } // namespace jack
 
