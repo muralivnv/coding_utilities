@@ -98,6 +98,10 @@ void OpenFilesInEditor(const CommandOutput& output, std::string_view parent_id) 
 void WriteState(const fs::path& last_picker_state_file,
                 std::string_view name, std::string_view query,
                 const std::optional<fs::path>& file = std::nullopt) {
+  const fs::path dir = last_picker_state_file.parent_path();
+  if (!fs::exists(dir)) {
+    fs::create_directory(dir);
+  }
   std::ofstream state_file(last_picker_state_file);
   if (state_file.is_open()) {
     state_file << name << " " << "--query " << query;
@@ -238,7 +242,7 @@ Options:
     jack::SetEnv();
     const fs::path file_filter_file       = jack::FindAlternatives("file-filter.txt");
     const fs::path treesitter_tags_file   = jack::FindAlternatives("treesitter-tags.txt");
-    const fs::path last_picker_state_file = fs::path(".ronin") / "last-picker-state.txt";
+    const fs::path last_picker_state_file{".ronin/last-picker-state.txt"};
 
     if (cli.Has("--open-last-picker")) {
       jack::OpenLastPicker(file_filter_file, treesitter_tags_file, last_picker_state_file, cli);
