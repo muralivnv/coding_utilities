@@ -30,8 +30,8 @@ std::string ShellExec(const char* cmd) {
   static std::array<char, 256> buffer;
   FILE* pipe = popen(cmd, "r");
   if (!pipe) {
-    std::string_view error_msg = common::FormatIntoStringView<"popen failed to start command.\nCommand: %?">(cmd);
-    throw std::runtime_error(std::string(error_msg));    
+    const char* error_msg = common::FormatIntoCString<"popen failed to start command.\nCommand: %?">(cmd);
+    throw std::runtime_error(error_msg);    
   }
 
   std::string result;
@@ -40,9 +40,9 @@ std::string ShellExec(const char* cmd) {
   }
   int status = pclose(pipe);
   if (status != 0) {
-    std::string_view error_msg = common::FormatIntoStringView<"Command failed with status %d.\nCommand: %?">(
-                                                              WEXITSTATUS(status),cmd);
-    throw std::runtime_error(std::string(error_msg));
+    const char* error_msg = common::FormatIntoCString<"Command failed with status %d.\nCommand: %?">(
+                                                      WEXITSTATUS(status),cmd);
+    throw std::runtime_error(error_msg);
   }
   return result;
 }

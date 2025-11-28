@@ -33,8 +33,8 @@ fs::path FindAlternatives(const fs::path& file) {
   if (fs::is_regular_file(global)) {
     return global;
   }
-  std::string_view error_msg = common::FormatIntoStringView<"Cannot find file '%s' at .ronin and $HOME/.config/ronin">(file);
-  throw std::runtime_error(std::string{error_msg});
+  const char* error_msg = common::FormatIntoCString<"Cannot find file '%s' at .ronin and $HOME/.config/ronin">(file);
+  throw std::runtime_error(error_msg);
 }
 
 std::optional<FileLineCol> ToFileLineCol(std::string_view content) {

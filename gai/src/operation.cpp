@@ -89,8 +89,8 @@ std::optional<Pcre2Substitution> ParseSub(std::string_view expr, bool jit, bool 
   if (parts.size() == 2) {
     out.emplace(Compile(parts[0], jit, utf), parts[1]);
   } else {
-    std::string_view error_msg = common::FormatIntoStringView<"Invalid substitute expression passed.\nExpression: %s\n">(expr);
-    throw std::runtime_error(std::string(error_msg));
+    const char* error_msg = common::FormatIntoCString<"Invalid substitute expression passed.\nExpression: %s\n">(expr);
+    throw std::runtime_error(error_msg);
   }
   return out;
 }
@@ -133,8 +133,8 @@ std::optional<Range> ParseRange(std::string_view expr, bool jit, bool utf) {
     r.end = parse_value(parts[1]);
     out = std::move(r);
   } else {
-    std::string_view error_msg = common::FormatIntoStringView<"Invalid range expression passed.\nExpression: %s\n">(expr);
-    throw std::runtime_error(std::string(error_msg));
+    const char* error_msg = common::FormatIntoCString<"Invalid range expression passed.\nExpression: %s\n">(expr);
+    throw std::runtime_error(error_msg);
   }
   return out;
 }
