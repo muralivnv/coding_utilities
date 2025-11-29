@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <optional>
 
 namespace jack {
 namespace fs = std::filesystem;
@@ -14,18 +15,18 @@ struct CommandOutput {
   std::string storage;
 };
 
-CommandOutput OpenFilePicker(const fs::path& file_filter_file, const std::string& query);
+std::optional<CommandOutput> OpenFilePicker(const fs::path& file_filter_file, const std::string& query);
 
-CommandOutput OpenContentPicker(const fs::path& file_filter_file, const std::string& query);
+std::optional<CommandOutput> OpenContentPicker(const fs::path& file_filter_file, const std::string& query);
 
-CommandOutput OpenSymbolPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                               const std::string& query, const fs::path& file);
+std::optional<CommandOutput> OpenSymbolPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                                              const std::string& query, const fs::path& file);
 
-CommandOutput GoToDefinition(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                             const std::string& symbol);
+std::optional<CommandOutput> GoToDefinition(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                                            const std::string& symbol);
 
-CommandOutput ShowReferences(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                             const std::string& symbol);
+std::optional<CommandOutput> ShowReferences(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                                            const std::string& symbol);
 
 } // namespace jack
 

@@ -5,8 +5,13 @@
 
 namespace jack {
 
+struct ShellExecOutput {
+  std::string output{};
+  int exit_code{};
+};
+
 void SetEnv();
-std::string ShellExec(const char* cmd);
+ShellExecOutput ShellExec(const char* cmd);
 
 } // namespace jack
 

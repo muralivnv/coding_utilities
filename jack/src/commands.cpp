@@ -9,10 +9,11 @@ namespace jack {
 
 using namespace std::string_view_literals;
 
-constexpr const char * FZF_COMMAND = "fzf --ansi --border -i --preview 'bat {1} --highlight-line {2}' --preview-window 'right,+{2}+3/3,~3' "
+constexpr const char * kFzfCommand = "fzf --ansi --border -i --preview 'bat {1} --highlight-line {2}' --preview-window 'right,+{2}+3/3,~3' "
                                      "--delimiter '@' --scrollbar '▍' "
                                      "--nth=-1 --bind=tab:down,shift-tab:up --smart-case --cycle "
                                      "--style=full:line --layout=reverse --print-query";
+constexpr int kFzfIgnorableRetCode = 130;
 
 static std::vector<std::string_view> Split(std::string_view data, char delim) {
   std::vector<std::string_view> out{};
@@ -28,8 +29,9 @@ static std::vector<std::string_view> Split(std::string_view data, char delim) {
   return out;
 }
 
-static CommandOutput ParseQueryAndSelection(const std::string& output) {
-  CommandOutput retval;   
+static std::optional<CommandOutput> ParseQueryAndSelection(const std::string& output) {
+  if (output.empty()) return std::nullopt;
+  CommandOutput retval;
   retval.storage = output;
   if (retval.storage.empty()) {
     return retval;
@@ -38,7 +40,6 @@ static CommandOutput ParseQueryAndSelection(const std::string& output) {
   if (lines.empty()) {
     return retval;
   }
-
   if (lines.size() == 1) {
     retval.user_selections.push_back(lines[0]);
   } else {
@@ -47,7 +48,6 @@ static CommandOutput ParseQueryAndSelection(const std::string& output) {
       retval.user_selections.push_back(lines[i]);
     }
   }
-
   return retval;
 }
 
@@ -104,49 +104,76 @@ std::string Quote(const std::string &s) {
   return result;
 }
 
-CommandOutput OpenFilePicker(const fs::path& file_filter_file, const std::string& query) {
+std::optional<CommandOutput> OpenFilePicker(const fs::path& file_filter_file, const std::string& query) {
   const char* cmd = common::FormatIntoCString<"bash %s | gai -r '/(\\S+)/$1@1/' | %s --nth=1 --tiebreak=pathname --query=%s">(
-                                              file_filter_file, FZF_COMMAND, Quote(query));
-  std::string output = ShellExec(cmd);
-  return ParseQueryAndSelection(output);
+                                              file_filter_file, kFzfCommand, Quote(query));
+  ShellExecOutput output = ShellExec(cmd);
+  if ((output.exit_code != kFzfIgnorableRetCode) && (output.exit_code != 0)) {
+    const char* error_msg = common::FormatIntoCString<"Command failed with status %d.\nCommand: %?">(
+                                                      output.exit_code, cmd);
+    throw std::runtime_error(error_msg);
+  }
+  return ParseQueryAndSelection(output.output);
 }
 
-CommandOutput OpenContentPicker(const fs::path& file_filter_file, const std::string& query) {
+std::optional<CommandOutput> OpenContentPicker(const fs::path& file_filter_file, const std::string& query) {
   const char* cmd = common::FormatIntoCString<"bash %s | xargs gai -f '\\w' -v -d @ --files | %s --tiebreak=begin --query=%s">(
-                                              file_filter_file, FZF_COMMAND, Quote(query));
-  std::string output = ShellExec(cmd);
-  return ParseQueryAndSelection(output);
+                                              file_filter_file, kFzfCommand, Quote(query));
+  ShellExecOutput output = ShellExec(cmd);
+  if ((output.exit_code != kFzfIgnorableRetCode) && (output.exit_code != 0)) {
+    const char* error_msg = common::FormatIntoCString<"Command failed with status %d.\nCommand: %?">(
+                                                      output.exit_code, cmd);
+    throw std::runtime_error(error_msg);
+  }
+  return ParseQueryAndSelection(output.output);
 }
 
-CommandOutput OpenSymbolPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                               const std::string& query, const fs::path& file) {
-  std::string output;
+std::optional<CommandOutput> OpenSymbolPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                                              const std::string& query, const fs::path& file) {
+  ShellExecOutput output;
+  const char* cmd;
   if (file.empty()) { // open project wide symbol picker
-    const char* cmd = common::FormatIntoCString<"bash %s | xargs sakura --config %s --definitions --files | %s --query=%s">(
-                                                file_filter_file, treesitter_tags_file, FZF_COMMAND, Quote(query));
+    cmd = common::FormatIntoCString<"bash %s | xargs sakura --config %s --definitions --files | %s --query=%s">(
+                                    file_filter_file, treesitter_tags_file, kFzfCommand, Quote(query));
     output = ShellExec(cmd);
   } else { // open file symbol picker
-    const char* cmd = common::FormatIntoCString<"sakura --config %s --definitions --files %s | %s --with-nth=-1 --query=%s">(
-                                                treesitter_tags_file, file, FZF_COMMAND, Quote(query));
+    cmd = common::FormatIntoCString<"sakura --config %s --definitions --files %s | %s --with-nth=-1 --query=%s">(
+                                    treesitter_tags_file, file, kFzfCommand, Quote(query));
     output = ShellExec(cmd);
   }
-  return ParseQueryAndSelection(output);
+
+  if ((output.exit_code != kFzfIgnorableRetCode) && (output.exit_code != 0)) {
+    const char* error_msg = common::FormatIntoCString<"Command failed with status %d.\nCommand: %?">(
+                                                      output.exit_code,cmd);
+    throw std::runtime_error(error_msg);
+  }
+  return ParseQueryAndSelection(output.output);
 }
 
-CommandOutput GoToDefinition(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                             const std::string& symbol) {
+std::optional<CommandOutput> GoToDefinition(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                                            const std::string& symbol) {
   const char* cmd = common::FormatIntoCString<"bash %s | xargs sakura --config %s --definitions --files | gai -f '\\b%s\\b' | ifne %s --query=%s --select-1 --exit-0">(
-                                              file_filter_file, treesitter_tags_file, symbol, FZF_COMMAND, Quote(symbol));
-  std::string output = ShellExec(cmd);
-  return ParseQueryAndSelection(output);
+                                              file_filter_file, treesitter_tags_file, symbol, kFzfCommand, Quote(symbol));
+  ShellExecOutput output = ShellExec(cmd);
+  if ((output.exit_code != kFzfIgnorableRetCode) && (output.exit_code != 0)) {
+    const char* error_msg = common::FormatIntoCString<"Command failed with status %d.\nCommand: %?">(
+                                                      output.exit_code, cmd);
+    throw std::runtime_error(error_msg);
+  }
+  return ParseQueryAndSelection(output.output);
 }
 
-CommandOutput ShowReferences(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
-                             const std::string& symbol) {
+std::optional<CommandOutput> ShowReferences(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,
+                                            const std::string& symbol) {
   const char* cmd = common::FormatIntoCString<"bash %s | xargs sakura --config %s --definitions --references --files | gai -f '\\b%s\\b' | ifne %s --query=%s">(
-                                              file_filter_file, treesitter_tags_file, symbol, FZF_COMMAND, Quote(symbol));
-  std::string output = ShellExec(cmd);
-  return ParseQueryAndSelection(output);
+                                              file_filter_file, treesitter_tags_file, symbol, kFzfCommand, Quote(symbol));
+  ShellExecOutput output = ShellExec(cmd);
+  if ((output.exit_code != kFzfIgnorableRetCode) && (output.exit_code != 0)) {
+    const char* error_msg = common::FormatIntoCString<"Command failed with status %d.\nCommand: %?">(
+                                                      output.exit_code, cmd);
+    throw std::runtime_error(error_msg);
+  }
+  return ParseQueryAndSelection(output.output);
 }
 
 } // namespace jack

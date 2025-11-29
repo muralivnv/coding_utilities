@@ -120,37 +120,39 @@ void OpenPicker(const fs::path& file_filter_file, const fs::path& treesitter_tag
   const fs::path file{cli.Value({"--file"}).value_or(std::string_view{""})};
   const std::string query{cli.Value({"--query"}).value_or(std::string_view{" "})};
 
-  jack::CommandOutput out;
+  std::optional<jack::CommandOutput> out{std::nullopt};
   if (cli.Has("--open-file-picker")) {
      out = jack::OpenFilePicker(file_filter_file, query);
-     WriteState(last_picker_state_file, "--open-file-picker", out.user_query);
+     if (out) WriteState(last_picker_state_file, "--open-file-picker", out->user_query);
 
   } else if (cli.Has("--open-content-picker")) {
     out = jack::OpenContentPicker(file_filter_file, query);
-    WriteState(last_picker_state_file, "--open-content-picker", out.user_query);
+    if (out) WriteState(last_picker_state_file, "--open-content-picker", out->user_query);
 
   } else if (cli.Has("--open-symbol-picker")) {
     out = jack::OpenSymbolPicker(file_filter_file, treesitter_tags_file, query, file);
-    WriteState(last_picker_state_file, "--open-symbol-picker", out.user_query, file);
+    if (out) WriteState(last_picker_state_file, "--open-symbol-picker", out->user_query, file);
 
   } else if (cli.Has("--goto-definition")) {
     if (query.empty()) {
       throw std::runtime_error("input --query is empty for --goto-definition");
     }
     out = jack::GoToDefinition(file_filter_file, treesitter_tags_file, query);
-    WriteState(last_picker_state_file, "--goto-definition", out.user_query);
+    if (out) WriteState(last_picker_state_file, "--goto-definition", out->user_query);
 
   } else if (cli.Has("--show-references")) {
     if (query.empty()) {
       throw std::runtime_error("input --query is empty for --show-references");
     }
     out = jack::ShowReferences(file_filter_file, treesitter_tags_file, query);
-    WriteState(last_picker_state_file, "--show-references", out.user_query);
+    if (out) WriteState(last_picker_state_file, "--show-references", out->user_query);
   }
+
+  if (!out) return;
 
   // NOTE: Whether parent-id is passed or not is checked in main.
   // so it is safe to be used with 'value_or' here
-  OpenFilesInEditor(out, cli.Value({"--parent-id"}).value_or(std::string_view{"0"}));
+  OpenFilesInEditor(*out, cli.Value({"--parent-id"}).value_or(std::string_view{"0"}));
 }
 
 void OpenLastPicker(const fs::path& file_filter_file, const fs::path& treesitter_tags_file,

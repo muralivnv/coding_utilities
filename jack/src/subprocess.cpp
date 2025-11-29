@@ -6,6 +6,7 @@
 #include <filesystem>
 
 #include "format.h"
+#include "subprocess.h"
 
 namespace fs = std::filesystem;
 namespace jack {
@@ -26,7 +27,9 @@ void SetEnv() {
   }
 }
 
-std::string ShellExec(const char* cmd) {
+ShellExecOutput ShellExec(const char* cmd) {
+  ShellExecOutput result;
+
   static std::array<char, 256> buffer;
   FILE* pipe = popen(cmd, "r");
   if (!pipe) {
@@ -34,16 +37,11 @@ std::string ShellExec(const char* cmd) {
     throw std::runtime_error(error_msg);    
   }
 
-  std::string result;
   while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
-    result += buffer.data();
+    result.output += buffer.data();
   }
-  int status = pclose(pipe);
-  if (status != 0) {
-    const char* error_msg = common::FormatIntoCString<"Command failed with status %d.\nCommand: %?">(
-                                                      WEXITSTATUS(status),cmd);
-    throw std::runtime_error(error_msg);
-  }
+  result.exit_code = pclose(pipe);
+  result.exit_code = WEXITSTATUS(result.exit_code);
   return result;
 }
 
