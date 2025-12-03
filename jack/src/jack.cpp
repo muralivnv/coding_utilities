@@ -84,7 +84,8 @@ std::optional<FileLineCol> ToFileLineCol(std::string_view content) {
 void OpenFilesInEditor(const CommandOutput& output, std::string_view parent_id) {
   const char* cmd = common::FormatIntoCString<"swaymsg '[con_id=%s] focus'">(parent_id);
   std::ignore = ShellExec(cmd);
-  for (std::string_view selection : output.user_selections) {
+  for (size_t i = 0; i < output.user_selections.size(); i++) {
+    std::string_view selection = output.GetUserSelection(i);
     const std::optional<FileLineCol> parsed = ToFileLineCol(selection);
     if (parsed.has_value()) {
       cmd = common::FormatIntoCString<"wlrctl keyboard type ':open %s:%s:%s'">(parsed->file,
@@ -123,29 +124,29 @@ void OpenPicker(const fs::path& file_filter_file, const fs::path& treesitter_tag
   std::optional<jack::CommandOutput> out{std::nullopt};
   if (cli.Has("--open-file-picker")) {
      out = jack::OpenFilePicker(file_filter_file, query);
-     if (out) WriteState(last_picker_state_file, "--open-file-picker", out->user_query);
+     if (out) WriteState(last_picker_state_file, "--open-file-picker", out->GetUserQuery());
 
   } else if (cli.Has("--open-content-picker")) {
     out = jack::OpenContentPicker(file_filter_file, query);
-    if (out) WriteState(last_picker_state_file, "--open-content-picker", out->user_query);
+    if (out) WriteState(last_picker_state_file, "--open-content-picker", out->GetUserQuery());
 
   } else if (cli.Has("--open-symbol-picker")) {
     out = jack::OpenSymbolPicker(file_filter_file, treesitter_tags_file, query, file);
-    if (out) WriteState(last_picker_state_file, "--open-symbol-picker", out->user_query, file);
+    if (out) WriteState(last_picker_state_file, "--open-symbol-picker", out->GetUserQuery(), file);
 
   } else if (cli.Has("--goto-definition")) {
     if (query.empty()) {
       throw std::runtime_error("input --query is empty for --goto-definition");
     }
     out = jack::GoToDefinition(file_filter_file, treesitter_tags_file, query);
-    if (out) WriteState(last_picker_state_file, "--goto-definition", out->user_query);
+    if (out) WriteState(last_picker_state_file, "--goto-definition", out->GetUserQuery());
 
   } else if (cli.Has("--show-references")) {
     if (query.empty()) {
       throw std::runtime_error("input --query is empty for --show-references");
     }
     out = jack::ShowReferences(file_filter_file, treesitter_tags_file, query);
-    if (out) WriteState(last_picker_state_file, "--show-references", out->user_query);
+    if (out) WriteState(last_picker_state_file, "--show-references", out->GetUserQuery());
   }
 
   if (!out) return;

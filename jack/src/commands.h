@@ -10,9 +10,16 @@ namespace jack {
 namespace fs = std::filesystem;
 
 struct CommandOutput {
-  std::vector<std::string_view> user_selections{};
-  std::string_view user_query{};
+  struct Span {
+    size_t start_offset{};
+    size_t length{};
+  };
+  std::vector<Span> user_selections{};
+  std::optional<Span> user_query{std::nullopt};
   std::string storage;
+
+  std::string_view GetUserSelection(size_t index) const;
+  std::string_view GetUserQuery() const;
 };
 
 std::optional<CommandOutput> OpenFilePicker(const fs::path& file_filter_file, const std::string& query);

@@ -36,16 +36,26 @@ static std::optional<CommandOutput> ParseQueryAndSelection(const std::string& ou
   if (retval.storage.empty()) {
     return retval;
   }
-  const std::vector<std::string_view> lines = Split(retval.storage, '\n');
-  if (lines.empty()) {
+
+  // split by new lines
+  std::vector<CommandOutput::Span> line_spans;
+  size_t start = 0;
+  while (start < retval.storage.size()) {
+    const size_t end = retval.storage.find('\n', start);
+    if (end == std::string_view::npos) break;
+    line_spans.push_back({start, end - start});
+    start = end + 1;
+  }
+
+  if (line_spans.empty()) {
     return retval;
   }
-  if (lines.size() == 1) {
-    retval.user_selections.push_back(lines[0]);
+  if (line_spans.size() == 1) {
+    retval.user_selections.push_back(line_spans[0]);
   } else {
-    retval.user_query = lines[0];
-    for (size_t i = 1; i < lines.size(); ++i) {
-      retval.user_selections.push_back(lines[i]);
+    retval.user_query = line_spans[0];
+    for (size_t i = 1; i < line_spans.size(); ++i) {
+      retval.user_selections.push_back(line_spans[i]);
     }
   }
   return retval;
@@ -102,6 +112,16 @@ std::string Quote(const std::string &s) {
   }
   result.push_back('\'');
   return result;
+}
+
+std::string_view CommandOutput::GetUserSelection(size_t index) const {
+  const CommandOutput::Span& span = user_selections[index];
+  return std::string_view{storage.data() + span.start_offset, span.length};
+}
+
+std::string_view CommandOutput::GetUserQuery() const {
+  if (!user_query) return {};
+  return std::string_view{storage.data() + user_query->start_offset, user_query->length};
 }
 
 std::optional<CommandOutput> OpenFilePicker(const fs::path& file_filter_file, const std::string& query) {
