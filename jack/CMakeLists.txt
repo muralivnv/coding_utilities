@@ -1,3 +1,5 @@
-add_executable(jack src/subprocess.cpp src/commands.cpp src/jack.cpp)
-target_link_libraries(jack PRIVATE external_libs common)
-target_compile_options(jack PRIVATE ${ADDITIONAL_COMPILER_FLAGS})
+add_custom_target(jack ALL
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/jack
+        ${CMAKE_CURRENT_BINARY_DIR}/jack
+)
