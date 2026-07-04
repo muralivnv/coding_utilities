@@ -1,0 +1,111 @@
+{
+  "nodes": {
+    "mio": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1677836220,
+        "narHash": "sha256-j/wbjyI2v/BsFz2RKi8ZxMKuT+7o5uI4I4yIkUran7I=",
+        "type": "tarball",
+        "url": "https://github.com/vimpunk/mio/archive/8b6b7d878c89e81614d05edca7936de41ccdd2da.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://github.com/vimpunk/mio/archive/8b6b7d878c89e81614d05edca7936de41ccdd2da.tar.gz"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1782847225,
+        "narHash": "sha256-JC9PjqKYG9ve5U8aDOLQipp3+KLANBHUvGdLZlxzdKI=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "95ca1e203c0750115fd4a6f17d5a245dfe6b1edd",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-26.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "pcre2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1760960119,
+        "narHash": "sha256-9CMcfLcwYIt1Qc1twW2hdje2Gd717yhF6I5/xF3OijU=",
+        "type": "tarball",
+        "url": "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.47/pcre2-10.47.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.47/pcre2-10.47.tar.gz"
+      }
+    },
+    "root": {
+      "inputs": {
+        "mio": "mio",
+        "nixpkgs": "nixpkgs",
+        "pcre2": "pcre2",
+        "treesitter": "treesitter",
+        "treesitterC": "treesitterC",
+        "treesitterCpp": "treesitterCpp",
+        "treesitterPy": "treesitterPy"
+      }
+    },
+    "treesitter": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1758577976,
+        "narHash": "sha256-aHszbvLCLqCwAS4F4UmM3wbSb81QuG9FM7BDHTu1ZvM=",
+        "type": "tarball",
+        "url": "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v0.25.10.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v0.25.10.tar.gz"
+      }
+    },
+    "treesitterC": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1748107752,
+        "narHash": "sha256-gmzbdwvrKSo6C1fqTJFGxy8x0+T+vUTswm7F5sojzKc=",
+        "type": "tarball",
+        "url": "https://github.com/tree-sitter/tree-sitter-c/archive/refs/tags/v0.24.1.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://github.com/tree-sitter/tree-sitter-c/archive/refs/tags/v0.24.1.tar.gz"
+      }
+    },
+    "treesitterCpp": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1731308204,
+        "narHash": "sha256-tP5Tu747V8QMCEBYwOEmMQUm8OjojpJdlRmjcJTbe2k=",
+        "type": "tarball",
+        "url": "https://github.com/tree-sitter/tree-sitter-cpp/archive/refs/tags/v0.23.4.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://github.com/tree-sitter/tree-sitter-cpp/archive/refs/tags/v0.23.4.tar.gz"
+      }
+    },
+    "treesitterPy": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1757573117,
+        "narHash": "sha256-F5XH21PjPpbwYylgKdwD3MZ5o0amDt4xf/e5UikPcxY=",
+        "type": "tarball",
+        "url": "https://github.com/tree-sitter/tree-sitter-python/archive/refs/tags/v0.25.0.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://github.com/tree-sitter/tree-sitter-python/archive/refs/tags/v0.25.0.tar.gz"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

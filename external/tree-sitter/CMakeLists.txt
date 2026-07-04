@@ -1,82 +1,65 @@
-CPMAddPackage(
-  NAME tree-sitter
-  GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter.git
-  VERSION 0.25.10
-  DOWNLOAD_ONLY YES
-)
-
-if (tree-sitter_ADDED)
-  add_library(tree-sitter STATIC)
-  target_sources(tree-sitter
-    PRIVATE
-      "${tree-sitter_SOURCE_DIR}/lib/src/lib.c"
-  )
-  target_include_directories(tree-sitter
-    PRIVATE
-      $<BUILD_INTERFACE:${tree-sitter_SOURCE_DIR}/lib/src>
-    PUBLIC
-      $<INSTALL_INTERFACE:include>
-      $<BUILD_INTERFACE:${tree-sitter_SOURCE_DIR}/lib/include>
-  )
-
+# --- Tree-sitter Core ---
+if(DEFINED TREE_SITTER_SOURCE_DIR)
+    add_library(tree-sitter STATIC)
+    target_sources(tree-sitter
+        PRIVATE
+            "${TREE_SITTER_SOURCE_DIR}/lib/src/lib.c"
+    )
+    target_include_directories(tree-sitter
+        PRIVATE
+            $<BUILD_INTERFACE:${TREE_SITTER_SOURCE_DIR}/lib/src>
+        PUBLIC
+            $<INSTALL_INTERFACE:include>
+            $<BUILD_INTERFACE:${TREE_SITTER_SOURCE_DIR}/lib/include>
+    )
+else()
+    message(FATAL_ERROR "TREE_SITTER_SOURCE_DIR not defined. Build with Nix.")
 endif()
 
-
-function(add_grammar_from_repo NAME REPO VERSION)
-  CPMAddPackage(
-    NAME ${NAME}
-    GIT_REPOSITORY ${REPO}
-    VERSION ${VERSION}
-    DOWNLOAD_ONLY YES
-  )
-
-  if ("${${NAME}_ADDED}")
+# --- Helper Function Replacement ---
+# Instead of CPM, we expect the path to be passed via cmakeFlags
+function(add_grammar_from_nix NAME SOURCE_DIR)
     add_library(${NAME} STATIC)
 
-    file(GLOB maybe_scanner "${${NAME}_SOURCE_DIR}/src/scanner.c")
+    # Check for scanner.c (optional)
+    file(GLOB maybe_scanner "${SOURCE_DIR}/src/scanner.c")
+
     target_sources(${NAME}
-      PRIVATE
-        "${${NAME}_SOURCE_DIR}/src/parser.c"
-        ${maybe_scanner}
+        PRIVATE
+            "${SOURCE_DIR}/src/parser.c"
+            ${maybe_scanner}
     )
     target_include_directories(${NAME}
-      PRIVATE
-        # parser.h is stored within the src directory, so we need to include
-        # src in the search paths
-        $<BUILD_INTERFACE:${${NAME}_SOURCE_DIR}/src>
-      PUBLIC
-        $<INSTALL_INTERFACE:include>
+        PRIVATE
+            $<BUILD_INTERFACE:${SOURCE_DIR}/src>
+        PUBLIC
+            $<INSTALL_INTERFACE:include>
     )
 
     target_link_libraries(${NAME}
-      INTERFACE
-        tree-sitter)
+        INTERFACE
+            tree-sitter)
+endfunction()
 
-  endif()
-endfunction(add_grammar_from_repo)
+# --- Load Grammars ---
+add_grammar_from_nix(tree-sitter-c      ${TREE_SITTER_C_SOURCE_DIR})
+add_grammar_from_nix(tree-sitter-cpp    ${TREE_SITTER_CPP_SOURCE_DIR})
+add_grammar_from_nix(tree-sitter-python ${TREE_SITTER_PYTHON_SOURCE_DIR})
 
-
+# --- Interfaces (Same as before) ---
 add_library(tree-sitter-core INTERFACE)
 target_include_directories(tree-sitter-core
-  INTERFACE
-    $<INSTALL_INTERFACE:include>
+    INTERFACE
+        $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(tree-sitter-core
-  INTERFACE
-    tree-sitter
+    INTERFACE
+        tree-sitter
 )
 
-################################ Language Parsers ###################################
-#####################################################################################
-add_grammar_from_repo(tree-sitter-c      https://github.com/tree-sitter/tree-sitter-c         0.24.1)
-add_grammar_from_repo(tree-sitter-cpp    https://github.com/tree-sitter/tree-sitter-cpp       0.23.4)
-add_grammar_from_repo(tree-sitter-python https://github.com/tree-sitter/tree-sitter-python    0.25.0)
-
-################################# LANGUAGE INTERFACE ################################
-#####################################################################################
 add_library(tree-sitter-parsers INTERFACE)
 target_link_libraries(tree-sitter-parsers
                       INTERFACE
                         tree-sitter-c
                         tree-sitter-cpp
-                        tree-sitter-python)
+                        tree-sitter-python)   
