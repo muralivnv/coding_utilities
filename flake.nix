@@ -27,14 +27,14 @@
       cmakeCmd = "cmake -B build . -DCMAKE_BUILD_TYPE=Release -GNinja ${depFlags} -DMIO_SOURCE_DIR=${mio} -DPCRE2_SOURCE_DIR=${pcre2} -DTREE_SITTER_SOURCE_DIR=${treesitter} -DTREE_SITTER_C_SOURCE_DIR=${treesitterC} -DTREE_SITTER_CPP_SOURCE_DIR=${treesitterCpp} -DTREE_SITTER_PYTHON_SOURCE_DIR=${treesitterPy}";
 
     in {
-      packages.${system}.default = pkgs.stdenv.mkDerivation {
+      packages.${system}.default = pkgs.stdenvNoCC.mkDerivation {
         pname = "coding-utilities";
         version = "0.1.0";
         src = self;
 
         inherit mio pcre2 treesitter treesitterC treesitterCpp treesitterPy;
 
-        nativeBuildInputs = with pkgs; [ cmake ninja zig_0_15 ];
+        nativeBuildInputs = with pkgs; [ cmake ninja bintools zig_0_15 ];
         buildInputs = with pkgs; [ bash ];
 
         configurePhase = ''
