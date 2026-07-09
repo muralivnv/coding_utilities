@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstring>
 #include "input.h"
 
 namespace gai {

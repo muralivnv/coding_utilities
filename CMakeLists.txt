@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 4.1.0)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_BINARY_DIR}")
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_BINARY_DIR}")
@@ -17,7 +17,7 @@ set(COMMON_FLAGS -fPIC -Wall -Wpedantic -Wextra -Wfloat-equal
     -Wno-missing-field-initializers)
 
 set(DEBUG_COMPILER_FLAGS ${COMMON_FLAGS} -g3 -O0 -fno-omit-frame-pointer)
-set(RELEASE_COMPILER_FLAGS ${COMMON_FLAGS} -O3 -msse4.2 -mavx2 -march=native -flto)
+set(RELEASE_COMPILER_FLAGS ${COMMON_FLAGS} -O3 -msse4.2 -mavx2)
 set(ADDITIONAL_COMPILER_FLAGS -Werror -Wshadow -Wimplicit-fallthrough -DPCRE2_CODE_UNIT_WIDTH=8 -DPROJECT_VERSION="${PROJECT_VERSION}")
 
 add_compile_options(

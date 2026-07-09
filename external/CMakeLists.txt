@@ -1,11 +1,11 @@
 if(DEFINED PCRE2_SOURCE_DIR)
-    add_subdirectory(${PCRE2_SOURCE_DIR} pcre2_build)
+    add_subdirectory(${PCRE2_SOURCE_DIR} pcre2_build SYSTEM)
 else()
     message(FATAL_ERROR "PCRE2 source not provided")
 endif()
 
 if(DEFINED MIO_SOURCE_DIR)
-    add_subdirectory(${MIO_SOURCE_DIR} mio_build)
+    add_subdirectory(${MIO_SOURCE_DIR} mio_build SYSTEM)
 else()
     message(FATAL_ERROR "Mio source not provided")
 endif()

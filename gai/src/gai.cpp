@@ -124,9 +124,14 @@ Options:
       gai::Process(filters, excludes, replacements, fn, range, &stream);
     } else {
       for (const std::string_view& f : files) {
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
         mio::mmap_source contents;
         std::error_code ec;
         contents.map(f, ec);
+#pragma GCC diagnostic pop;
+
         if (ec) continue;
 
         gai::InputMemMappedFile mmap_stream(contents.begin(), contents.end());

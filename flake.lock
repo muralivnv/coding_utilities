@@ -15,11 +15,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1783148766,
-        "narHash": "sha256-uslt2pqShTIXDdAHRHv2QkYLsVdY8Oqwz0EA48/RSM8=",
+        "lastModified": 1783389287,
+        "narHash": "sha256-0xIy4dVLqq47rA+mRy0hXDfjhQd4E5PoIns/RmB7nR4=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "a50de1b7d8a586adc18d2395c19de7d6058e6030",
+        "rev": "0ad6f47ea4fe188f4bc8f0380f93ae8523337c6c",
         "type": "github"
       },
       "original": {
@@ -56,27 +56,27 @@
     "treesitter": {
       "flake": false,
       "locked": {
-        "lastModified": 1758577976,
-        "narHash": "sha256-aHszbvLCLqCwAS4F4UmM3wbSb81QuG9FM7BDHTu1ZvM=",
+        "lastModified": 1782661647,
+        "narHash": "sha256-91xKlMnmasmcWyB2cXYscSKZYCPen0EwNOdwHISBZvw=",
         "type": "tarball",
-        "url": "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v0.25.10.tar.gz"
+        "url": "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v0.26.10.tar.gz"
       },
       "original": {
         "type": "tarball",
-        "url": "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v0.25.10.tar.gz"
+        "url": "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v0.26.10.tar.gz"
       }
     },
     "treesitterC": {
       "flake": false,
       "locked": {
-        "lastModified": 1748107752,
-        "narHash": "sha256-gmzbdwvrKSo6C1fqTJFGxy8x0+T+vUTswm7F5sojzKc=",
+        "lastModified": 1776844996,
+        "narHash": "sha256-Juuf57GQI7OAP6O03KtSzyKJAoXtGKjyYJ+sTM1A4mU=",
         "type": "tarball",
-        "url": "https://github.com/tree-sitter/tree-sitter-c/archive/refs/tags/v0.24.1.tar.gz"
+        "url": "https://github.com/tree-sitter/tree-sitter-c/archive/refs/tags/v0.24.2.tar.gz"
       },
       "original": {
         "type": "tarball",
-        "url": "https://github.com/tree-sitter/tree-sitter-c/archive/refs/tags/v0.24.1.tar.gz"
+        "url": "https://github.com/tree-sitter/tree-sitter-c/archive/refs/tags/v0.24.2.tar.gz"
       }
     },
     "treesitterCpp": {
