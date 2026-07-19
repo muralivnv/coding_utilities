@@ -27,7 +27,7 @@
 
         inherit mio pcre2 treesitter treesitterC treesitterCpp treesitterPy;
 
-        nativeBuildInputs = with pkgs; [ cmake ninja ];
+        nativeBuildInputs = with pkgs; [ cmake ninja sqlite ];
         buildInputs = with pkgs; [ bash ];
 
         configurePhase = ''
@@ -42,6 +42,7 @@
           mkdir -p $out/bin
           cp build/gai/gai $out/bin/
           cp build/sakura/sakura $out/bin/
+          cp build/ghatothkacha/ghatothkacha $out/bin/
         '';
       };
 

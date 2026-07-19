@@ -1,4 +1,5 @@
 #include "args.h"
+#include <cctype>
 
 namespace common {
 
@@ -32,11 +33,19 @@ std::optional<std::string_view> Args::Value(const std::vector<std::string_view>&
 std::vector<std::string_view> Args::Impl(std::string_view key, bool parse_till_next_flag) const noexcept {
   std::vector<std::string_view> result;
   auto [start, end] = args_.equal_range(key);
+  
   for (auto it = start; it != end; it++) {
     size_t i = it->second + 1;
-    const size_t k = parse_till_next_flag  ? argv_.size() : std::min(i + 1, argv_.size());
+    const size_t k = parse_till_next_flag ? argv_.size() : std::min(i + 1, argv_.size());
+    
     for (; i < k; i++) {
-      if (argv_[i].starts_with('-')) break;
+      // Check if it starts with '-' AND is not a negative number
+      if (argv_[i].starts_with('-')) {
+        // If it's just "-" or the next char isn't a digit, it's a flag. Break out.
+        if (argv_[i].size() == 1 || !std::isdigit(static_cast<unsigned char>(argv_[i][1]))) {
+          break;
+        }
+      }
       result.push_back(argv_[i]);
     }
   }

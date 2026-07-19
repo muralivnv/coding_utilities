@@ -3,7 +3,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_BINARY_DIR}")
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_BINARY_DIR}")
 
-project(coding_utilities VERSION 26.07 LANGUAGES C CXX)
+project(coding_utilities VERSION 26.08 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,3 +35,4 @@ target_compile_options(common PRIVATE ${ADDITIONAL_COMPILER_FLAGS})
 
 add_subdirectory(sakura)
 add_subdirectory(gai)
+add_subdirectory(ghatothkacha)
