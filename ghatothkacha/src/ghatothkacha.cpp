@@ -19,6 +19,7 @@
 #include <pwd.h>
 #include <csignal>
 #include <cctype>
+#include <fcntl.h>
 
 #include "args.h"
 #include "format.h"
@@ -294,18 +295,28 @@ static void Daemon() {
   struct sockaddr_un addr;
   socklen_t addr_len;
   SetupSocket(addr, addr_len);
-  unlink(addr.sun_path);
 
-  // Temporarily set umask to 0177 (removes all permissions for group and others).
-  // This guarantees bind() creates the file as 0600 natively.
   mode_t old_mask = umask(0177); 
   int bind_result = bind(fd, (struct sockaddr*)&addr, addr_len);
 
-  // Restore the original umask immediately so we don't mess up SQLite file creation
+  // If the socket file exists, check if an active daemon is listening
+  if (bind_result < 0 && errno == EADDRINUSE) {
+    int test_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    char dummy = 0;
+    
+    // sendto returns -1 and sets errno to ECONNREFUSED if no one is listening on the other end
+    if (sendto(test_fd, &dummy, 0, 0, (struct sockaddr*)&addr, addr_len) < 0 && errno == ECONNREFUSED) {
+      // The socket is stale. Safe to unlink and re-bind.
+      unlink(addr.sun_path);
+      bind_result = bind(fd, (struct sockaddr*)&addr, addr_len);
+    }
+    close(test_fd);
+  }
   umask(old_mask); 
+
   if (bind_result < 0) {
     close(fd);
-    return;
+    return; // Daemon is actively running (or another unrecoverable error). Exit silently!
   }
 
   // SECURE THE SOCKET: Only the owner can read/write
@@ -400,10 +411,23 @@ static void SendToDaemon(const HistoryItem& item, bool is_update) {
   // MSG_DONTWAIT ensures our shell prompt NEVER hangs, even if the daemon is frozen
   ssize_t res = sendto(fd, payload.data(), payload_len, MSG_DONTWAIT, (struct sockaddr*)&addr, addr_len);
   
-  // ECONNREFUSED means the socket is completely dead (no daemon running)
-  if (res < 0 && errno == ECONNREFUSED) {
+  // Catch both dead processes (ECONNREFUSED) and missing socket files (ENOENT)
+  if (res < 0 && (errno == ECONNREFUSED || errno == ENOENT)) {
     if (fork() == 0) {
       setsid(); // Detach from the terminal
+
+      // Close the inherited socket file descriptor to prevent a leak
+      close(fd);
+
+      // Redirect standard streams to /dev/null so the daemon is completely detached
+      int dev_null = open("/dev/null", O_RDWR);
+      if (dev_null >= 0) {
+        dup2(dev_null, STDIN_FILENO);
+        dup2(dev_null, STDOUT_FILENO);
+        dup2(dev_null, STDERR_FILENO);
+        if (dev_null > STDERR_FILENO) close(dev_null);
+      }
+
       char exe_path[1024];
       ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
       if (len > 0) {
@@ -412,10 +436,12 @@ static void SendToDaemon(const HistoryItem& item, bool is_update) {
       }
       exit(EXIT_FAILURE);
     }
+
     // Parent process: give the daemon 10ms to bind, then retry ONCE
     usleep(10000); 
     sendto(fd, payload.data(), payload_len, MSG_DONTWAIT, (struct sockaddr*)&addr, addr_len);
   }
+
   // If res < 0 and errno == EAGAIN (buffer full / daemon stuck), we do nothing.
   // The command history is lost, but the user's terminal prompt remains fast and responsive. 
   close(fd);

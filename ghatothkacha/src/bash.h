@@ -8,11 +8,6 @@ namespace ghatothkacha {
 constexpr std::string_view kBashPreExec = R"bash(
   readonly GHATOTHKACHA_BIN="$(command -v ghatothkacha)"
 
-  # start the daemon, if the daemon is already running this command will exit silently
-  if [[ -n "$GHATOTHKACHA_BIN" ]]; then
-    "$GHATOTHKACHA_BIN" --daemon >/dev/null 2>&1 &
-  fi
-
   _history_preexec() {
       local ret_code=$?
       local cmd="$1"
@@ -148,9 +143,6 @@ _ghatothkacha_import_history() {
         echo "Error: ghatothkacha binary not found in PATH."
         return 1
     fi
-
-    # Ensure the daemon is running
-    "$bin_path" --daemon >/dev/null 2>&1 &
 
     local original_histtimeformat="${HISTTIMEFORMAT:-}"
     unset HISTTIMEFORMAT
