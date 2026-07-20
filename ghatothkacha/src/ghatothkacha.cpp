@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <charconv>
 #include <atomic>
+#include <vector>
+#include <optional>
 
 #include <sqlite3.h>
 
@@ -16,6 +18,7 @@
 #include <cerrno>
 #include <pwd.h>
 #include <csignal>
+#include <cctype>
 
 #include "args.h"
 #include "format.h"

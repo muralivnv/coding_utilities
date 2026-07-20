@@ -6,46 +6,58 @@
 namespace ghatothkacha {
 
 constexpr std::string_view kBashPreExec = R"bash(
+  readonly GHATOTHKACHA_BIN="$(command -v ghatothkacha)"
+
   # start the daemon, if the daemon is already running this command will exit silently
-  (command -v ghatothkacha >/dev/null && ghatothkacha --daemon &)
+  if [[ -n "$GHATOTHKACHA_BIN" ]]; then
+    "$GHATOTHKACHA_BIN" --daemon >/dev/null 2>&1 &
+  fi
 
   _history_preexec() {
       local ret_code=$?
+      local cmd="$1"
+  
+      [[ -z "$GHATOTHKACHA_BIN" ]] && return
 
       if [[ -n "${__MY_HIST_ID:-}" ]]; then
           local end_time=$(date +%s%N)
-          local bin_path=$(command -v ghatothkacha)
-          if [[ -n "$bin_path" ]]; then
-              "$bin_path" --update -i "$__MY_HIST_ID" -e "$end_time" -r "$ret_code"
-          fi
+          "$GHATOTHKACHA_BIN" --update -i "$__MY_HIST_ID" -e "$end_time" -r "$ret_code"
+          unset __MY_HIST_ID
+      fi
+
+      case "$cmd" in
+        "hx"|"hx ."|"vim"|"vi"|"clear"|"exit"|"ls"|"ls -al"|"ls -alh"| \
+        "chezmoi apply"|"chezmoi diff"|"chezmoi cd"|"reboot"|"logout"|"nano"| \
+        "cd"|"cd .."|"z"|"z .."|".."|"l"|"yy"|"yazi"|"htop"|"git status"| \
+        "git push"|"pwd"|"ghostty")
+            return 0
+            ;;
+      esac
+
+      # additional ignore list
+      if [[ -n "$GHATOTHKACHA_USER_IGNORE" ]] && [[ ":$GHATOTHKACHA_USER_IGNORE:" == *":$cmd:"* ]]; then
+          return 0
       fi
 
       if [[ -f /proc/sys/kernel/random/uuid ]]; then
-          export __MY_HIST_ID=$(cat /proc/sys/kernel/random/uuid)
+          export __MY_HIST_ID=$(< /proc/sys/kernel/random/uuid)
       else
           export __MY_HIST_ID=$(uuidgen)
       fi
-      
-      export __MY_HIST_START=$(date +%s%N)
-      export __MY_HIST_CMD="$1"
 
-      local bin_path=$(command -v ghatothkacha)
-      if [[ -n "$bin_path" ]]; then
-          "$bin_path" --insert -i "$__MY_HIST_ID" -c "$__MY_HIST_CMD" -d "$PWD" -s "$__MY_HIST_START"
-      fi
+      export __MY_HIST_START=$(date +%s%N)
+      export __MY_HIST_CMD="$cmd"
+      "$GHATOTHKACHA_BIN" --insert -i "$__MY_HIST_ID" -c "$__MY_HIST_CMD" -d "$PWD" -s "$__MY_HIST_START"
   }
 
   _history_precmd() {
-      local ret_code=$? 
-      if [[ -z "${__MY_HIST_ID:-}" ]]; then 
-          return
-      fi
+      local ret_code=$?
+      [[ -z "${__MY_HIST_ID:-}" ]] && return
 
       local end_time=$(date +%s%N)
-      local bin_path=$(command -v ghatothkacha)
 
-      if [[ -n "$bin_path" ]]; then
-          "$bin_path" --update -i "$__MY_HIST_ID" -e "$end_time" -r "$ret_code"
+      if [[ -n "$GHATOTHKACHA_BIN" ]]; then
+          "$GHATOTHKACHA_BIN" --update -i "$__MY_HIST_ID" -e "$end_time" -r "$ret_code"
       fi
       unset __MY_HIST_ID
       unset __MY_HIST_CMD
@@ -138,7 +150,7 @@ _ghatothkacha_import_history() {
     fi
 
     # Ensure the daemon is running
-    ("$bin_path" --daemon &)
+    "$bin_path" --daemon >/dev/null 2>&1 &
 
     local original_histtimeformat="${HISTTIMEFORMAT:-}"
     unset HISTTIMEFORMAT
@@ -159,7 +171,7 @@ _ghatothkacha_import_history() {
 
                 local id
                 if [[ -f /proc/sys/kernel/random/uuid ]]; then
-                    id=$(cat /proc/sys/kernel/random/uuid)
+                    id=$(< /proc/sys/kernel/random/uuid)
                 else
                     id=$(uuidgen)
                 fi
@@ -186,7 +198,7 @@ _ghatothkacha_import_history() {
         
         local id
         if [[ -f /proc/sys/kernel/random/uuid ]]; then
-            id=$(cat /proc/sys/kernel/random/uuid)
+            id=$(< /proc/sys/kernel/random/uuid)
         else
             id=$(uuidgen)
         fi
