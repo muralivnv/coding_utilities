@@ -4,15 +4,18 @@
 #include <string_view>
 #include <cstdint>
 #include <charconv>
+#include <atomic>
 
 #include <sqlite3.h>
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <cstring>
 #include <cerrno>
 #include <pwd.h>
+#include <csignal>
 
 #include "args.h"
 #include "format.h"
@@ -40,7 +43,8 @@ constexpr static std::string_view kDBSchema = R"sql(
 
 constexpr static std::string_view kDBFilename = "ghatothkacha_shell_history.db";
 constexpr char kDelimiter = '\x1F';
-constexpr const char* kSocketName = "ghatothkacha_daemon";
+constexpr const char* kSocketName = "/tmp/ghatothkacha_daemon";
+std::atomic<bool> g_daemon_running{true};
 
 auto kCloseDb = [](sqlite3* db) { sqlite3_close(db); };
 auto kFinalizeStmt = [](sqlite3_stmt* stmt) { sqlite3_finalize(stmt); };
@@ -56,6 +60,10 @@ struct HistoryItem {
   uint64_t end_timestamp_ns{0};
   int retcode{0};
 };
+
+static void SignalHandler(int /*signum*/) {
+  g_daemon_running = false;
+}
 
 static fs::path GetDatabasePath() {
   std::string path = "~/.local/share/ronin/";
@@ -271,13 +279,9 @@ static void SetupSocket(sockaddr_un& addr, socklen_t& addr_len) {
   memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
 
-  const char* scoped_socket = common::FormatIntoCString<"%s_%d">(kSocketName, getuid());
-
-  // First byte remains '\0' to denote an abstract socket
-  strncpy(addr.sun_path + 1, scoped_socket, sizeof(addr.sun_path) - 2);
-
-  // Calculate the exact length required for abstract sockets
-  addr_len = sizeof(sa_family_t) + 1 + strlen(scoped_socket);
+  const char* socket_path = common::FormatIntoCString<"%s_%d.sock">(kSocketName, getuid());
+  strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+  addr_len = sizeof(sa_family_t) + strlen(addr.sun_path);
 }
 
 static void Daemon() {
@@ -287,11 +291,22 @@ static void Daemon() {
   struct sockaddr_un addr;
   socklen_t addr_len;
   SetupSocket(addr, addr_len);
+  unlink(addr.sun_path);
 
-  if (bind(fd, (struct sockaddr*)&addr, addr_len) < 0) {
+  // Temporarily set umask to 0177 (removes all permissions for group and others).
+  // This guarantees bind() creates the file as 0600 natively.
+  mode_t old_mask = umask(0177); 
+  int bind_result = bind(fd, (struct sockaddr*)&addr, addr_len);
+
+  // Restore the original umask immediately so we don't mess up SQLite file creation
+  umask(old_mask); 
+  if (bind_result < 0) {
     close(fd);
     return;
   }
+
+  // SECURE THE SOCKET: Only the owner can read/write
+  chmod(addr.sun_path, 0600);
 
   SqliteDbPtr db_ptr = OpenDatabase(GetDatabasePath());
   if (!db_ptr) return;
@@ -300,9 +315,22 @@ static void Daemon() {
   SqliteStmtPtr update_stmt = PrepareUpdateStmt(db_ptr);
   if (!insert_stmt || !update_stmt) return;
 
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SignalHandler;
+  sigaction(SIGINT, &sa, nullptr);
+  sigaction(SIGTERM, &sa, nullptr);
+
   char buffer[65536]; 
-  while (true) {
+  while (g_daemon_running) {
     ssize_t bytes_read = recvfrom(fd, buffer, sizeof(buffer) - 1, 0, nullptr, nullptr);
+    if (bytes_read < 0) {
+      if (errno == EINTR) {
+        continue; // sigaction fired
+      }
+      break; // real socket error
+    }
+
     if (bytes_read > 1) {
       buffer[bytes_read] = '\0';
       char action = buffer[0];
@@ -340,6 +368,9 @@ static void Daemon() {
       }
     }
   }
+
+  close(fd);
+  unlink(addr.sun_path);
 }
 
 static void SendToDaemon(const HistoryItem& item, bool is_update) {

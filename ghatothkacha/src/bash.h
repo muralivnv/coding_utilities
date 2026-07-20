@@ -140,6 +140,9 @@ _ghatothkacha_import_history() {
     # Ensure the daemon is running
     ("$bin_path" --daemon &)
 
+    local original_histtimeformat="${HISTTIMEFORMAT:-}"
+    unset HISTTIMEFORMAT
+
     local current_cmd=""
     local counter=0
     # Use current time in nanoseconds as a base to ensure chronological sorting
@@ -194,6 +197,10 @@ _ghatothkacha_import_history() {
         "$bin_path" --update -i "$id" -e "$ts" -r "0"
 
         counter=$((counter + 1))
+    fi
+
+    if [[ -n "${original_histtimeformat:-}" ]]; then
+        export HISTTIMEFORMAT="$original_histtimeformat"
     fi
 
     echo "Successfully dispatched $counter history items."
