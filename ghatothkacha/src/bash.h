@@ -12,7 +12,6 @@ constexpr std::string_view kBashPreExec = R"bash(
   _history_preexec() {
       local ret_code=$?
 
-      # Send an --update for the PREVIOUS command before we generate a new UUID.
       if [[ -n "${__MY_HIST_ID:-}" ]]; then
           local end_time=$(date +%s%N)
           local bin_path=$(command -v ghatothkacha)
@@ -58,45 +57,57 @@ constexpr std::string_view kBashPreExec = R"bash(
       local db_path=$(ghatothkacha --print-db-path)
       local safe_pwd="${PWD//\'/\'\'}"
 
-      # 1. Define the raw SQL queries
-      local global_sql="SELECT cmd FROM (SELECT cmd, end_timestamp_ns FROM History ORDER BY end_timestamp_ns DESC LIMIT 10000) GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
-      local dir_sql="SELECT cmd FROM (SELECT cmd, end_timestamp_ns FROM History WHERE dir = '${safe_pwd}' ORDER BY end_timestamp_ns DESC LIMIT 10000) GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
+      # 1. Clean SQL: No more character replacements!
+      export __GHAT_SQL_GLOBAL="SELECT cmd FROM (SELECT cmd, end_timestamp_ns FROM History ORDER BY end_timestamp_ns DESC LIMIT 10000) GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
+      export __GHAT_SQL_DIR="SELECT cmd FROM (SELECT cmd, end_timestamp_ns FROM History WHERE dir = '${safe_pwd}' ORDER BY end_timestamp_ns DESC LIMIT 10000) GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
 
-      # 2. Package them into executable strings for fzf's reload command
-      # We wrap the db_path in single quotes, and the SQL in double quotes for sh -c
-      local reload_global="sqlite3 '${db_path}' \"${global_sql}\""
-      local reload_dir="sqlite3 '${db_path}' \"${dir_sql}\""
+      # 2. SQLite ASCII Mode: Output rows separated by \x1E (Record Separator)
+      # We pipe via printf so SQLite sees `.mode ascii` as a top-level command.
+      # Then use tr to convert \x1E (\036 in octal) to NUL (\0) for fzf --read0
+      export __GHAT_RELOAD_GLOBAL="printf '.mode ascii\n%s\n' \"\$__GHAT_SQL_GLOBAL\" | sqlite3 '${db_path}' | tr '\036' '\0'"
+      export __GHAT_RELOAD_DIR="printf '.mode ascii\n%s\n' \"\$__GHAT_SQL_DIR\" | sqlite3 '${db_path}' | tr '\036' '\0'"
 
       local initial_cmd initial_label
       if [[ "$mode" == "global" ]]; then
-          initial_cmd="$reload_global"
+          initial_cmd="$__GHAT_RELOAD_GLOBAL"
           initial_label="Global"
       else
-          initial_cmd="$reload_dir"
+          initial_cmd="$__GHAT_RELOAD_DIR"
           initial_label="Directory"
       fi
 
-      # 3. Run fzf with dynamic bindings and key expectations
+      # 3. fzf --read0 automatically supports multi-line items.
+      # Added --highlight-line so the whole multi-line block is highlighted.
       local output
-      b=$'\033[1m'
-      n=$'\033[0m'
       output=$(eval "$initial_cmd" | \
-        fzf --height 40% --reverse \
+        fzf --read0 --height 50% --reverse \
+            --highlight-line \
             --border=rounded \
             --info=inline-right \
-            --prompt="$initial_prompt" \
             --border-label=" $initial_label " \
-            --bind="alt-d:reload($reload_dir)+change-border-label( Directory )" \
-            --bind="alt-g:reload($reload_global)+change-border-label( Global )" \
-            --bind="tab:down,shift-tab:up" \
-            --footer=" Alt + g: GlobalHistorySearch • d: DirHistorySearch " \
+            --expect=tab,enter \
+            --bind="alt-d:reload(eval \"\$__GHAT_RELOAD_DIR\")+change-border-label( Directory )" \
+            --bind="alt-g:reload(eval \"\$__GHAT_RELOAD_GLOBAL\")+change-border-label( Global )" \
+            --footer=" Alt+g: Global • Alt+d: Dir • Tab: Edit • Enter: Run " \
             --footer-border=dashed \
             --scrollbar="│" \
             -q "$READLINE_LINE")
 
-      if [[ -n "$output" ]]; then
-          READLINE_LINE="$output"
+      local key="${output%%$'\n'*}"
+      local command="${output#*$'\n'}"
+
+      # 4. No cleanup needed! $command natively holds perfect multi-line strings
+      if [[ -n "$command" && "$output" != "$command" ]]; then
+          READLINE_LINE="$command"
           READLINE_POINT=${#READLINE_LINE}
+          
+          if [[ "$key" == "enter" ]]; then
+              bind '"\e[0n": accept-line'
+          else
+              bind '"\e[0n": ""'
+          fi
+      else
+          bind '"\e[0n": ""'
       fi
   }
 
@@ -106,13 +117,14 @@ constexpr std::string_view kBashPreExec = R"bash(
   preexec_functions+=(_history_preexec)
   precmd_functions+=(_history_precmd)
 
-  bind -x '"\C-r": _fzf_global_history_search'
-  bind -x '"\C-h": _fzf_global_history_search'
+  # --- THE MACRO TRICK ---
+  bind -x '"\e[1n": _fzf_global_history_search'
+  bind -x '"\e[2n": _fzf_dir_history_search'
 
-  # Bind to the Up Arrow.
-  # the Up arrow sends one of these two escape sequences. Bind both to be safe.
-  bind -x '"\e[A": _fzf_dir_history_search'
-  bind -x '"\eOA": _fzf_dir_history_search'
+  bind '"\C-r": "\e[1n\e[0n"'
+  bind '"\C-h": "\e[1n\e[0n"'
+  bind '"\e[A": "\e[2n\e[0n"'
+  bind '"\eOA": "\e[2n\e[0n"'
 )bash";
 
 constexpr std::string_view kHistoryImport = R"bash(
