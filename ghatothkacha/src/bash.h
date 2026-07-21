@@ -75,14 +75,15 @@ constexpr std::string_view kBashPreExec = R"bash(
           ELSE ((MAX(end_timestamp_ns) - start_timestamp_ns)/60000000000) || 'm' \
         END) || char(27)||'[0m ' || \
         char(27)||'[36m' || \
-        printf('%7s', CASE \
+        printf('%10s', CASE \
           WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 60 THEN (now_sec - (MAX(end_timestamp_ns)/1000000000)) || 's ago' \
           WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 3600 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/60) || 'm ago' \
           WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 86400 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/3600) || 'h ago' \
-          ELSE ((now_sec - (MAX(end_timestamp_ns)/1000000000))/86400) || 'd ago' \
+          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 2592000 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/86400) || 'd ago' \
+          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 31536000 THEN round((now_sec - (MAX(end_timestamp_ns)/1000000000))/2592000.0, 1) || 'mo ago' \
+          ELSE round((now_sec - (MAX(end_timestamp_ns)/1000000000))/31536000.0, 1) || 'yr ago' \
         END) || char(27)||'[0m ' || char(31) || cmd"
 
-      # Clean SQL: No more character replacements!
       export __GHAT_SQL_GLOBAL="${SQL_SELECT} FROM (SELECT cmd, start_timestamp_ns, end_timestamp_ns, retcode FROM History ORDER BY end_timestamp_ns DESC LIMIT ${history_limit}) CROSS JOIN CurrentTime GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
       export __GHAT_SQL_DIR="${SQL_SELECT} FROM (SELECT cmd, start_timestamp_ns, end_timestamp_ns, retcode FROM History WHERE dir = '${safe_pwd}' ORDER BY end_timestamp_ns DESC LIMIT ${history_limit}) CROSS JOIN CurrentTime GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
 
@@ -92,34 +93,38 @@ constexpr std::string_view kBashPreExec = R"bash(
       export __GHAT_RELOAD_GLOBAL="printf '.mode ascii\n%s\n' \"\$__GHAT_SQL_GLOBAL\" | sqlite3 '${db_path}' | tr '\036' '\0'"
       export __GHAT_RELOAD_DIR="printf '.mode ascii\n%s\n' \"\$__GHAT_SQL_DIR\" | sqlite3 '${db_path}' | tr '\036' '\0'"
 
-      local initial_cmd initial_label
+      local initial_cmd initial_prompt
       if [[ "$mode" == "global" ]]; then
           initial_cmd="$__GHAT_RELOAD_GLOBAL"
-          initial_label="Global"
+          initial_prompt="[   Global  ] > "
       else
           initial_cmd="$__GHAT_RELOAD_DIR"
-          initial_label="Directory"
+          initial_prompt="[ Directory ] > "
       fi
 
       # fzf --read0 automatically supports multi-line items.
-      # Added --highlight-line so the whole multi-line block is highlighted.
       local output
       output=$(eval "$initial_cmd" | \
-            fzf --read0 --height 60% --reverse \
+            fzf --style=default --read0 --height 60% --reverse \
             --highlight-line \
-            --border=rounded \
+            --border=none \
             --info=inline-right \
-            --border-label=" $initial_label " \
+            --prompt="$initial_prompt" \
+            --color='bg+:238,fg+:255' \
             --ansi \
             --delimiter=$'\x1f' \
             --scheme=history \
             --nth=2 \
             --with-nth=1,2 \
             --preview='echo {2..}' \
-            --preview-window='bottom:4:wrap:border-top' \
+            --preview-window='bottom:4:wrap:noborder' \
             --expect=tab,enter \
-            --bind="alt-d:reload(eval \"\$__GHAT_RELOAD_DIR\")+change-border-label( Directory )" \
-            --bind="alt-g:reload(eval \"\$__GHAT_RELOAD_GLOBAL\")+change-border-label( Global )" \
+            --bind="alt-d:change-prompt([ Directory ] > )+reload(eval \"\$__GHAT_RELOAD_DIR\")" \
+            --bind="alt-g:change-prompt([   Global  ] > )+reload(eval \"\$__GHAT_RELOAD_GLOBAL\")" \
+            --bind="alt-i:up" \
+            --bind="alt-k:down" \
+            --bind="alt-I:first" \
+            --bind="alt-K:last" \
             --footer=" Alt+g: Global • Alt+d: Dir • Tab: Edit • Enter: Run " \
             --footer-border=dashed \
             --scrollbar="│" \
