@@ -93,6 +93,17 @@ constexpr std::string_view kBashPreExec = R"bash(
       export __GHAT_RELOAD_GLOBAL="printf '.mode ascii\n%s\n' \"\$__GHAT_SQL_GLOBAL\" | sqlite3 '${db_path}' | tr '\036' '\0'"
       export __GHAT_RELOAD_DIR="printf '.mode ascii\n%s\n' \"\$__GHAT_SQL_DIR\" | sqlite3 '${db_path}' | tr '\036' '\0'"
 
+      export __GHAT_TOGGLE_ACTION='
+        case "$FZF_PROMPT" in
+          *Global*)
+            echo "change-prompt([ Directory ] > )+reload(eval \"\$__GHAT_RELOAD_DIR\")"
+            ;;
+          *)
+            echo "change-prompt([   Global  ] > )+reload(eval \"\$__GHAT_RELOAD_GLOBAL\")"
+            ;;
+        esac
+      '
+
       local initial_cmd initial_prompt
       if [[ "$mode" == "global" ]]; then
           initial_cmd="$__GHAT_RELOAD_GLOBAL"
@@ -119,13 +130,14 @@ constexpr std::string_view kBashPreExec = R"bash(
             --preview='echo {2..}' \
             --preview-window='bottom:4:wrap:noborder' \
             --expect=tab,enter \
-            --bind="alt-d:change-prompt([ Directory ] > )+reload(eval \"\$__GHAT_RELOAD_DIR\")" \
-            --bind="alt-g:change-prompt([   Global  ] > )+reload(eval \"\$__GHAT_RELOAD_GLOBAL\")" \
+            --bind="alt-t:transform:eval \"\$__GHAT_TOGGLE_ACTION\"" \
+            --bind="ctrl-h:transform:eval \"\$__GHAT_TOGGLE_ACTION\"" \
+            --bind="ctrl-r:transform:eval \"\$__GHAT_TOGGLE_ACTION\"" \
             --bind="alt-i:up" \
             --bind="alt-k:down" \
             --bind="alt-I:first" \
             --bind="alt-K:last" \
-            --footer=" Alt+g: Global • Alt+d: Dir • Tab: Edit • Enter: Run " \
+            --footer=" Alt+t / Ctrl+r / Ctrl+h: Toggle Global/Dir • Tab: Edit • Enter: Run " \
             --footer-border=dashed \
             --scrollbar="│" \
             -q "$READLINE_LINE")
