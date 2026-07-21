@@ -80,7 +80,7 @@ constexpr std::string_view kBashPreExec = R"bash(
           WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 3600 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/60) || 'm ago' \
           WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 86400 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/3600) || 'h ago' \
           ELSE ((now_sec - (MAX(end_timestamp_ns)/1000000000))/86400) || 'd ago' \
-        END) || char(27)||'[0m' || char(31) || cmd"
+        END) || char(27)||'[0m ' || char(31) || cmd"
 
       # Clean SQL: No more character replacements!
       export __GHAT_SQL_GLOBAL="${SQL_SELECT} FROM (SELECT cmd, start_timestamp_ns, end_timestamp_ns, retcode FROM History ORDER BY end_timestamp_ns DESC LIMIT ${history_limit}) CROSS JOIN CurrentTime GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
