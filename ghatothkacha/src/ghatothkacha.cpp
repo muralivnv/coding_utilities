@@ -41,8 +41,18 @@ constexpr static std::string_view kDBSchema = R"sql(
     end_timestamp_ns INTEGER,
     retcode INTEGER
   );
-  CREATE INDEX IF NOT EXISTS dir_idx ON History(dir);
-  CREATE INDEX IF NOT EXISTS time_idx ON History(end_timestamp_ns);
+
+  -- MIGRATE: Drop the old inefficient indexes if they exist
+  DROP INDEX IF EXISTS dir_idx;
+  DROP INDEX IF EXISTS time_idx;
+
+  -- Covering index for Global history searches
+  CREATE INDEX IF NOT EXISTS time_idx_covering 
+    ON History(end_timestamp_ns DESC, cmd, start_timestamp_ns, retcode);
+
+  -- Compound Covering index for Directory-specific searches
+  CREATE INDEX IF NOT EXISTS dir_time_idx_covering 
+    ON History(dir, end_timestamp_ns DESC, cmd, start_timestamp_ns, retcode);
 )sql";
 
 constexpr static std::string_view kDBFilename = "ghatothkacha_shell_history.db";

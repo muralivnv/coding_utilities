@@ -63,12 +63,30 @@ constexpr std::string_view kBashPreExec = R"bash(
       local mode="$1"
       local db_path=$(ghatothkacha --print-db-path)
       local safe_pwd="${PWD//\'/\'\'}"
+      local history_limit="${GHATOTHKACHA_HISTORY_LIMIT:-10000}"
 
-      # 1. Clean SQL: No more character replacements!
-      export __GHAT_SQL_GLOBAL="SELECT cmd FROM (SELECT cmd, end_timestamp_ns FROM History ORDER BY end_timestamp_ns DESC LIMIT 10000) GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
-      export __GHAT_SQL_DIR="SELECT cmd FROM (SELECT cmd, end_timestamp_ns FROM History WHERE dir = '${safe_pwd}' ORDER BY end_timestamp_ns DESC LIMIT 10000) GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
+      local SQL_SELECT="\
+      WITH CurrentTime AS (SELECT strftime('%s','now') AS now_sec) \
+      SELECT \
+        CASE WHEN retcode = 0 THEN char(27)||'[32m' ELSE char(27)||'[31m' END || \
+        printf('%5s', CASE \
+          WHEN (MAX(end_timestamp_ns) - start_timestamp_ns) < 1000000000 THEN ((MAX(end_timestamp_ns) - start_timestamp_ns)/1000000) || 'ms' \
+          WHEN (MAX(end_timestamp_ns) - start_timestamp_ns) < 60000000000 THEN ((MAX(end_timestamp_ns) - start_timestamp_ns)/1000000000) || 's' \
+          ELSE ((MAX(end_timestamp_ns) - start_timestamp_ns)/60000000000) || 'm' \
+        END) || char(27)||'[0m ' || \
+        char(27)||'[36m' || \
+        printf('%7s', CASE \
+          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 60 THEN (now_sec - (MAX(end_timestamp_ns)/1000000000)) || 's ago' \
+          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 3600 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/60) || 'm ago' \
+          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 86400 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/3600) || 'h ago' \
+          ELSE ((now_sec - (MAX(end_timestamp_ns)/1000000000))/86400) || 'd ago' \
+        END) || char(27)||'[0m' || char(31) || cmd"
 
-      # 2. SQLite ASCII Mode: Output rows separated by \x1E (Record Separator)
+      # Clean SQL: No more character replacements!
+      export __GHAT_SQL_GLOBAL="${SQL_SELECT} FROM (SELECT cmd, start_timestamp_ns, end_timestamp_ns, retcode FROM History ORDER BY end_timestamp_ns DESC LIMIT ${history_limit}) CROSS JOIN CurrentTime GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
+      export __GHAT_SQL_DIR="${SQL_SELECT} FROM (SELECT cmd, start_timestamp_ns, end_timestamp_ns, retcode FROM History WHERE dir = '${safe_pwd}' ORDER BY end_timestamp_ns DESC LIMIT ${history_limit}) CROSS JOIN CurrentTime GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
+
+      # SQLite ASCII Mode: Output rows separated by \x1E (Record Separator)
       # We pipe via printf so SQLite sees `.mode ascii` as a top-level command.
       # Then use tr to convert \x1E (\036 in octal) to NUL (\0) for fzf --read0
       export __GHAT_RELOAD_GLOBAL="printf '.mode ascii\n%s\n' \"\$__GHAT_SQL_GLOBAL\" | sqlite3 '${db_path}' | tr '\036' '\0'"
@@ -83,15 +101,22 @@ constexpr std::string_view kBashPreExec = R"bash(
           initial_label="Directory"
       fi
 
-      # 3. fzf --read0 automatically supports multi-line items.
+      # fzf --read0 automatically supports multi-line items.
       # Added --highlight-line so the whole multi-line block is highlighted.
       local output
       output=$(eval "$initial_cmd" | \
-        fzf --read0 --height 50% --reverse \
+            fzf --read0 --height 60% --reverse \
             --highlight-line \
             --border=rounded \
             --info=inline-right \
             --border-label=" $initial_label " \
+            --ansi \
+            --delimiter=$'\x1f' \
+            --scheme=history \
+            --nth=2 \
+            --with-nth=1,2 \
+            --preview='echo {2..}' \
+            --preview-window='bottom:4:wrap:border-top' \
             --expect=tab,enter \
             --bind="alt-d:reload(eval \"\$__GHAT_RELOAD_DIR\")+change-border-label( Directory )" \
             --bind="alt-g:reload(eval \"\$__GHAT_RELOAD_GLOBAL\")+change-border-label( Global )" \
@@ -101,13 +126,13 @@ constexpr std::string_view kBashPreExec = R"bash(
             -q "$READLINE_LINE")
 
       local key="${output%%$'\n'*}"
-      local command="${output#*$'\n'}"
+      local raw_line="${output#*$'\n'}"
+      local command="${raw_line#*$'\x1f'}"
 
-      # 4. No cleanup needed! $command natively holds perfect multi-line strings
       if [[ -n "$command" && "$output" != "$command" ]]; then
           READLINE_LINE="$command"
           READLINE_POINT=${#READLINE_LINE}
-          
+
           if [[ "$key" == "enter" ]]; then
               bind '"\e[0n": accept-line'
           else
