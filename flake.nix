@@ -9,15 +9,25 @@
     treesitterC = { url = "https://github.com/tree-sitter/tree-sitter-c/archive/refs/tags/v0.24.2.tar.gz"; flake = false; };
     treesitterCpp = { url = "https://github.com/tree-sitter/tree-sitter-cpp/archive/refs/tags/v0.23.4.tar.gz"; flake = false; };
     treesitterPy = { url = "https://github.com/tree-sitter/tree-sitter-python/archive/refs/tags/v0.25.0.tar.gz"; flake = false; };
+    termbox = { url = "https://github.com/termbox/termbox2/archive/605398fa79108412976191e062ea14bd4bd30213.tar.gz"; flake = false; };
   };
 
-  outputs = { self, nixpkgs, mio, pcre2, treesitter, treesitterC, treesitterCpp, treesitterPy, ... }:
+  outputs = { self, nixpkgs, mio, pcre2, treesitter, treesitterC, treesitterCpp, treesitterPy, termbox, ... }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
 
-      depFlags = "-Dmio.tests=OFF -Dmio.installation=OFF -DPCRE2_SUPPORT_JIT=ON -DPCRE2_BUILD_PCRE2GREP=OFF -DPCRE2_BUILD_TESTS=OFF";     
-      cmakeCmd = "cmake -B build . -DCMAKE_BUILD_TYPE=Release -GNinja ${depFlags} -DMIO_SOURCE_DIR=${mio} -DPCRE2_SOURCE_DIR=${pcre2} -DTREE_SITTER_SOURCE_DIR=${treesitter} -DTREE_SITTER_C_SOURCE_DIR=${treesitterC} -DTREE_SITTER_CPP_SOURCE_DIR=${treesitterCpp} -DTREE_SITTER_PYTHON_SOURCE_DIR=${treesitterPy}";
+      # termbox2 has no inline (non-fullscreen) mode. The patch adds one: no
+      # alternate screen, a row offset applied where cell rows become terminal
+      # rows, and no clear-screen on resize or exit.
+      termboxPatched = pkgs.runCommand "termbox2-inline" { } ''
+        cp -r ${termbox} $out
+        chmod -R u+w $out
+        patch -p1 --batch -d $out < ${./external/patches/termbox2-inline.patch}
+      '';
+
+      depFlags = "-Dmio.tests=OFF -Dmio.installation=OFF -DPCRE2_SUPPORT_JIT=ON -DPCRE2_BUILD_PCRE2GREP=OFF -DPCRE2_BUILD_TESTS=OFF";
+      cmakeCmd = "cmake -B build . -DCMAKE_BUILD_TYPE=Release -GNinja ${depFlags} -DMIO_SOURCE_DIR=${mio} -DPCRE2_SOURCE_DIR=${pcre2} -DTREE_SITTER_SOURCE_DIR=${treesitter} -DTREE_SITTER_C_SOURCE_DIR=${treesitterC} -DTREE_SITTER_CPP_SOURCE_DIR=${treesitterCpp} -DTREE_SITTER_PYTHON_SOURCE_DIR=${treesitterPy} -DTERMBOX_SOURCE_DIR=${termboxPatched}";
 
     in {
       packages.${system}.default = pkgs.stdenv.mkDerivation {
@@ -28,7 +38,7 @@
         inherit mio pcre2 treesitter treesitterC treesitterCpp treesitterPy;
 
         nativeBuildInputs = with pkgs; [ cmake ninja sqlite ];
-        buildInputs = with pkgs; [ bash ];
+        buildInputs = with pkgs; [ bash libunistring ];
 
         configurePhase = ''
           ${cmakeCmd}
@@ -38,11 +48,19 @@
           cmake --build build
         '';
 
+        doCheck = true;
+        checkPhase = ''
+          runHook preCheck
+          ctest --test-dir build --output-on-failure
+          runHook postCheck
+        '';
+
         installPhase = ''
           mkdir -p $out/bin
           cp build/gai/gai $out/bin/
           cp build/sakura/sakura $out/bin/
           cp build/ghatothkacha/ghatothkacha $out/bin/
+          cp build/tooey/tooey $out/bin
         '';
       };
 

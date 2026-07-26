@@ -25,6 +25,7 @@
 #include "format.h"
 #include "printx.hpp"
 #include "bash.h"
+#include "protocol.h"
 
 namespace fs = std::filesystem;
 
@@ -56,7 +57,6 @@ constexpr static std::string_view kDBSchema = R"sql(
 )sql";
 
 constexpr static std::string_view kDBFilename = "ghatothkacha_shell_history.db";
-constexpr char kDelimiter = '\x1F';
 constexpr const char* kSocketName = "/tmp/ghatothkacha_daemon";
 std::atomic<bool> g_daemon_running{true};
 
@@ -65,15 +65,6 @@ auto kFinalizeStmt = [](sqlite3_stmt* stmt) { sqlite3_finalize(stmt); };
 
 using SqliteDbPtr = std::unique_ptr<sqlite3, decltype(kCloseDb)>;
 using SqliteStmtPtr = std::unique_ptr<sqlite3_stmt, decltype(kFinalizeStmt)>;
-
-struct HistoryItem {
-  std::string_view id{""};
-  std::string_view cmd{""};
-  std::string_view dir{""};
-  uint64_t start_timestamp_ns{0};
-  uint64_t end_timestamp_ns{0};
-  int retcode{0};
-};
 
 static void SignalHandler(int /*signum*/) {
   g_daemon_running = false;
@@ -108,34 +99,24 @@ static void EnableWriteAheadLogging(sqlite3* db) {
   }
 }
 
-static SqliteDbPtr CreateDatabaseWithSchema(const fs::path& database) {
-  SqliteDbPtr db{nullptr};
-  int ret = sqlite3_open(database.c_str(), std::out_ptr(db));
-  if (ret != SQLITE_OK) {
-    rostd::printf<"Unable to create database at path: %s\n">(database.string());
-    db.reset(nullptr);
-  } else {
-    EnableWriteAheadLogging(db.get());
-    char* errmsg;
-    ret = sqlite3_exec(db.get(), kDBSchema.data(), nullptr, nullptr, &errmsg);
-    if (ret != SQLITE_OK) {
-      rostd::printf<"Unable to create schema, exec returned error: %s\n">(errmsg);
-      db.reset(nullptr);
-    }
-  }
-  return db;
-}
-
 static SqliteDbPtr OpenDatabase(const fs::path& database) {
   SqliteDbPtr db{nullptr};
-  if (fs::exists(database)) {
-    if (sqlite3_open(database.c_str(), std::out_ptr(db)) == SQLITE_OK) {
-      EnableWriteAheadLogging(db.get());
-    } else {
-      db.reset(nullptr);
-    }
-  } else {
-    db = CreateDatabaseWithSchema(database);
+
+  if (sqlite3_open(database.c_str(), std::out_ptr(db)) != SQLITE_OK) {
+    rostd::printf<"Unable to open database at path: %s\n">(database.string());
+    return nullptr;
+  }
+  EnableWriteAheadLogging(db.get());
+
+  // Every statement in kDBSchema is guarded with IF [NOT] EXISTS, so applying it on
+  // every open is both harmless
+  char* errmsg = nullptr;
+  if (sqlite3_exec(db.get(), kDBSchema.data(), nullptr, nullptr, &errmsg) != SQLITE_OK) {
+    // Not fatal on its own: a failed index rebuild should not stop history from being
+    // recorded. If the table itself is missing, preparing the statements fails next
+    // and the daemon gives up there.
+    rostd::printf<"Unable to apply schema: %s\n">(errmsg);
+    sqlite3_free(errmsg);
   }
   return db;
 }
@@ -187,106 +168,6 @@ static void UpdateItem(const HistoryItem& item, SqliteStmtPtr& stmt, SqliteDbPtr
   }
   sqlite3_reset(stmt.get());
   sqlite3_clear_bindings(stmt.get());
-}
-
-static std::string_view Strip(std::string_view v) {
-  // remove leading whitespace
-  size_t start = 0;
-  while (start < v.size() && std::isspace(v[start])) ++start;
-  v.remove_prefix(start);
-
-  // remove trailing whitespace
-  while (!v.empty() && std::isspace(v.back())) {
-    v.remove_suffix(1);
-  }
-
-  return v;
-}
-
-template<std::integral T>
-static std::optional<T> StringToInt(std::string_view input) {
-  T result{};
-  auto [ptr, ec] = std::from_chars(input.data(), input.data() + input.size(), result);
-  if (ec == std::errc()) {
-    return result;
-  } else if (ec == std::errc::invalid_argument) {
-    rostd::printf<"Input is not a number\n">();
-  } else if (ec == std::errc::result_out_of_range) {
-    rostd::printf<"Input is larger than the specified type\n">();
-  }
-  return std::nullopt;
-}
-
-static std::optional<HistoryItem> ToInsertItem(std::string_view id, std::string_view cmd,
-                                               std::string_view dir, std::string_view start_time_ns) {
-  if (Strip(id).empty()) {
-    rostd::printf<"Cannot perform history insert, input 'id' is empty\n">();
-    return std::nullopt;
-  }
-  if (Strip(cmd).empty()) {
-    rostd::printf<"Cannot perform history insert, input 'cmd' is empty\n">();
-    return std::nullopt;
-  }
-  if (Strip(dir).empty()) {
-    rostd::printf<"Cannot perform history insert, input 'dir' is empty\n">();
-    return std::nullopt;
-  }
-  if (Strip(start_time_ns).empty()) {
-    rostd::printf<"Cannot perform history insert, input 'start_time_ns' is empty\n">();
-    return std::nullopt;
-  }
-  HistoryItem item;
-  item.id = id;
-  item.cmd = cmd;
-  item.dir = dir;
-
-  { // decode start_time_ns
-    auto result = StringToInt<uint64_t>(start_time_ns);
-    if (!result) {
-      rostd::printf<"Error while decoding 'start_time_ns'\nInput 'start_time_ns': %s">(start_time_ns);
-      return std::nullopt;
-    }
-    item.start_timestamp_ns = result.value();
-  }
-  return item;
-}
-
-static std::optional<HistoryItem> ToUpdateItem(std::string_view id, std::string_view end_time_ns,
-                                               std::string_view retcode) {
-  if (Strip(id).empty()) {
-    rostd::printf<"Cannot perform history update, input 'id' is empty\n">();
-    return std::nullopt;
-  }
-  if (Strip(end_time_ns).empty()) {
-    rostd::printf<"Cannot perform history update, input 'end_time_ns' is empty\n">();
-    return std::nullopt;
-  }
-  if (Strip(retcode).empty()) {
-    rostd::printf<"Cannot perform history update, input 'retcode' is empty\n">();
-    return std::nullopt;
-  }
-
-  HistoryItem item;
-  item.id = id;
-
-  { // decode end_time_ns
-    auto result = StringToInt<uint64_t>(end_time_ns);
-    if (!result) {
-      rostd::printf<"Error while decoding 'end_time_ns'\nInput 'end_time_ns': %s">(end_time_ns);
-      return std::nullopt;
-    }
-    item.end_timestamp_ns = result.value();
-  }
-
-  { // decode retcode
-    auto result = StringToInt<int>(retcode);
-    if (!result) {
-      rostd::printf<"Error while decoding 'retcode'\nInput 'retcode': %s">(retcode);
-      return std::nullopt;
-    }
-    item.retcode = result.value();
-  }
-  return item;
 }
 
 static void SetupSocket(sockaddr_un& addr, socklen_t& addr_len) {
@@ -357,35 +238,16 @@ static void Daemon() {
 
     if (bytes_read > 1) {
       buffer[bytes_read] = '\0';
-      char action = buffer[0];
-      std::string_view payload(buffer + 1, bytes_read - 1);
-      
-      if (payload.empty() || payload[0] != kDelimiter) continue;
-      payload.remove_prefix(1); // Drop the leading delimiter
-
-      std::vector<std::string_view> fields;
-      size_t start = 0;
-      size_t end = payload.find(kDelimiter);
-      while (end != std::string_view::npos) {
-        fields.push_back(payload.substr(start, end - start));
-        start = end + 1;
-        end = payload.find(kDelimiter, start);
-      }
-      fields.push_back(payload.substr(start));
+      // The decoded item holds views into `buffer`, so it must be consumed before
+      // the next recvfrom overwrites it.
+      const std::string_view datagram(buffer, static_cast<size_t>(bytes_read));
 
       try {
-        if (action == 'I' && fields.size() == 4) {
-          const std::optional<HistoryItem> item =
-            ToInsertItem(fields[0], fields[3], fields[2], fields[1]);
-          if (item.has_value()) {
-            InsertItem(item.value(), insert_stmt, db_ptr);
-          }
-        } else if (action == 'U' && fields.size() == 3) {
-          const std::optional<HistoryItem> item =
-            ToUpdateItem(fields[0], fields[1], fields[2]);
-          if (item.has_value()) {
-            UpdateItem(item.value(), update_stmt, db_ptr);
-          }
+        const Message msg = DecodeMessage(datagram);
+        if (msg.action == Action::kInsert) {
+          InsertItem(msg.item, insert_stmt, db_ptr);
+        } else if (msg.action == Action::kUpdate) {
+          UpdateItem(msg.item, update_stmt, db_ptr);
         }
       } catch (...) {
         // Ignore malformed packets
@@ -405,17 +267,7 @@ static void SendToDaemon(const HistoryItem& item, bool is_update) {
   socklen_t addr_len;
   SetupSocket(addr, addr_len);
 
-  std::string_view payload;
-  if (is_update) {
-    payload = common::FormatIntoStringView<"U%?%?%?%?%?%?">(kDelimiter, item.id, kDelimiter,
-                                                            item.end_timestamp_ns, kDelimiter,
-                                                            item.retcode);
-  } else {
-    payload = common::FormatIntoStringView<"I%?%?%?%?%?%?%?%?">(kDelimiter, item.id, kDelimiter,
-                                                                item.start_timestamp_ns, kDelimiter,
-                                                                item.dir, kDelimiter, item.cmd);
-  }
-
+  const std::string_view payload = EncodeMessage(item, is_update);
   const auto payload_len = payload.size();
 
   // MSG_DONTWAIT ensures our shell prompt NEVER hangs, even if the daemon is frozen

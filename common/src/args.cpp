@@ -1,12 +1,15 @@
 #include "args.h"
+
 #include <cctype>
 
 namespace common {
 
 Args::Args(int argc, char** argv) {
-  argv_.reserve(size_t(argc-1));
+  if (argc < 1)
+    return;
+  argv_.reserve(size_t(argc - 1));
   for (int i = 1; i < argc; i++) {
-    args_.emplace(argv[i], size_t(i-1));
+    args_.emplace(argv[i], size_t(i - 1));
     argv_.emplace_back(argv[i]);
   }
 }
@@ -18,14 +21,16 @@ std::optional<std::vector<std::string_view>> Args::MultiValue(const std::vector<
     auto values = Impl(key, parse_till_next_flag);
     result.insert(result.end(), values.begin(), values.end());
   }
-  if (result.empty()) return std::nullopt;
+  if (result.empty())
+    return std::nullopt;
   return result;
 }
 
 std::optional<std::string_view> Args::Value(const std::vector<std::string_view>& keys) const noexcept {
   for (const std::string_view key : keys) {
     auto values = Impl(key, false);
-    if (!values.empty()) return values.front();
+    if (!values.empty())
+      return values.front();
   }
   return std::nullopt;
 }
@@ -33,11 +38,11 @@ std::optional<std::string_view> Args::Value(const std::vector<std::string_view>&
 std::vector<std::string_view> Args::Impl(std::string_view key, bool parse_till_next_flag) const noexcept {
   std::vector<std::string_view> result;
   auto [start, end] = args_.equal_range(key);
-  
+
   for (auto it = start; it != end; it++) {
     size_t i = it->second + 1;
     const size_t k = parse_till_next_flag ? argv_.size() : std::min(i + 1, argv_.size());
-    
+
     for (; i < k; i++) {
       // Check if it starts with '-' AND is not a negative number
       if (argv_[i].starts_with('-')) {
@@ -52,4 +57,4 @@ std::vector<std::string_view> Args::Impl(std::string_view key, bool parse_till_n
   return result;
 }
 
-} // namespace common
+}  // namespace common

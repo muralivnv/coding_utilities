@@ -6,7 +6,8 @@
 namespace ghatothkacha {
 
 constexpr std::string_view kBashPreExec = R"bash(
-  readonly GHATOTHKACHA_BIN="$(command -v ghatothkacha)"
+  export GHATOTHKACHA_BIN="$(command -v ghatothkacha)"
+  export TOOEY_BIN="$(command -v tooey)"
 
   _history_preexec() {
       local ret_code=$?
@@ -59,88 +60,80 @@ constexpr std::string_view kBashPreExec = R"bash(
       unset __MY_HIST_START
   }
 
-  _ghatothkacha_fzf_core() {
+  _ghatothkacha_ui() {
       local mode="$1"
-      local db_path=$(ghatothkacha --print-db-path)
+      local current_query="$2"
+
+      local db_path=$("$GHATOTHKACHA_BIN" --print-db-path)
       local safe_pwd="${PWD//\'/\'\'}"
       local history_limit="${GHATOTHKACHA_HISTORY_LIMIT:-10000}"
 
-      local SQL_SELECT="\
-      WITH CurrentTime AS (SELECT strftime('%s','now') AS now_sec) \
-      SELECT \
-        CASE WHEN retcode = 0 THEN char(27)||'[32m' ELSE char(27)||'[31m' END || \
-        printf('%5s', CASE \
-          WHEN (MAX(end_timestamp_ns) - start_timestamp_ns) < 1000000000 THEN ((MAX(end_timestamp_ns) - start_timestamp_ns)/1000000) || 'ms' \
-          WHEN (MAX(end_timestamp_ns) - start_timestamp_ns) < 60000000000 THEN ((MAX(end_timestamp_ns) - start_timestamp_ns)/1000000000) || 's' \
-          ELSE ((MAX(end_timestamp_ns) - start_timestamp_ns)/60000000000) || 'm' \
-        END) || char(27)||'[0m ' || \
-        char(27)||'[36m' || \
-        printf('%10s', CASE \
-          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 60 THEN (now_sec - (MAX(end_timestamp_ns)/1000000000)) || 's ago' \
-          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 3600 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/60) || 'm ago' \
-          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 86400 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/3600) || 'h ago' \
-          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 2592000 THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/86400) || 'd ago' \
-          WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 31536000 THEN round((now_sec - (MAX(end_timestamp_ns)/1000000000))/2592000.0, 1) || 'mo ago' \
-          ELSE round((now_sec - (MAX(end_timestamp_ns)/1000000000))/31536000.0, 1) || 'yr ago' \
-        END) || char(27)||'[0m ' || char(31) || cmd"
-
-      export __GHAT_SQL_GLOBAL="${SQL_SELECT} FROM (SELECT cmd, start_timestamp_ns, end_timestamp_ns, retcode FROM History ORDER BY end_timestamp_ns DESC LIMIT ${history_limit}) CROSS JOIN CurrentTime GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
-      export __GHAT_SQL_DIR="${SQL_SELECT} FROM (SELECT cmd, start_timestamp_ns, end_timestamp_ns, retcode FROM History WHERE dir = '${safe_pwd}' ORDER BY end_timestamp_ns DESC LIMIT ${history_limit}) CROSS JOIN CurrentTime GROUP BY cmd ORDER BY MAX(end_timestamp_ns) DESC;"
-
-      # SQLite ASCII Mode: Output rows separated by \x1E (Record Separator)
-      # We pipe via printf so SQLite sees `.mode ascii` as a top-level command.
-      # Then use tr to convert \x1E (\036 in octal) to NUL (\0) for fzf --read0
-      export __GHAT_RELOAD_GLOBAL="printf '.mode ascii\n%s\n' \"\$__GHAT_SQL_GLOBAL\" | sqlite3 '${db_path}' | tr '\036' '\0'"
-      export __GHAT_RELOAD_DIR="printf '.mode ascii\n%s\n' \"\$__GHAT_SQL_DIR\" | sqlite3 '${db_path}' | tr '\036' '\0'"
-
-      export __GHAT_TOGGLE_ACTION='
-        case "$FZF_PROMPT" in
-          *Global*)
-            echo "change-prompt([ Directory ] > )+reload(eval \"\$__GHAT_RELOAD_DIR\")"
-            ;;
-          *)
-            echo "change-prompt([   Global  ] > )+reload(eval \"\$__GHAT_RELOAD_GLOBAL\")"
-            ;;
-        esac
-      '
-
-      local initial_cmd initial_prompt
+      local where_clause="" PROMPT NEXT_MODE
       if [[ "$mode" == "global" ]]; then
-          initial_cmd="$__GHAT_RELOAD_GLOBAL"
-          initial_prompt="[   Global  ] > "
+          PROMPT="[   Global  ] > "
+          NEXT_MODE="dir"
       else
-          initial_cmd="$__GHAT_RELOAD_DIR"
-          initial_prompt="[ Directory ] > "
+          local safe_pwd="${PWD//\'/\'\'}"
+          where_clause=" WHERE dir = '${safe_pwd}'"
+          PROMPT="[ Directory ] > "
+          NEXT_MODE="global"
       fi
 
-      # fzf --read0 automatically supports multi-line items.
+      local sql
+      sql=$(cat <<SQL
+        WITH CurrentTime AS (SELECT strftime('%s','now') AS now_sec)
+        SELECT
+          CASE WHEN retcode = 0 THEN char(27)||'[32m' ELSE char(27)||'[31m' END ||
+          printf('%5s', CASE
+            WHEN (MAX(end_timestamp_ns) - start_timestamp_ns) < 1000000000
+              THEN ((MAX(end_timestamp_ns) - start_timestamp_ns)/1000000) || 'ms'
+            WHEN (MAX(end_timestamp_ns) - start_timestamp_ns) < 60000000000
+              THEN ((MAX(end_timestamp_ns) - start_timestamp_ns)/1000000000) || 's'
+            ELSE ((MAX(end_timestamp_ns) - start_timestamp_ns)/60000000000) || 'm'
+          END) || char(27)||'[0m ' ||
+          char(27)||'[36m' ||
+          printf('%10s', CASE
+            WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 60
+              THEN (now_sec - (MAX(end_timestamp_ns)/1000000000)) || 's ago'
+            WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 3600
+              THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/60) || 'm ago'
+            WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 86400
+              THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/3600) || 'h ago'
+            WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 2592000
+              THEN ((now_sec - (MAX(end_timestamp_ns)/1000000000))/86400) || 'd ago'
+            WHEN now_sec - (MAX(end_timestamp_ns)/1000000000) < 31536000
+              THEN round((now_sec - (MAX(end_timestamp_ns)/1000000000))/2592000.0, 1) || 'mo ago'
+            ELSE round((now_sec - (MAX(end_timestamp_ns)/1000000000))/31536000.0, 1) || 'yr ago'
+          END) || char(27)||'[0m ' || char(31) || cmd
+        FROM (SELECT cmd, start_timestamp_ns, end_timestamp_ns, retcode
+              FROM History${where_clause}
+              ORDER BY end_timestamp_ns DESC LIMIT ${history_limit})
+        CROSS JOIN CurrentTime
+        GROUP BY cmd
+        ORDER BY MAX(end_timestamp_ns) DESC;
+SQL
+      )
+
+      # tooey inherently applies 'ShellEscapeInPlace' to {{@QUERY@}}, making it safe 
+      # to inject as a direct argument into our toggle function without quotes.
+      printf '.mode ascii\n%s\n' "$sql" | sqlite3 "$db_path" | tr '\036' '\0' | \
+          "$TOOEY_BIN" --read0 --preview-size 40 \
+          --prompt "$PROMPT" \
+          --query-process-command "gai --no-color --read0 -f {{@QUERY@}}" \
+          --ansi --tab-accept \
+          --preview-command "echo {{@SELECTION@}} | bat --wrap=auto --terminal-width=80" \
+          --preview-dir bottom --print-key \
+          --action "alt-t:Toggle==_ghatothkacha_ui $NEXT_MODE {{@QUERY@}}" \
+          --footer "Alt+t: Toggle Global/Dir • Tab: Edit • Enter: Run" \
+          --query "$current_query"
+  }
+  export -f _ghatothkacha_ui
+
+  _ghatothkacha_history_core() {
+      local mode="$1"
       local output
-      output=$(eval "$initial_cmd" | \
-            fzf --style=default --read0 --height 60% --reverse \
-            --highlight-line \
-            --border=none \
-            --info=inline-right \
-            --prompt="$initial_prompt" \
-            --color='bg+:238,fg+:255' \
-            --ansi \
-            --delimiter=$'\x1f' \
-            --scheme=history \
-            --nth=2 \
-            --with-nth=1,2 \
-            --preview='echo {2..}' \
-            --preview-window='bottom:4:wrap:noborder' \
-            --expect=tab,enter \
-            --bind="alt-t:transform:eval \"\$__GHAT_TOGGLE_ACTION\"" \
-            --bind="ctrl-h:transform:eval \"\$__GHAT_TOGGLE_ACTION\"" \
-            --bind="ctrl-r:transform:eval \"\$__GHAT_TOGGLE_ACTION\"" \
-            --bind="alt-i:up" \
-            --bind="alt-k:down" \
-            --bind="alt-I:first" \
-            --bind="alt-K:last" \
-            --footer=" Alt+t / Ctrl+r / Ctrl+h: Toggle Global/Dir • Tab: Edit • Enter: Run " \
-            --footer-border=dashed \
-            --scrollbar="│" \
-            -q "$READLINE_LINE")
+      
+      output=$(_ghatothkacha_ui "$mode" "$READLINE_LINE")
 
       local key="${output%%$'\n'*}"
       local raw_line="${output#*$'\n'}"
@@ -160,15 +153,15 @@ constexpr std::string_view kBashPreExec = R"bash(
       fi
   }
 
-  _fzf_global_history_search() { _ghatothkacha_fzf_core "global"; }
-  _fzf_dir_history_search() { _ghatothkacha_fzf_core "dir"; }
+  _ghatothchaka_global_history_search() { _ghatothkacha_history_core "global"; }
+  _ghatothchaka_dir_history_search() { _ghatothkacha_history_core "dir"; }
 
   preexec_functions+=(_history_preexec)
   precmd_functions+=(_history_precmd)
 
   # --- THE MACRO TRICK ---
-  bind -x '"\e[1n": _fzf_global_history_search'
-  bind -x '"\e[2n": _fzf_dir_history_search'
+  bind -x '"\e[1n": _ghatothchaka_global_history_search'
+  bind -x '"\e[2n": _ghatothchaka_dir_history_search'
 
   bind '"\C-r": "\e[1n\e[0n"'
   bind '"\C-h": "\e[1n\e[0n"'

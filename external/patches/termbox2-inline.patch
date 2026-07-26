@@ -1,0 +1,354 @@
+--- a/termbox2.h	2026-07-29 11:15:56.183634200 -0700
++++ b/termbox2.h	2026-07-29 11:15:56.183813053 -0700
+@@ -250,6 +250,7 @@
+ /* Some hard-coded caps */
+ #define TB_HARDCAP_ENTER_MOUSE  "\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h"
+ #define TB_HARDCAP_EXIT_MOUSE   "\x1b[?1006l\x1b[?1015l\x1b[?1002l\x1b[?1000l"
++#define TB_HARDCAP_ERASE_LINE   "\x1b[2K"
+ #define TB_HARDCAP_STRIKEOUT    "\x1b[9m"
+ #define TB_HARDCAP_UNDERLINE_2  "\x1b[21m"
+ #define TB_HARDCAP_OVERLINE     "\x1b[53m"
+@@ -467,6 +468,17 @@
+  */
+ int tb_init(void);
+ int tb_init_file(const char *path);
++
++/* Initialize in inline mode: draw only in the bottom `height` rows of the
++ * terminal and leave everything above them untouched, the way `fzf --height`
++ * does. `height` is clamped to the terminal height.
++ *
++ * Everything else behaves as in fullscreen mode: tb_height() reports `height`,
++ * cell (0,0) is the viewport's top-left, and mouse coordinates are relative to
++ * the viewport. No alternate screen, no clear-screen, and -- deliberately -- no
++ * terminal queries of any kind.
++ */
++int tb_init_inline_file(const char *path, int height);
+ int tb_init_fd(int ttyfd);
+ int tb_init_rwfd(int rfd, int wfd);
+ int tb_shutdown(void);
+@@ -821,6 +833,11 @@
+     int resize_pipefd[2];
+     int width;
+     int height;
++    int inline_height; /* >0 selects inline mode; rows of the viewport */
++    int origin_y;      /* terminal row the viewport starts at */
++    int prev_origin_y; /* where it was before the last resize */
++    int term_h;        /* full terminal height; global.height is the viewport */
++    int inline_placed; /* has the anchor been established yet? */
+     int cursor_x;
+     int cursor_y;
+     int last_x;
+@@ -2336,11 +2353,22 @@
+ static int tb_iswprint_ex(uint32_t ch, int *width);
+ static int tb_cluster_width(uint32_t *ch, size_t nch);
+ 
++static int tb_init_rwfd_height(int rfd, int wfd, int inline_height);
++static void inline_clamp_geometry(void);
++static int inline_query_cursor_row(int *row);
++static int inline_place_viewport(void);
++static int inline_erase_abs_rows(int first, int count);
++static int inline_erase_viewport(void);
++
+ int tb_init(void) {
+     return tb_init_file("/dev/tty");
+ }
+ 
+ int tb_init_file(const char *path) {
++    return tb_init_inline_file(path, 0);
++}
++
++int tb_init_inline_file(const char *path, int height) {
+     if (global.initialized) return TB_ERR_INIT_ALREADY;
+     int ttyfd = open(path, O_RDWR);
+     if (ttyfd < 0) {
+@@ -2348,7 +2376,7 @@
+         return TB_ERR_INIT_OPEN;
+     }
+     global.ttyfd_open = 1;
+-    return tb_init_fd(ttyfd);
++    return tb_init_rwfd_height(ttyfd, ttyfd, height);
+ }
+ 
+ int tb_init_fd(int ttyfd) {
+@@ -2356,9 +2384,16 @@
+ }
+ 
+ int tb_init_rwfd(int rfd, int wfd) {
++    return tb_init_rwfd_height(rfd, wfd, 0);
++}
++
++/* tb_reset() wipes `global`, so the requested height has to arrive as an
++ * argument rather than being stashed beforehand. */
++static int tb_init_rwfd_height(int rfd, int wfd, int inline_height) {
+     int rv;
+ 
+     tb_reset();
++    global.inline_height = inline_height;
+     global.ttyfd = isatty(rfd) ? rfd : (isatty(wfd) ? wfd : -1);
+     global.rfd = rfd;
+     global.wfd = wfd;
+@@ -2369,8 +2404,15 @@
+         if_err_break(rv, init_cap_trie());
+         if_err_break(rv, init_resize_handler());
+         if_err_break(rv, send_init_escape_codes());
+-        if_err_break(rv, send_clear());
+-        if_err_break(rv, update_term_size());
++        if (global.inline_height > 0) {
++            /* Reserving rows needs the terminal height, so size comes first --
++             * and the screen is never cleared. */
++            if_err_break(rv, update_term_size());
++            if_err_break(rv, inline_place_viewport());
++        } else {
++            if_err_break(rv, send_clear());
++            if_err_break(rv, update_term_size());
++        }
+         if_err_break(rv, init_cellbuf());
+         global.initialized = 1;
+     } while (0);
+@@ -3070,7 +3112,12 @@
+ 
+ static int send_init_escape_codes(void) {
+     int rv;
+-    if_err_return(rv, bytebuf_puts(&global.out, global.caps[TB_CAP_ENTER_CA]));
++    /* The alternate screen is what makes a TUI fullscreen. Inline mode stays on
++     * the normal screen so that scrollback above the viewport survives. */
++    if (global.inline_height <= 0) {
++        if_err_return(rv,
++            bytebuf_puts(&global.out, global.caps[TB_CAP_ENTER_CA]));
++    }
+     if_err_return(rv,
+         bytebuf_puts(&global.out, global.caps[TB_CAP_ENTER_KEYPAD]));
+     if_err_return(rv,
+@@ -3094,6 +3141,133 @@
+     return TB_OK;
+ }
+ 
++static void inline_clamp_geometry(void) {
++    /* update_term_size() has just stored the *terminal* geometry. Translate it
++     * once, here, so the rest of the library can go on treating global.height as
++     * "the height we draw into" and stay oblivious to inline mode. */
++    int rows;
++    if (global.inline_height <= 0) return;
++    rows = global.height;
++    if (rows <= 0) return;
++    global.term_h = rows;
++    global.prev_origin_y = global.origin_y;
++    global.height = global.inline_height < rows ? global.inline_height : rows;
++    if (!global.inline_placed) {
++        /* inline_place_viewport() establishes the anchor during init. */
++        global.origin_y = 0;
++        return;
++    }
++    /* On resize keep the anchor where it is, only pushing it up far enough that
++     * the viewport still fits. */
++    if (global.origin_y + global.height > rows) {
++        global.origin_y = rows - global.height;
++        if (global.origin_y < 0) global.origin_y = 0;
++    }
++}
++
++/* Ask the terminal for the cursor row (DSR/CPR). Returns 0 and sets *row (1-based)
++ * on success, -1 otherwise -- including on timeout, which is the point: the read
++ * is bounded, so an unresponsive terminal costs a few milliseconds and a less
++ * pretty placement instead of hanging. termbox2 already uses this exact pattern in
++ * update_term_size_via_esc(). */
++static int inline_query_cursor_row(int *row) {
++#ifndef TB_INLINE_CURSOR_MS
++#define TB_INLINE_CURSOR_MS 150
++#endif
++    fd_set fds;
++    struct timeval timeout;
++    char buf[TB_OPT_READ_BUF];
++    ssize_t read_rv;
++    int r, c;
++
++    if (global.rfd < 0 || global.wfd < 0) return -1;
++    /* Anything already queued must go out first, or the query would overtake it. */
++    bytebuf_flush(&global.out, global.wfd);
++    if (write(global.wfd, "\x1b[6n", 4) != 4) return -1;
++
++    FD_ZERO(&fds);
++    FD_SET(global.rfd, &fds);
++    timeout.tv_sec = 0;
++    timeout.tv_usec = TB_INLINE_CURSOR_MS * 1000;
++    if (select(global.rfd + 1, &fds, NULL, NULL, &timeout) != 1) return -1;
++
++    read_rv = read(global.rfd, buf, sizeof(buf) - 1);
++    if (read_rv < 1) return -1;
++    buf[read_rv] = '\0';
++    if (sscanf(buf, "\x1b[%d;%dR", &r, &c) != 2) return -1;
++    *row = r;
++    return 0;
++}
++
++/* Anchor the viewport at the cursor -- i.e. directly under the shell prompt that
++ * launched us, which is what makes this feel like fzf --height rather than a panel
++ * stranded at the bottom of the screen. */
++static int inline_place_viewport(void) {
++    int rv, i, cursor_row = 0, origin, scroll;
++    char nbuf[32];
++
++    if (global.inline_height <= 0) return TB_OK;
++
++    if (inline_query_cursor_row(&cursor_row) == 0 && cursor_row >= 1) {
++        origin = cursor_row - 1;
++    } else {
++        origin = global.term_h - global.height; /* no answer: use the bottom */
++    }
++    if (origin < 0) origin = 0;
++
++    scroll = origin + global.height - global.term_h;
++    if (scroll > 0) {
++        /* Not enough room below the cursor. Scroll from the last row so every
++         * newline moves the screen up exactly one line -- deterministic, unlike
++         * emitting newlines from wherever the cursor happens to be -- and follow
++         * the anchor up as the content moves. */
++        send_literal(rv, "\x1b[");
++        send_num(rv, nbuf, global.term_h);
++        send_literal(rv, ";1H");
++        for (i = 0; i < scroll; i++) {
++            if_err_return(rv, bytebuf_puts(&global.out, "\n"));
++        }
++        origin -= scroll;
++        if (origin < 0) origin = 0;
++    }
++
++    global.origin_y = origin;
++    global.prev_origin_y = origin;
++    global.inline_placed = 1;
++    if_err_return(rv, bytebuf_flush(&global.out, global.wfd));
++    global.last_x = -1;
++    global.last_y = -1;
++    return TB_OK;
++}
++
++/* Blank `count` terminal rows starting at absolute row `first`, leaving the cursor
++ * at its top-left. Absolute, not viewport-relative, because a resize has to clean
++ * up rows the viewport has just vacated. */
++static int inline_erase_abs_rows(int first, int count) {
++    int rv, i;
++    char nbuf[32];
++    if (count <= 0) return TB_OK;
++    if (first < 0) first = 0;
++    if_err_return(rv, bytebuf_puts(&global.out, global.caps[TB_CAP_SGR0]));
++    for (i = 0; i < count; i++) {
++        send_literal(rv, "\x1b[");
++        send_num(rv, nbuf, first + i + 1);
++        send_literal(rv, ";1H");
++        if_err_return(rv, bytebuf_puts(&global.out, TB_HARDCAP_ERASE_LINE));
++    }
++    send_literal(rv, "\x1b[");
++    send_num(rv, nbuf, first + 1);
++    send_literal(rv, ";1H");
++    global.last_x = -1;
++    global.last_y = -1;
++    return TB_OK;
++}
++
++static int inline_erase_viewport(void) {
++    if (global.inline_height <= 0 || global.height <= 0) return TB_OK;
++    return inline_erase_abs_rows(global.origin_y, global.height);
++}
++
+ static int update_term_size(void) {
+     int rv, ioctl_errno;
+ 
+@@ -3106,12 +3280,17 @@
+     if (ioctl(global.ttyfd, TIOCGWINSZ, &sz) == 0) {
+         global.width = sz.ws_col;
+         global.height = sz.ws_row;
++        inline_clamp_geometry();
+         return TB_OK;
+     }
+     ioctl_errno = errno;
+ 
+     // Try >cursor(9999,9999), >u7, <u6
+-    if_ok_return(rv, update_term_size_via_esc());
++    rv = update_term_size_via_esc();
++    if (rv == TB_OK) {
++        inline_clamp_geometry();
++        return TB_OK;
++    }
+ 
+     global.last_errno = ioctl_errno;
+     return TB_ERR_RESIZE_IOCTL;
+@@ -3173,11 +3352,19 @@
+ 
+ static int tb_deinit(void) {
+     if (global.caps[0] != NULL && global.wfd >= 0) {
+-        bytebuf_puts(&global.out, global.caps[TB_CAP_SHOW_CURSOR]);
+-        bytebuf_puts(&global.out, global.caps[TB_CAP_SGR0]);
+-        bytebuf_puts(&global.out, global.caps[TB_CAP_CLEAR_SCREEN]);
+-        bytebuf_puts(&global.out, global.caps[TB_CAP_EXIT_CA]);
+-        bytebuf_puts(&global.out, global.caps[TB_CAP_EXIT_KEYPAD]);
++        if (global.inline_height > 0) {
++            /* Leave the normal screen as we found it: blank only our own rows,
++             * no clear-screen and no rmcup. */
++            inline_erase_viewport();
++            bytebuf_puts(&global.out, global.caps[TB_CAP_SHOW_CURSOR]);
++            bytebuf_puts(&global.out, global.caps[TB_CAP_EXIT_KEYPAD]);
++        } else {
++            bytebuf_puts(&global.out, global.caps[TB_CAP_SHOW_CURSOR]);
++            bytebuf_puts(&global.out, global.caps[TB_CAP_SGR0]);
++            bytebuf_puts(&global.out, global.caps[TB_CAP_CLEAR_SCREEN]);
++            bytebuf_puts(&global.out, global.caps[TB_CAP_EXIT_CA]);
++            bytebuf_puts(&global.out, global.caps[TB_CAP_EXIT_KEYPAD]);
++        }
+         bytebuf_puts(&global.out, TB_HARDCAP_EXIT_MOUSE);
+         bytebuf_flush(&global.out, global.wfd);
+     }
+@@ -3672,7 +3859,7 @@
+ 
+             // the coord is 1,1 for upper left
+             event->x = ((uint8_t)in->buf[4]) - 0x21;
+-            event->y = ((uint8_t)in->buf[5]) - 0x21;
++            event->y = ((uint8_t)in->buf[5]) - 0x21 - global.origin_y;
+ 
+             // Eat 6 bytes
+             buf_shift = 6;
+@@ -3749,7 +3936,9 @@
+             if ((num[0] & 32) != 0) event->mod |= TB_MOD_MOTION;
+ 
+             event->x = (num[1] - 1 < 0) ? 0 : num[1] - 1;
+-            event->y = (num[2] - 1 < 0) ? 0 : num[2] - 1;
++            /* Report viewport-relative rows: callers hit-test against their own
++             * layout, which knows nothing about where the viewport sits. */
++            event->y = (num[2] - 1 < 0) ? 0 : num[2] - 1 - global.origin_y;
+ 
+             break;
+         }
+@@ -3769,7 +3958,22 @@
+     if_err_return(rv,
+         cellbuf_resize(&global.front, global.width, global.height));
+     if_err_return(rv, cellbuf_clear(&global.front));
+-    if_err_return(rv, send_clear());
++    if (global.inline_height > 0) {
++        /* Never clear the screen on resize; that is exactly what destroys the
++         * scrollback above an inline viewport. Blanking our own rows suffices,
++         * because the cleared front buffer already forces a full repaint.
++         *
++         * The range starts at whichever origin is higher up: when the terminal
++         * grows, the viewport slides down and the rows it just left behind would
++         * otherwise keep displaying the previous frame. */
++        int first = global.prev_origin_y < global.origin_y ? global.prev_origin_y
++                                                          : global.origin_y;
++        if_err_return(rv,
++            inline_erase_abs_rows(first, global.origin_y + global.height - first));
++        if_err_return(rv, bytebuf_flush(&global.out, global.wfd));
++    } else {
++        if_err_return(rv, send_clear());
++    }
+     return TB_OK;
+ }
+ 
+@@ -3971,7 +4175,9 @@
+         return TB_OK;
+     }
+     send_literal(rv, "\x1b[");
+-    send_num(rv, nbuf, y + 1);
++    /* The single place the library turns a cell row into a terminal row, which
++     * is what makes an inline viewport a one-line change. */
++    send_num(rv, nbuf, y + 1 + global.origin_y);
+     send_literal(rv, ";");
+     send_num(rv, nbuf, x + 1);
+     send_literal(rv, "H");

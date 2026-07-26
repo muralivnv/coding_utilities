@@ -47,10 +47,24 @@
         "mio": "mio",
         "nixpkgs": "nixpkgs",
         "pcre2": "pcre2",
+        "termbox": "termbox",
         "treesitter": "treesitter",
         "treesitterC": "treesitterC",
         "treesitterCpp": "treesitterCpp",
         "treesitterPy": "treesitterPy"
+      }
+    },
+    "termbox": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1770521394,
+        "narHash": "sha256-6ObpjDkfJpfyHVmA2Mvau5dR+GBUIhXG3sMiQlQ6bps=",
+        "type": "tarball",
+        "url": "https://github.com/termbox/termbox2/archive/605398fa79108412976191e062ea14bd4bd30213.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://github.com/termbox/termbox2/archive/605398fa79108412976191e062ea14bd4bd30213.tar.gz"
       }
     },
     "treesitter": {

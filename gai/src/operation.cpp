@@ -1,27 +1,32 @@
-#include <string>
+#include "operation.h"
+
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 
-#include "operation.h"
 #include "format.h"
 
 namespace gai {
 
-template<class... Ts>
-struct Overloaded : Ts... { using Ts::operator()...; };
+template <class... Ts>
+struct Overloaded : Ts... {
+  using Ts::operator()...;
+};
 
-template<class... Ts>
+template <class... Ts>
 Overloaded(Ts...) -> Overloaded<Ts...>;
 
 std::string_view Trim(std::string_view v) {
   // remove leading whitespace
   size_t start = 0;
-  while (start < v.size() && std::isspace(v[start])) ++start;
+  while (start < v.size() && std::isspace(v[start]))
+    ++start;
   v.remove_prefix(start);
 
   // remove trailing whitespace
   size_t end = v.size();
-  while (end > 0 && std::isspace(v[end - 1])) --end;
+  while (end > 0 && std::isspace(v[end - 1]))
+    --end;
   v.remove_suffix(v.size() - end);
   return v;
 }
@@ -29,14 +34,16 @@ std::string_view Trim(std::string_view v) {
 std::vector<std::string_view> Split(std::string_view expr) {
   std::vector<std::string_view> out{};
   expr = Trim(expr);
-  if (expr.empty()) return out;
+  if (expr.empty())
+    return out;
 
   const char delim = expr.front();
-  size_t start = 1; // skip delimiter
+  size_t start = 1;  // skip delimiter
 
   while (start < expr.size()) {
     const size_t end = expr.find(delim, start);
-    if (end == std::string_view::npos) break;
+    if (end == std::string_view::npos)
+      break;
 
     out.push_back(expr.substr(start, end - start));
     start = end + 1;
@@ -46,13 +53,12 @@ std::vector<std::string_view> Split(std::string_view expr) {
 
 bool Range::IsStartReached(std::string_view content, size_t linenum) {
   if (!is_start_reached_) {
-    is_start_reached_ = std::visit(Overloaded{
-                                   [](const std::monostate&) { return true; },
-                                   [&linenum](size_t start_line) { return linenum == start_line; },
-                                   [&content](const Pcre2Regex& regex) { return Find(regex, content); }
-                                  }, start);
+    is_start_reached_ = std::visit(Overloaded{[](const std::monostate&) { return true; },
+                                              [&linenum](size_t start_line) { return linenum == start_line; },
+                                              [&content](const Pcre2Regex& regex) { return Find(regex, content); }},
+                                   start);
     if (is_start_reached_) {
-     // do not reset 'end' if end represents line-numbers
+      // do not reset 'end' if end represents line-numbers
       if (!std::holds_alternative<size_t>(end)) {
         is_end_reached_ = false;
       }
@@ -63,11 +69,10 @@ bool Range::IsStartReached(std::string_view content, size_t linenum) {
 
 bool Range::IsEndReached(std::string_view content, size_t linenum) {
   if (!is_end_reached_) {
-    is_end_reached_ = std::visit(Overloaded{
-                                   [](const std::monostate&) { return false; },
-                                   [&linenum](size_t end_line) { return linenum == end_line; },
-                                   [&content](const Pcre2Regex& regex) { return Find(regex, content); }
-                                  }, end);
+    is_end_reached_ = std::visit(Overloaded{[](const std::monostate&) { return false; },
+                                            [&linenum](size_t end_line) { return linenum == end_line; },
+                                            [&content](const Pcre2Regex& regex) { return Find(regex, content); }},
+                                 end);
     if (is_end_reached_) {
       // only reset if we are in regex mode for 'start'
       if (std::holds_alternative<Pcre2Regex>(start)) {
@@ -84,14 +89,30 @@ void Range::Reset() {
 }
 
 std::optional<Pcre2Substitution> ParseSub(std::string_view expr, bool jit, bool utf) {
+  expr = Trim(expr);
   std::vector<std::string_view> parts = Split(expr);
   std::optional<Pcre2Substitution> out;
-  if (parts.size() == 2) {
-    out.emplace(Compile(parts[0], jit, utf), parts[1]);
-  } else {
+  if (parts.size() != 2) {
     const char* error_msg = common::FormatIntoCString<"Invalid substitute expression passed.\nExpression: %s\n">(expr);
     throw std::runtime_error(error_msg);
   }
+
+  const char delim = expr.front();
+  const size_t pattern_end = expr.find(delim, 1);
+  const size_t replacement_end = expr.find(delim, pattern_end + 1);
+  const std::string_view flags = expr.substr(replacement_end + 1);
+
+  bool global = false;
+  for (const char f : flags) {
+    if (f == 'g') {
+      global = true;
+      continue;
+    }
+    const char* error_msg = common::FormatIntoCString<"Unknown substitution flag '%c'.\nExpression: %s\n">(f, expr);
+    throw std::runtime_error(error_msg);
+  }
+
+  out.emplace(Compile(parts[0], jit, utf), parts[1], global);
   return out;
 }
 
@@ -103,7 +124,8 @@ std::vector<Pcre2Regex> ParseFilters(const std::vector<std::string_view>& filter
   return out;
 }
 
-std::vector<Pcre2Substitution> ParseSubstitutions(const std::vector<std::string_view>& substitutions, bool jit, bool utf) {
+std::vector<Pcre2Substitution> ParseSubstitutions(const std::vector<std::string_view>& substitutions, bool jit,
+                                                  bool utf) {
   std::vector<Pcre2Substitution> out{};
   for (const std::string_view& sub : substitutions) {
     auto p = ParseSub(sub, jit, utf);
@@ -117,10 +139,12 @@ std::vector<Pcre2Substitution> ParseSubstitutions(const std::vector<std::string_
 std::optional<Range> ParseRange(std::string_view expr, bool jit, bool utf) {
   std::optional<Range> out{std::nullopt};
   std::vector<std::string_view> parts = Split(expr);
-  if (parts.empty()) return out;
+  if (parts.empty())
+    return out;
 
   auto parse_value = [jit, utf](const std::string_view s) -> RangeValue {
-    if (s.empty()) return std::monostate{};
+    if (s.empty())
+      return std::monostate{};
     if (std::all_of(s.begin(), s.end(), ::isdigit)) {
       return static_cast<size_t>(std::stoul(std::string{s}));
     }
@@ -139,4 +163,4 @@ std::optional<Range> ParseRange(std::string_view expr, bool jit, bool utf) {
   return out;
 }
 
-} // namespace gai
+}  // namespace gai
