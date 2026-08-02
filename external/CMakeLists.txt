@@ -1,5 +1,7 @@
 if(DEFINED PCRE2_SOURCE_DIR)
     add_subdirectory(${PCRE2_SOURCE_DIR} pcre2_build EXCLUDE_FROM_ALL SYSTEM)
+    # Silence warnings
+    target_compile_options(pcre2-8-static PRIVATE -w)
 else()
     message(FATAL_ERROR "PCRE2 source not provided")
 endif()

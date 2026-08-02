@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <tuple>
+#include <memory>
 
 #include "printx.hpp"
 #include "mmap_file.h"
@@ -26,15 +26,12 @@ const std::unordered_map<std::string, ParserFunctionPtr>& ParserMap() {
 }
 
 std::string OpenFile(const fs::path& filename) {
-  std::string out;
   auto contents = common::MmapFileReadOnly::Open(filename);
   if (!contents) {
     rostd::printf<"Error!! Unable to memory map input.\n\tFile: %s\n">(filename);
-    return out;
+    return {};
   }
-  out.resize(contents->size());
-  std::copy(contents->begin(), contents->end(), out.begin());
-  return out;
+  return std::string{contents->data(), contents->size()};
 }
 
 // tree-sitter pulls the subject through this rather than taking a buffer, so the
@@ -109,52 +106,54 @@ std::unordered_map<std::string, TreesitterQuery> InitializeQueries(
   return out;
 }
 
-std::vector<Symbol> ExtractSymbols(const fs::path& path, const std::unordered_map<std::string, LanguageInfo>& config,
-                                   const std::unordered_map<std::string, TreesitterQuery>& queries) {
-  std::vector<Symbol> symbols;
-
+std::generator<Symbol> ExtractSymbols(const fs::path& path, const std::unordered_map<std::string, LanguageInfo>& config,
+                                      const std::unordered_map<std::string, TreesitterQuery>& queries) {
   std::error_code size_ec;
   if (fs::file_size(path, size_ec) == 0 || size_ec)
-    return symbols;
+    co_return;
 
   const std::string_view lang = LanguageForExtension(path, config);
   if (lang.empty())
-    return symbols;
+    co_return;
   const auto query_it = queries.find(std::string{lang});
   if (query_it == queries.end())
-    return symbols;
+    co_return;
 
   TSLanguage* const language = query_it->second.language;
   TSQuery* const query = query_it->second.query;
   if ((language == nullptr) || (query == nullptr))
-    return symbols;
+    co_return;
 
   auto contents = common::MmapFileReadOnly::Open(path.string());
   if (!contents) {
     rostd::printf<"Error!! Unable to memory map input file.\n\tFile: %s\n">(path);
-    return symbols;
+    co_return;
   }
 
-  TSParser* parser = ts_parser_new();
-  std::ignore = ts_parser_set_language(parser, language);
+  std::unique_ptr<TSParser, decltype(&ts_parser_delete)> parser(ts_parser_new(), ts_parser_delete);
+  std::ignore = ts_parser_set_language(parser.get(), language);
 
   TSInput parser_input{};
   parser_input.payload = static_cast<void*>(&contents.value());
   parser_input.read = MemMappedFileRead;
   parser_input.encoding = TSInputEncoding::TSInputEncodingUTF8;
-  TSTree* tree = ts_parser_parse(parser, NULL, parser_input);
+
+  std::unique_ptr<TSTree, decltype(&ts_tree_delete)> tree(
+      ts_parser_parse(parser.get(), nullptr, parser_input), ts_tree_delete);
+
+  std::unique_ptr<TSQueryCursor, decltype(&ts_query_cursor_delete)> cursor(
+      ts_query_cursor_new(), ts_query_cursor_delete);
+
   if (!tree) {
     rostd::printf<"Error!! Parsing failed for file %s\n">(path);
-    ts_parser_delete(parser);
-    return symbols;
+    co_return;
   }
 
-  TSNode root_node = ts_tree_root_node(tree);
-  TSQueryCursor* cursor = ts_query_cursor_new();
-  ts_query_cursor_exec(cursor, query, root_node);
+  TSNode root_node = ts_tree_root_node(tree.get());
+  ts_query_cursor_exec(cursor.get(), query, root_node);
   TSQueryMatch match;
 
-  while (ts_query_cursor_next_match(cursor, &match)) {
+  while (ts_query_cursor_next_match(cursor.get(), &match)) {
     for (uint32_t i = 0; i < match.capture_count; i++) {
       TSQueryCapture capture = match.captures[i];
       TSNode node = capture.node;
@@ -162,15 +161,11 @@ std::vector<Symbol> ExtractSymbols(const fs::path& path, const std::unordered_ma
       TSPoint start_point = ts_node_start_point(node);
       const auto start_byte = ts_node_start_byte(node);
       const auto end_byte = ts_node_end_byte(node);
-      std::string_view symbol_name(contents.begin() + start_byte, end_byte - start_byte);
+      std::string_view symbol_name(contents->begin() + start_byte, end_byte - start_byte);
       symbol_name = LStrip(symbol_name);
-      symbols.push_back(Symbol{start_point.row + 1, start_point.column + 1, std::string{symbol_name}});
+      co_yield Symbol{start_point.row + 1, start_point.column + 1, std::string{symbol_name}};
     }
   }
-  ts_query_cursor_delete(cursor);
-  ts_tree_delete(tree);
-  ts_parser_delete(parser);
-  return symbols;
 }
 
 }  // namespace sakura

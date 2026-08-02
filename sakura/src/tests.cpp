@@ -11,6 +11,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <ranges>
 
 #include "config.h"
 #include "extract.h"
@@ -66,6 +67,11 @@ bool AnyStartsWith(const std::vector<Symbol>& symbols, std::string_view prefix) 
       return true;
   }
   return false;
+}
+
+std::vector<Symbol> ExtractSymbolsHelper(const fs::path& path, const std::unordered_map<std::string, LanguageInfo>& config,
+                                         const std::unordered_map<std::string, TreesitterQuery>& queries) {
+  return ExtractSymbols(path, config, queries) | std::ranges::to<std::vector<Symbol>>();
 }
 
 }  // namespace
@@ -260,7 +266,7 @@ static void TestExtractSymbols(const TempDir& tmp) {
                                    "void caller() {\n"
                                    "  add(1, 2);\n"
                                    "}\n");
-    const auto symbols = ExtractSymbols(src, config, defs_queries);
+    const auto symbols = ExtractSymbolsHelper(src, config, defs_queries);
     EXPECT_EQ(symbols.size(), 2u);  // two function_definition nodes
     if (symbols.size() >= 2) {
       // Rows are 1-based: the first definition starts on line 1, the second on 5.
@@ -276,7 +282,7 @@ static void TestExtractSymbols(const TempDir& tmp) {
   TEST_CASE("the references query selects different nodes");
   {
     const fs::path src = tmp.path() / "sample.cpp";
-    const auto symbols = ExtractSymbols(src, config, refs_queries);
+    const auto symbols = ExtractSymbolsHelper(src, config, refs_queries);
     EXPECT_EQ(symbols.size(), 1u);  // one call_expression
     if (!symbols.empty()) {
       EXPECT_EQ(symbols[0].row, 6u);
@@ -289,7 +295,7 @@ static void TestExtractSymbols(const TempDir& tmp) {
     // The node starts after indentation, but a query capturing a block would include
     // it; LStrip is what keeps the emitted symbol from carrying leading whitespace.
     const fs::path src = tmp.Write("indented.cpp", "\n    int f() { return 0; }\n");
-    const auto symbols = ExtractSymbols(src, config, defs_queries);
+    const auto symbols = ExtractSymbolsHelper(src, config, defs_queries);
     EXPECT_EQ(symbols.size(), 1u);
     if (!symbols.empty()) {
       EXPECT_EQ(symbols[0].row, 2u);
@@ -306,7 +312,7 @@ static void TestExtractSymbols(const TempDir& tmp) {
                                    "\n"
                                    "def beta(x):\n"
                                    "    return x\n");
-    const auto symbols = ExtractSymbols(src, config, defs_queries);
+    const auto symbols = ExtractSymbolsHelper(src, config, defs_queries);
     EXPECT_EQ(symbols.size(), 2u);
     const auto names = NamesOf(symbols);
     EXPECT_TRUE(AnyStartsWith(symbols, "alpha"));
@@ -322,17 +328,17 @@ static void TestExtractSymbols(const TempDir& tmp) {
   TEST_CASE("nothing to extract yields an empty vector, never a crash");
   {
     // Empty file.
-    EXPECT_TRUE(ExtractSymbols(tmp.Write("empty.cpp", ""), config, defs_queries).empty());
+    EXPECT_TRUE(ExtractSymbolsHelper(tmp.Write("empty.cpp", ""), config, defs_queries).empty());
     // Whitespace only: parses fine, matches nothing.
-    EXPECT_TRUE(ExtractSymbols(tmp.Write("blank.cpp", "\n\n\n"), config, defs_queries).empty());
+    EXPECT_TRUE(ExtractSymbolsHelper(tmp.Write("blank.cpp", "\n\n\n"), config, defs_queries).empty());
     // Extension not in the config.
-    EXPECT_TRUE(ExtractSymbols(tmp.Write("thing.rs", "fn main() {}\n"), config, defs_queries).empty());
+    EXPECT_TRUE(ExtractSymbolsHelper(tmp.Write("thing.rs", "fn main() {}\n"), config, defs_queries).empty());
     // File does not exist.
-    EXPECT_TRUE(ExtractSymbols(tmp.path() / "missing.cpp", config, defs_queries).empty());
+    EXPECT_TRUE(ExtractSymbolsHelper(tmp.path() / "missing.cpp", config, defs_queries).empty());
     // Configured extension but no compiled query for it.
-    EXPECT_TRUE(ExtractSymbols(tmp.path() / "sample.cpp", config, {}).empty());
+    EXPECT_TRUE(ExtractSymbolsHelper(tmp.path() / "sample.cpp", config, {}).empty());
     // Empty config.
-    EXPECT_TRUE(ExtractSymbols(tmp.path() / "sample.cpp", {}, defs_queries).empty());
+    EXPECT_TRUE(ExtractSymbolsHelper(tmp.path() / "sample.cpp", {}, defs_queries).empty());
   }
 
   TEST_CASE("malformed source still parses -- tree-sitter recovers");
@@ -340,15 +346,15 @@ static void TestExtractSymbols(const TempDir& tmp) {
     // A real code navigator runs over files mid-edit, so a syntax error must yield
     // whatever is still recognisable instead of failing the file.
     const fs::path src = tmp.Write("broken.cpp", "int good() { return 1; }\nint bad( {{{ \n");
-    EXPECT_NO_THROW(ExtractSymbols(src, config, defs_queries));
-    const auto symbols = ExtractSymbols(src, config, defs_queries);
+    EXPECT_NO_THROW(ExtractSymbols(src, config, defs_queries) | std::ranges::to<std::vector<sakura::Symbol>>());
+    const auto symbols = ExtractSymbolsHelper(src, config, defs_queries);
     EXPECT_TRUE(AnyStartsWith(symbols, "int good"));
   }
 
   TEST_CASE("utf-8 in source keeps byte offsets and columns consistent");
   {
     const fs::path src = tmp.Write("unicode.cpp", "int f() { const char* s = \"caf\xC3\xA9\"; return 0; }\n");
-    const auto symbols = ExtractSymbols(src, config, defs_queries);
+    const auto symbols = ExtractSymbolsHelper(src, config, defs_queries);
     EXPECT_EQ(symbols.size(), 1u);
     if (!symbols.empty()) {
       EXPECT_EQ(symbols[0].row, 1u);
@@ -365,7 +371,7 @@ static void TestExtractSymbols(const TempDir& tmp) {
     for (int i = 0; i < 2000; ++i) {
       big += "int f" + std::to_string(i) + "() { return " + std::to_string(i) + "; }\n";
     }
-    const auto symbols = ExtractSymbols(tmp.Write("big.cpp", big), config, defs_queries);
+    const auto symbols = ExtractSymbolsHelper(tmp.Write("big.cpp", big), config, defs_queries);
     EXPECT_EQ(symbols.size(), 2000u);
     if (symbols.size() == 2000u) {
       EXPECT_EQ(symbols[0].row, 1u);

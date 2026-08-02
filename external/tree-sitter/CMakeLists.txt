@@ -8,10 +8,12 @@ if(DEFINED TREE_SITTER_SOURCE_DIR)
     target_include_directories(tree-sitter
         PRIVATE
             $<BUILD_INTERFACE:${TREE_SITTER_SOURCE_DIR}/lib/src>
-        PUBLIC
+        SYSTEM PUBLIC
             $<INSTALL_INTERFACE:include>
             $<BUILD_INTERFACE:${TREE_SITTER_SOURCE_DIR}/lib/include>
     )
+    # Silence warnings
+    target_compile_options(tree-sitter PRIVATE -w)
 else()
     message(FATAL_ERROR "TREE_SITTER_SOURCE_DIR not defined. Build with Nix.")
 endif()
@@ -32,13 +34,15 @@ function(add_grammar_from_nix NAME SOURCE_DIR)
     target_include_directories(${NAME}
         PRIVATE
             $<BUILD_INTERFACE:${SOURCE_DIR}/src>
-        PUBLIC
+        SYSTEM PUBLIC
             $<INSTALL_INTERFACE:include>
     )
 
     target_link_libraries(${NAME}
         INTERFACE
             tree-sitter)
+    # Silence warnings
+    target_compile_options(${NAME} PRIVATE -w)
 endfunction()
 
 # --- Load Grammars ---

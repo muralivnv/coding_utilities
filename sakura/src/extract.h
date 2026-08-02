@@ -8,7 +8,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <vector>
+#include <generator>
 
 #include "config.h"
 
@@ -59,9 +59,9 @@ std::string_view LanguageForExtension(const std::filesystem::path& path,
 std::unordered_map<std::string, TreesitterQuery> InitializeQueries(
     bool want_definitions, bool want_references, const std::unordered_map<std::string, LanguageInfo>& config);
 
-std::vector<Symbol> ExtractSymbols(const std::filesystem::path& path,
-                                   const std::unordered_map<std::string, LanguageInfo>& config,
-                                   const std::unordered_map<std::string, TreesitterQuery>& queries);
+std::generator<Symbol> ExtractSymbols(const std::filesystem::path& path,
+                                      const std::unordered_map<std::string, LanguageInfo>& config,
+                                      const std::unordered_map<std::string, TreesitterQuery>& queries);
 
 }  // namespace sakura
 
