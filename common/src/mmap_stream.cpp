@@ -23,7 +23,7 @@ namespace {
 // gets a turn back even when the producer is faster than we can consume.
 constexpr size_t kMaxBytesPerCall{8u << 20};
 
-size_t PageSize() {
+static size_t PageSize() {
   const long queried = sysconf(_SC_PAGESIZE);
   return (queried > 0) ? static_cast<size_t>(queried) : 4096;
 }

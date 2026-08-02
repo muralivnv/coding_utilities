@@ -1,12 +1,11 @@
 #include "extract.h"
 
-#include <mio/mmap.hpp>
-
 #include <algorithm>
 #include <cctype>
 #include <tuple>
 
 #include "printx.hpp"
+#include "mmap_file.h"
 
 namespace fs = std::filesystem;
 
@@ -27,18 +26,14 @@ const std::unordered_map<std::string, ParserFunctionPtr>& ParserMap() {
 }
 
 std::string OpenFile(const fs::path& filename) {
-  mio::mmap_source contents;
-  std::error_code ec;
-  contents.map(filename.c_str(), ec);
-
   std::string out;
-  if (ec) {
-    rostd::printf<"Error!! Unable to memory map input.\n\tFile: %s\n\tError Code: %d\n\tError Msg: %s\n">(
-        filename, ec.value(), ec.message());
+  auto contents = common::MmapFileReadOnly::Open(filename);
+  if (!contents) {
+    rostd::printf<"Error!! Unable to memory map input.\n\tFile: %s\n">(filename);
     return out;
   }
-  out.resize(contents.size());
-  std::copy(contents.begin(), contents.end(), out.begin());
+  out.resize(contents->size());
+  std::copy(contents->begin(), contents->end(), out.begin());
   return out;
 }
 
@@ -46,7 +41,7 @@ std::string OpenFile(const fs::path& filename) {
 // whole file never needs copying into the parser.
 const char* MemMappedFileRead(void* payload, uint32_t byte_offset, TSPoint position, uint32_t* bytes_read) {
   std::ignore = position;
-  mio::mmap_source* contents = static_cast<mio::mmap_source*>(payload);
+  common::MmapFileReadOnly* contents = static_cast<common::MmapFileReadOnly*>(payload);
   if (byte_offset >= contents->size()) {
     *bytes_read = 0;
     return nullptr;
@@ -134,12 +129,9 @@ std::vector<Symbol> ExtractSymbols(const fs::path& path, const std::unordered_ma
   if ((language == nullptr) || (query == nullptr))
     return symbols;
 
-  mio::mmap_source contents;
-  std::error_code ec;
-  contents.map(path.c_str(), ec);
-  if (ec) {
-    rostd::printf<"Error!! Unable to memory map input file.\n\tFile: %s\n\tError Code: %d\n\tError Msg: %s\n">(
-        path, ec.value(), ec.message());
+  auto contents = common::MmapFileReadOnly::Open(path.string());
+  if (!contents) {
+    rostd::printf<"Error!! Unable to memory map input file.\n\tFile: %s\n">(path);
     return symbols;
   }
 
@@ -147,7 +139,7 @@ std::vector<Symbol> ExtractSymbols(const fs::path& path, const std::unordered_ma
   std::ignore = ts_parser_set_language(parser, language);
 
   TSInput parser_input{};
-  parser_input.payload = static_cast<void*>(&contents);
+  parser_input.payload = static_cast<void*>(&contents.value());
   parser_input.read = MemMappedFileRead;
   parser_input.encoding = TSInputEncoding::TSInputEncodingUTF8;
   TSTree* tree = ts_parser_parse(parser, NULL, parser_input);

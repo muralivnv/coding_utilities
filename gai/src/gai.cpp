@@ -6,9 +6,9 @@
 #include <cstring>
 #include <functional>
 
-#include <mio/mmap.hpp>
 #include <unistd.h>
 
+#include "mmap_file.h"
 #include "args.h"
 #include "input.h"
 #include "operation.h"
@@ -243,18 +243,10 @@ Options:
       gai::Process(filters, excludes, replacements, fn, range, &stream, color);
     } else {
       for (const std::string_view& f : files) {
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-        mio::mmap_source contents;
-        std::error_code ec;
-        contents.map(f, ec);
-#pragma GCC diagnostic pop;
-
-        if (ec)
+        std::optional<common::MmapFileReadOnly> contents = common::MmapFileReadOnly::Open(std::string{f});        
+        if (!contents)
           continue;
-
-        gai::InputMemMappedFile mmap_stream(contents.begin(), contents.end(), read0);
+        gai::InputMemMappedFile mmap_stream(contents->begin(), contents->end(), read0);
         if (range)
           range->Reset();
         const gai::OutputFunc fn = gai::MakeOutputFunc(verbose, delimiter, read0, f, color);

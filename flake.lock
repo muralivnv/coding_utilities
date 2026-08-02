@@ -1,18 +1,5 @@
 {
   "nodes": {
-    "mio": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1677836220,
-        "narHash": "sha256-j/wbjyI2v/BsFz2RKi8ZxMKuT+7o5uI4I4yIkUran7I=",
-        "type": "tarball",
-        "url": "https://github.com/vimpunk/mio/archive/8b6b7d878c89e81614d05edca7936de41ccdd2da.tar.gz"
-      },
-      "original": {
-        "type": "tarball",
-        "url": "https://github.com/vimpunk/mio/archive/8b6b7d878c89e81614d05edca7936de41ccdd2da.tar.gz"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1783389287,
@@ -44,7 +31,6 @@
     },
     "root": {
       "inputs": {
-        "mio": "mio",
         "nixpkgs": "nixpkgs",
         "pcre2": "pcre2",
         "termbox": "termbox",

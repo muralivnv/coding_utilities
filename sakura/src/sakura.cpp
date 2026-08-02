@@ -22,7 +22,7 @@ Usage: sakura [options]
 Options:
       --config        Config file (required)
       --references    List references (default: false)
-      --definitions   List definitions (default: true)
+      --definitions   List definitions (default: false)
       --files         Input list of files (required)
   -h, --help          Show this help message
   -v, --version       Print version number (default: false)

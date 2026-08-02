@@ -6,8 +6,6 @@
 #include <string>
 #include <string_view>
 
-#include <mio/mmap.hpp>
-
 namespace gai {
 
 class InputBase {
