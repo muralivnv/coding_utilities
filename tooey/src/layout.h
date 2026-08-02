@@ -15,6 +15,7 @@ struct Action {
   std::string_view command{};
   uint32_t key{0};  // the char after alt-, 0 when the action is reachable only from the list
   bool is_become{false};
+  bool is_interactive{false};
 };
 
 struct Config {

@@ -129,13 +129,17 @@ std::vector<Action> ParseActions(const std::vector<std::string_view>& actions) {
 
     act.name = spec.substr(0, pos);
 
-    if (pos + 1 < spec.size() && spec[pos + 1] == '=') {
-      act.is_become = true;
-      act.command = spec.substr(pos + 2);
-    } else {
-      act.command = spec.substr(pos + 1);
+    if ((pos + 1) < spec.size()) {
+      size_t cmd_start = pos + 1;
+      if (spec[cmd_start] == '=') {
+        act.is_become = true;
+        ++cmd_start; 
+      } else if (spec[cmd_start] == '!') {
+        act.is_interactive = true;
+        ++cmd_start;
+      }
+      act.command = spec.substr(cmd_start);
     }
-
     result.push_back(act);
   }
 

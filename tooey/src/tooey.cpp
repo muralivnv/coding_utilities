@@ -643,7 +643,11 @@ static std::vector<std::string> BuildCommandPreviewLines(const Action& act, std:
   SubstituteInPlace(kSelectedLinePlaceholder, safe_selection, cmd);
 
   std::vector<std::string> lines;
-  lines.push_back(act.is_become ? "[Become Command]" : "[Run Command]");
+  if (act.is_become) lines.push_back("[Become Command]");
+  else if (act.is_interactive) lines.push_back("[Run Interactive Command]");
+  else {
+    lines.push_back("[Run Command]");
+  }
   lines.push_back("");
 
   for (auto line : cmd | std::views::split('\n')) {
@@ -668,16 +672,22 @@ static ExecuteActionCommandResult ExecuteActionCommand(const Action& act, const 
     exit(EXIT_SUCCESS);
   }
 
-  Termbox::Shutdown();
-  auto cmd_result = common::RunCmdInteractive(cmd);
+  common::CmdResult cmd_result;
 
-  if (!Termbox::Init(cfg.height)) {
-    ExecuteActionCommandResult result;
-    State exit_st = user_state;
-    exit_st.finalize_exit = true;
-    exit_st.cancelled = true;
-    result.state = exit_st;
-    return result;
+  if (act.is_interactive) {
+    Termbox::Shutdown();
+    cmd_result = common::RunCmdInteractive(cmd);
+    if (!Termbox::Init(cfg.height)) {
+      ExecuteActionCommandResult result;
+      State exit_st = user_state;
+      exit_st.finalize_exit = true;
+      exit_st.cancelled = true;
+      result.state = exit_st;
+      return result;
+    }
+  } else {
+    cmd_result = common::RunCmdWithCapture(cmd, common::CaptureMode::kDevNull,
+                                           common::CaptureMode::kPipe);
   }
 
   // Failure is the command's exit status, not the fact that it printed something:
@@ -1226,10 +1236,9 @@ static tooey::State RunAppLoop(tooey::State state, const tooey::Config& cfg, too
   while (run) {
     if (state.reload_list) {
       state.reload_list = false;
+      ReloadInputStream(state_is, cfg);
       if (state.next_state == ListType::kQueryProcess) {
         state.run_query_process = true;
-      } else {
-        ReloadInputStream(state_is, cfg);
       }
     }
 
@@ -1295,9 +1304,7 @@ Options:
       --query                            Initial query string
       --query-process-command            Command to run on query change
       --preview-command                  Command to run to show preview
-      --reload-command                   Command to regenerate the input list after an action
-                                         runs. Ignored when --query-process-command is set,
-                                         since that list is refreshed by re-running it.
+      --reload-command                   Command to regenerate the input list after an action runs.
       --prompt                           Prompt string to render
       --header                           Fixed text between the readout and the list, for a
                                          keybinding legend or the like. A line break makes it
@@ -1331,8 +1338,9 @@ Options:
       --version                          Print version number
 
 Actions:
-  --action '[alt-K:]NAME=COMMAND'    run COMMAND, then return to the list
+  --action '[alt-K:]NAME=COMMAND'    run COMMAND non-interactively, then return to the list
   --action '[alt-K:]NAME==COMMAND'   become: replace tooey with COMMAND
+  --action '[alt-K:]NAME=!COMMAND'   run COMMAND interactively, then return to the list
 
   alt-K binds the action to that key. K is a single character, so alt-b is alt+b and
   alt-B is alt+shift+b: they are two different bindings. Digits work the same way.
@@ -1344,7 +1352,7 @@ Actions:
   In COMMAND, {{@SELECTION@}} and {{@QUERY@}} expand to the shell-quoted current item
   and query.
 
-  A run action owns the terminal while it runs, so an editor, a pager or a `read -p`
+  An interactive action owns the terminal while it runs, so an editor, a pager or a `read -p`
   confirmation works with no redirection: tooey stands down, the command draws, tooey
   redraws. Its stderr is shown as it arrives and kept, so one that exits non-zero can
   show what it said. A become action instead keeps tooey's stdout, which is frequently
