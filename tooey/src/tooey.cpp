@@ -309,7 +309,7 @@ static void DrawItems(const std::vector<std::string_view>& items, size_t index, 
 }
 
 static void DrawPreview(const Rect& bounds, const std::vector<std::string_view>& lines, const Config& cfg,
-                        size_t scroll_offset) {
+                        size_t scroll_offset, bool wrap=false) {
   if (bounds.w <= 0 || bounds.h <= 0)
     return;
   int text_x = bounds.x, text_y = bounds.y, text_w = bounds.w, text_h = bounds.h;
@@ -332,9 +332,43 @@ static void DrawPreview(const Rect& bounds, const std::vector<std::string_view>&
 
   // Full strength text, same as the list: preview content is there to be read, and
   // the gutter is enough to separate the panes.
-  for (size_t i = 0; i < static_cast<size_t>(text_h) && (i + scroll_offset) < lines.size(); ++i) {
-    PrintUt8String(text_x, text_y + i, text_x + text_w, theme::kPrimary, theme::kBg, lines[i + scroll_offset],
-                   cfg.ansi);
+  constexpr int kPadding = 5;
+  if (!wrap || (text_w-kPadding <= 0)) {
+    for (size_t i = 0; i < static_cast<size_t>(text_h) && (i + scroll_offset) < lines.size(); ++i) {
+      PrintUt8String(text_x, text_y + i, text_x + text_w, theme::kPrimary, theme::kBg, lines[i + scroll_offset],
+                     cfg.ansi);
+    }
+  } else {
+    std::string temp;
+    size_t line_idx = scroll_offset;
+    for (size_t i = 0; i < static_cast<size_t>(text_h) && line_idx < lines.size();) {
+
+      if (lines[line_idx].empty()) {
+        PrintUt8String(text_x, text_y + i, text_x + text_w, theme::kPrimary, theme::kBg, "", cfg.ansi);
+        ++i;
+        ++line_idx;
+        continue;
+      }
+      
+      bool newline = true;
+      for (auto chunk : ChunkView(lines[line_idx], text_w - kPadding, cfg.ansi)) {
+        if (i >= static_cast<size_t>(text_h)) break;
+        if (newline) {
+          temp.clear();
+          temp.append(chunk.begin(), chunk.end());
+          PrintUt8String(text_x, text_y + i, text_x + text_w, theme::kPrimary, theme::kBg, temp, cfg.ansi);
+          newline = false;
+        } else {
+          temp.clear();
+          temp.reserve(5 + text_w); // 5 bytes for " ↪ " (UTF-8) + chunk size
+          temp.append("↪ ");
+          temp.append(chunk.begin(), chunk.end());
+          PrintUt8String(text_x, text_y + i, text_x + text_w, theme::kPrimary, theme::kBg, temp, cfg.ansi);
+        }
+        ++i;
+      }
+      ++line_idx;
+    }
   }
 }
 
@@ -1041,7 +1075,7 @@ static State RunWindowAction(StateAction& state, const State& user_state, const 
     DrawStatusLine(state.selection_index, display_views.size(), false, layout.main);
     DrawItems(display_views, state.selection_index, cfg.ansi, strips.items);
     if (layout.has_preview) {
-      DrawPreview(layout.preview, preview_lines, cfg, preview_scroll_offset);
+      DrawPreview(layout.preview, preview_lines, cfg, preview_scroll_offset, true /* wrap */);
     }
     tb_present();
 

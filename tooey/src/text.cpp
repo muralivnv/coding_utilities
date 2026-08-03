@@ -314,4 +314,61 @@ std::optional<int> ParseInt(std::string_view sv) {
   return std::nullopt;
 }
 
+std::generator<std::string_view> ChunkView(std::string_view str, int term_width, bool ansi) {
+  const char* ptr = str.data();
+  const char* end = ptr + str.size();
+  const char* chunk_start = ptr;
+  int current_width = 0; // Width of the text in the current chunk
+  int x_pos = 0;         // Absolute visual X coordinate for tab alignment
+  AnsiColorState dummy_state{};
+
+  while (ptr < end) {
+    const char* next_ptr = ptr;
+    int item_width = 0;
+
+    if (ansi) {
+      size_t consumed = ParseAnsiSequence(ptr, end, 0, 0, dummy_state);
+      if (consumed > 0) {
+        ptr += consumed;
+        continue;
+      }
+    }
+
+    // Ignore carriage returns
+    if (*ptr == '\r') {
+      ptr++;
+      continue;
+    }
+
+    // Calculate width for Tabs vs standard UTF-8 characters
+    if (*ptr == '\t') {
+      item_width = 8 - (x_pos % 8);
+      next_ptr = ptr + 1;
+    } else {
+      const DecodedChar dc = DecodeUtf8(ptr, end);
+      const int char_width = CellWidth(dc.cp);
+      item_width = (char_width < 0) ? 0 : char_width;
+      next_ptr = ptr + dc.len;
+    }
+
+    // Yield the current chunk if the next character would overflow the screen.
+    if (current_width + item_width > term_width && current_width > 0) {
+      co_yield std::string_view(chunk_start, ptr - chunk_start);
+      chunk_start = ptr;
+      current_width = 0;
+      x_pos = 2; // Continuation lines start with "↪ " (2 cells wide)     
+      continue; 
+    }
+
+    current_width += item_width;
+    x_pos += item_width;
+    ptr = next_ptr;
+  }
+
+  // Yield any leftover text at the end of the string
+  if (chunk_start < end) {
+    co_yield std::string_view(chunk_start, end - chunk_start);
+  }
+}
+
 }  // namespace tooey

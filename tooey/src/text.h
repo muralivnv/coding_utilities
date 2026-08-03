@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <generator>
 
 namespace tooey {
 
@@ -102,6 +103,9 @@ void SubstituteInPlace(std::string_view search, std::string_view replace, std::s
 // Leading integer of `sv`, or nullopt when it does not start with one. A trailing
 // non-digit tail is ignored, which is what lets "40%" parse as 40.
 std::optional<int> ParseInt(std::string_view sv);
+
+// Given an input string, this function yields chunk view taking into account screen real-estate and string UTF8
+std::generator<std::string_view> ChunkView(std::string_view str, int term_width, bool ansi);
 
 }  // namespace tooey
 
