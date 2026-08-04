@@ -120,7 +120,7 @@ SQL
           "$TOOEY_BIN" --read0 --preview-size 40 \
           --prompt "$PROMPT" \
           --query-process-command "gai --no-color --read0 -f {{@QUERY@}}" \
-          --ansi --tab-accept \
+          --ansi --tab-accept --height 50 \
           --preview-command "echo {{@SELECTION@}} | bat --wrap=auto --terminal-width=80" \
           --preview-dir bottom --print-key \
           --action "alt-t:Toggle==_ghatothkacha_ui $NEXT_MODE {{@QUERY@}}" \
