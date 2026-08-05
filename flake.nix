@@ -1,5 +1,5 @@
 {
-  description = "Coding Utilities";
+  description = "Koi";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -30,7 +30,7 @@
 
     in {
       packages.${system}.default = pkgs.stdenv.mkDerivation {
-        pname = "coding-utilities";
+        pname = "koi";
         version = "0.1.0";
         src = self;
 

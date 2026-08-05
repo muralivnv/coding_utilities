@@ -24,7 +24,9 @@ struct CmdResult {
 
 // Runs `shell_cmd` via $SHELL -c and waits for it.
 // `cmd_stdin`, when given, is handed to the child on a memfd rather than a pipe,
-// so there is no writer to deadlock against or to take a SIGPIPE from.
+// so there is no writer to deadlock against or to take a SIGPIPE from. An empty one
+// still counts as given: the child gets an fd at EOF, never the caller's own stdin,
+// which it would otherwise race for bytes while a producer is still writing.
 CmdResult RunCmdWithCapture(const std::string& shell_cmd, CaptureMode stdout_mode, CaptureMode stderr_mode,
                             const MmapStream* const cmd_stdin = nullptr);
 

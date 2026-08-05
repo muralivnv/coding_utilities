@@ -19,7 +19,8 @@ namespace common {
 namespace {
 
 // Copies `in` into an in-memory file and rewinds it, so the child can read its
-// stdin without a writer on the other end of a pipe.
+// stdin without a writer on the other end of a pipe. An empty `in` is legitimate and
+// yields an fd already at EOF, which is what a child asked for no input should see.
 int MakeStdinMemfd(const MmapStream& in) {
   const int fd = memfd_create("cmd_stdin", MFD_CLOEXEC);
   if (fd == -1)
@@ -99,7 +100,10 @@ CmdResult RunCmdWithCapture(const std::string& shell_cmd, CaptureMode stdout_mod
     }
   }
 
-  if (cmd_stdin && cmd_stdin->buffer && (cmd_stdin->size > 0)) {
+  // Any caller that names a stdin gets it, empty included. Skipping the memfd for an
+  // empty one would leave the child on our stdin, and when that is the pipe a producer
+  // is still filling, the child's reads take bytes the parent then never sees.
+  if (cmd_stdin) {
     stdin_fd = MakeStdinMemfd(*cmd_stdin);
     if (stdin_fd == -1) {
       if (need_output_pipe) {

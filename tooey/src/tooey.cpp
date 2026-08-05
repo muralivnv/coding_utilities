@@ -66,7 +66,7 @@ constexpr uint32_t kSelectionBar{0x258C};    // left half block, notches the cur
 constexpr uint32_t kHairlineGlyph{0x2500};   // the readout rule
 constexpr int kGutter{1};                    // breathing room, and what replaces the rules
 constexpr int kTopPad{1};                    // blank row above the prompt
-constexpr int kLoadPollMs{50};               // how often to look again once the producer goes quiet
+constexpr int kLoadPollMs{50};               // ceiling on the wait once the producer goes quiet
 constexpr int kLoadDrawMs{33};               // redraw ceiling while input streams in (~30fps)
 constexpr size_t kContextLen{3};
 
@@ -809,6 +809,7 @@ static State RunListWindowCore(StreamLines& list, StreamLines& source, size_t in
 
   auto last_keypress_time = std::chrono::steady_clock::now();
   std::chrono::steady_clock::time_point last_draw_time{};  // epoch: force the first frame
+  int load_poll_ms = 1;  // grows only while the producer stays quiet
   bool query_changed_since_last_exec = false;
   std::string executing_query = query;
 
@@ -898,10 +899,15 @@ static State RunListWindowCore(StreamLines& list, StreamLines& source, size_t in
     //   loaded          -> timeout_ms stays -1, so we block forever at no cost
     //   loading, flowing-> 0: never sleep between drains, that is what throttled a
     //                      pipe to a fraction of its throughput
-    //   loading, stalled-> kLoadPollMs, the only polling tooey ever does. It costs at
-    //                      most that much latency in noticing a producer resumed.
+    //   loading, stalled-> back off from 1ms to kLoadPollMs, the only polling tooey
+    //                      ever does. A quiet drain usually just means the producer is
+    //                      between writes -- an awk flushing block by block goes quiet
+    //                      dozens of times -- so waiting the full ceiling on the first
+    //                      one added a second to a list that arrives in 150ms. Backing
+    //                      off keeps a genuinely idle producer at one wakeup per 50ms.
     if (source.IsLoading()) {
-      const int load_wait = input_flowing ? 0 : kLoadPollMs;
+      const int load_wait = input_flowing ? 0 : load_poll_ms;
+      load_poll_ms = input_flowing ? 1 : std::min(load_poll_ms * 2, kLoadPollMs);
       timeout_ms = (timeout_ms < 0) ? load_wait : std::min(timeout_ms, load_wait);
     }
 
@@ -1026,15 +1032,6 @@ static State RunWindowAction(StateAction& state, const State& user_state, const 
   for (const auto& s : display_strings)
     display_views.push_back(s);
 
-  bool immediate_exec = user_state.execute_action_immediately;
-  if (immediate_exec) {
-    if (user_state.immediate_action_index < cfg.actions.size()) {
-      state.selection_index = user_state.immediate_action_index;
-    } else {
-      immediate_exec = false;
-    }
-  }
-
   tb_event ev;
   size_t last_index = static_cast<size_t>(-1);
   std::vector<std::string> cmd_preview_strs;
@@ -1043,6 +1040,17 @@ static State RunWindowAction(StateAction& state, const State& user_state, const 
 
   bool action_error_mode = false;
   StreamLines action_error;
+
+  if (user_state.execute_action_immediately && (user_state.immediate_action_index < cfg.actions.size())) {
+    state.selection_index = user_state.immediate_action_index;
+    auto [err, exit_st, err_mode] = ExecuteActionCommand(cfg.actions[state.selection_index], user_state, cfg);
+    if (err_mode) {
+      action_error_mode = true;
+      action_error = std::move(err);
+    } else if (exit_st) {
+      return exit_st.value();
+    }
+  }
 
   while (true) {
     if (action_error_mode) {
@@ -1080,8 +1088,7 @@ static State RunWindowAction(StateAction& state, const State& user_state, const 
     tb_present();
 
     std::optional<State> next_state_opt;
-    bool execute = immediate_exec;
-    immediate_exec = false;
+    bool execute = false;
 
     auto process_event = [&](const tb_event& ev_in) {
       if (ev_in.type == TB_EVENT_KEY) {
@@ -1236,7 +1243,8 @@ static tooey::State InitializeState(const common::Args& cli, const tooey::Config
   bool select_1 = cli.Has("--select-1");
 
   if (!cfg.query_process_cmd.empty() && !state.query.empty()) {
-    FinishLoading(state_is.input, cfg.split_delim);
+    if (select_1)
+      FinishLoading(state_is.input, cfg.split_delim);
 
     state.next_state = ListType::kQueryProcess;
     state_qp = BuildQueryProcessState(state, cfg, state_is);
