@@ -1,6 +1,7 @@
-add_library(tooey_lib STATIC
-            src/text.cpp
-            src/layout.cpp)
+set(TOOEY_LIB_SOURCES src/text.cpp
+    src/layout.cpp)
+
+add_library(tooey_lib STATIC ${TOOEY_LIB_SOURCES})
 target_link_libraries(tooey_lib PRIVATE external_libs common unistring_lib)
 target_compile_options(tooey_lib PRIVATE ${ADDITIONAL_COMPILER_FLAGS})
 

@@ -1,5 +1,6 @@
-add_library(ghatothkacha_lib STATIC
-            src/protocol.cpp)
+set(GHATOTHKACHA_LIB_SOURCES src/protocol.cpp)
+
+add_library(ghatothkacha_lib STATIC ${GHATOTHKACHA_LIB_SOURCES})
 target_link_libraries(ghatothkacha_lib PRIVATE external_libs common)
 target_include_directories(ghatothkacha_lib PUBLIC src)
 target_compile_options(ghatothkacha_lib PRIVATE ${ADDITIONAL_COMPILER_FLAGS})

@@ -1,3 +1,5 @@
 build
 .cache
 .ronin
+sample.txt
+sample.big.txt

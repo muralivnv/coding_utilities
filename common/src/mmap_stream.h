@@ -37,6 +37,11 @@ struct MmapStream {
   ReadProgress ReadAvailable(int fd);
 };
 
+// Wraps a copy of `bytes` in a stream, for callers that already hold their data
+// in memory and need to hand it to a child as stdin. Same mapping discipline as
+// the read path, so the destructor frees it the same way.
+std::optional<MmapStream> MmapStreamFromBytes(const char* data, size_t size);
+
 // Reads every fd to EOF. Convenience wrapper over ReadAvailable for callers that
 // have nothing else to do while waiting.
 std::optional<MmapStream> ReadFdsToMmap(const std::vector<int>& fds);

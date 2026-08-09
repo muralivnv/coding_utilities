@@ -1,0 +1,15 @@
+[
+  (function_item name: (identifier) @definition)
+  (struct_item name: (type_identifier) @definition)
+  (enum_item name: (type_identifier) @definition)
+  (union_item name: (type_identifier) @definition)
+  (trait_item name: (type_identifier) @definition)
+  (type_item name: (type_identifier) @definition)
+  (mod_item name: (identifier) @definition)
+  (macro_definition name: (identifier) @definition)
+  (const_item name: (identifier) @definition)
+  (static_item name: (identifier) @definition)
+  (enum_variant name: (identifier) @definition)
+  (field_declaration name: (field_identifier) @definition)
+  (impl_item type: (type_identifier) @definition)
+]

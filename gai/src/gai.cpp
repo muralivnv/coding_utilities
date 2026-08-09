@@ -1,10 +1,7 @@
 #include "printx.hpp"
 
-#include <algorithm>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
 
 #include <unistd.h>
 
@@ -12,154 +9,21 @@
 #include "args.h"
 #include "input.h"
 #include "operation.h"
+#include "process.h"
 
 constexpr const char* kVersion = PROJECT_VERSION;  // defined in root CMakeLists.txt
 
 namespace gai {
-using OutputFunc = std::function<void(std::string_view, size_t)>;
 
-static constexpr std::string_view kSgrMatch     = "\x1b[01;31m";
-static constexpr std::string_view kSgrMatchEnd  = "\x1b[m\x1b[K";
-static constexpr std::string_view kSgrFilename  = "\x1b[35m";
-static constexpr std::string_view kSgrLineNum   = "\x1b[32m";
-static constexpr std::string_view kSgrSeparator = "\x1b[36m";
-static constexpr std::string_view kSgrEnd       = "\x1b[m";
-
-consteval bool IsSgrSequence(std::string_view sgr) {
-  size_t i = 0;
-  while (i < sgr.size()) {
-    if (i + 2 >= sgr.size() || sgr[i] != '\x1b' || sgr[i + 1] != '[')
-      return false;
-    i += 2;
-    while (i < sgr.size() && ((sgr[i] >= '0' && sgr[i] <= '9') || sgr[i] == ';')) ++i;
-    if (i >= sgr.size() || (sgr[i] != 'm' && sgr[i] != 'K'))
-      return false;
-    ++i;
-  }
-  return i == sgr.size() && !sgr.empty();
-}
-
-static_assert(IsSgrSequence(kSgrMatch));
-static_assert(IsSgrSequence(kSgrMatchEnd));
-static_assert(IsSgrSequence(kSgrFilename));
-static_assert(IsSgrSequence(kSgrLineNum));
-static_assert(IsSgrSequence(kSgrSeparator));
-static_assert(IsSgrSequence(kSgrEnd));
-static_assert(!IsSgrSequence("\x1b[01;31"), "a sequence with no final byte must be rejected");
-static_assert(!IsSgrSequence("[01;31m"), "a sequence with no CSI introducer must be rejected");
-
-static constexpr size_t kSgrBytesPerSpan = kSgrMatch.size() + kSgrMatchEnd.size();
-
-static std::string_view Colorize(std::string_view line, const std::vector<Pcre2Regex>& filters,
-                                 std::vector<MatchSpan>& spans, std::string& buffer) {
-  spans.clear();
-  for (const Pcre2Regex& filter : filters) FindSpans(filter, line, spans);
-  if (spans.empty())
-    return line;
-  MergeSpans(spans);
-
-  buffer.clear();
-  buffer.reserve(line.size() + spans.size() * kSgrBytesPerSpan);
-  size_t at = 0;
-  for (const MatchSpan& span : spans) {
-    if (span.start > at)
-      buffer.append(line.data() + at, span.start - at);
-    buffer.append(kSgrMatch);
-    buffer.append(line.data() + span.start, span.end - span.start);
-    buffer.append(kSgrMatchEnd);
-    at = span.end;
-  }
-  buffer.append(line.data() + at, line.size() - at);
-  return buffer;
-}
-
-// Writes text, wrapped in an SGR sequence when colouring.
-static inline void WriteField(std::string_view text, std::string_view sgr, bool color) {
-  if (color)
-    ::fwrite_unlocked(sgr.data(), 1, sgr.size(), stdout);
-  ::fwrite_unlocked(text.data(), 1, text.size(), stdout);
-  if (color)
-    ::fwrite_unlocked(kSgrEnd.data(), 1, kSgrEnd.size(), stdout);
-}
-
-static void Process(const std::vector<gai::Pcre2Regex>& filters, const std::vector<gai::Pcre2Regex>& excludes,
-                    const std::vector<gai::Pcre2Substitution>& replacements, const OutputFunc& out_fn,
-                    std::optional<gai::Range>& range, InputBase* const input, bool color) {
-  thread_local std::string replacement_buffer(1024, ' ');
-  thread_local std::string replacement_line(1024, ' ');
-  thread_local std::string color_buffer;
-  thread_local std::vector<MatchSpan> spans;
-  size_t linenum = 0;
-  while (std::optional<std::string_view> line_opt = input->GetLine()) {
-    ++linenum;
-    std::string_view& line = line_opt.value();
-    if (range) {
-      if (!range->IsStartReached(line, linenum))
-        continue;
-      if (range->IsEndReached(line, linenum))
-        continue;
-    }
-
-    bool match = std::any_of(filters.begin(), filters.end(), [&line](const auto& r) { return Find(r, line); });
-    if (!filters.empty() && !match) {
-      continue;
-    }
-
-    match = std::any_of(excludes.begin(), excludes.end(), [&line](const auto& r) { return Find(r, line); });
-    if (!excludes.empty() && match) {
-      continue;
-    }
-
-    std::string_view emit = line;
-    if (!replacements.empty()) {
-      replacement_line.assign(line);
-      for (const Pcre2Substitution& r : replacements) {
-        std::string_view replace = Substitute(r, replacement_line, replacement_buffer);
-        replacement_line.assign(replace);
-      }
-      emit = replacement_line;
-    }
-
-    if (color)
-      emit = Colorize(emit, filters, spans, color_buffer);
-
-    out_fn(emit, linenum);
-  }
-}
-
-static gai::OutputFunc MakeOutputFunc(bool verbose, std::string_view delimiter, bool print0 = false,
-                                      std::string_view filename = {}, bool color = false) {
-  char newline_char = '\n';
-  if (print0)
-    newline_char = '\0';
-  if (!verbose) {
-    return [newline_char](std::string_view c, size_t /*k*/) {
-      ::fwrite_unlocked(c.data(), 1, c.size(), stdout);
-      ::putc_unlocked(newline_char, stdout);
-    };
-  }
-
-  if (filename.empty()) {
-    return [delimiter, newline_char, color](std::string_view c, size_t k) {
-      char num[24];
-      const int n = rostd::snprintf<"%zu">(num, sizeof(num), k);
-      WriteField({num, static_cast<size_t>(n)}, kSgrLineNum, color);
-      WriteField(delimiter, kSgrSeparator, color);
-      ::fwrite_unlocked(c.data(), 1, c.size(), stdout);
-      ::putc_unlocked(newline_char, stdout);
-    };
-  }
-  return [filename, delimiter, newline_char, color](std::string_view c, size_t k) {
-    char num[24];
-    const int n = rostd::snprintf<"%zu">(num, sizeof(num), k);
-    WriteField(filename, kSgrFilename, color);
-    WriteField(delimiter, kSgrSeparator, color);
-    WriteField({num, static_cast<size_t>(n)}, kSgrLineNum, color);
-    WriteField(delimiter, kSgrSeparator, color);
-    ::fwrite_unlocked(c.data(), 1, c.size(), stdout);
-    ::putc_unlocked(newline_char, stdout);
-  };
-}
+// grep's contract, and now gai's: 0 is a clean run, 1 is "gai could not do what
+// it was asked at all", and 2 is "the scan ran, but part of the answer is
+// missing". A pattern that exhausts pcre2's match limit on some lines is
+// exactly that third case -- the lines that matched are still printed and still
+// correct, so failing the whole run would be a lie, and succeeding silently
+// would hide that other lines were never really tested.
+constexpr int kExitOk = EXIT_SUCCESS;
+constexpr int kExitFatal = EXIT_FAILURE;
+constexpr int kExitMatchError = 2;
 
 static bool ResolveColor(const common::Args& cli) {
   if (cli.Has("--no-color"))
@@ -206,16 +70,25 @@ Options:
                             is unset
   -h, --help                Show this help message
       --version             Print version number
+
+Exit status:
+  0  the scan completed
+  1  nothing was scanned: a pattern would not compile, an expression was
+     malformed, or a substitution failed
+  2  the scan completed but some lines could not be matched: a pattern hit
+     pcre2's match or depth limit. The reason is on stderr, once per pattern,
+     and the output is a subset of what a working pattern would have printed
   )CLI";
 
   if (cli.Has("-h") || cli.Has("--help")) {
     rostd::printf<"%s">(kCliHelpMessage);
-    return EXIT_SUCCESS;
+    return gai::kExitOk;
   }
   if (cli.Has("--version")) {
     rostd::printf<"%s">(kVersion);
-    return EXIT_SUCCESS;
+    return gai::kExitOk;
   }
+  gai::MatchDiagnostics diagnostics;
   try {
     using VecStringView = std::vector<std::string_view>;
     const bool jit = !cli.Has("--no-jit");
@@ -240,22 +113,26 @@ Options:
     if (files.empty()) {
       const gai::OutputFunc fn = gai::MakeOutputFunc(verbose, delimiter, read0, {}, color);
       gai::InputStream stream(read0);
-      gai::Process(filters, excludes, replacements, fn, range, &stream, color);
+      const gai::ScanConfig config{filters, excludes, replacements, color, {}};
+      gai::Process(config, fn, range, &stream, diagnostics);
     } else {
       for (const std::string_view& f : files) {
-        std::optional<common::MmapFileReadOnly> contents = common::MmapFileReadOnly::Open(std::string{f});        
+        std::optional<common::MmapFileReadOnly> contents = common::MmapFileReadOnly::Open(std::string{f});
         if (!contents)
           continue;
         gai::InputMemMappedFile mmap_stream(contents->begin(), contents->end(), read0);
         if (range)
           range->Reset();
         const gai::OutputFunc fn = gai::MakeOutputFunc(verbose, delimiter, read0, f, color);
-        gai::Process(filters, excludes, replacements, fn, range, &mmap_stream, color);
+        const gai::ScanConfig config{filters, excludes, replacements, color, f};
+        gai::Process(config, fn, range, &mmap_stream, diagnostics);
       }
     }
   } catch (const std::exception& ex) {
     rostd::printf<"Exception raised!!\nException: %s\n">(ex.what());
-    return EXIT_FAILURE;
+    return gai::kExitFatal;
   }
-  return EXIT_SUCCESS;
+  // Whatever matched has already been printed; the status is what says the
+  // list is a subset. Diagnostics themselves went to stderr as they happened.
+  return diagnostics.Any() ? gai::kExitMatchError : gai::kExitOk;
 }

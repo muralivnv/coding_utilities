@@ -57,6 +57,20 @@ MmapStream::~MmapStream() {
   }
 }
 
+std::optional<MmapStream> MmapStreamFromBytes(const char* data, size_t size) {
+  MmapStream out;
+  if (size == 0) return out;  // an empty stream is still a valid, distinct thing
+  const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  const size_t capacity = ((size + page_size - 1) / page_size) * page_size;
+  void* mapped = mmap(NULL, capacity, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (mapped == MAP_FAILED) return std::nullopt;
+  std::memcpy(mapped, data, size);
+  out.buffer = static_cast<char*>(mapped);
+  out.size = size;
+  out.capacity = capacity;
+  return out;
+}
+
 ReadProgress MmapStream::ReadAvailable(int fd) {
   ReadProgress progress;
   const size_t page_size = PageSize();

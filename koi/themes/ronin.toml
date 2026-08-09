@@ -1,0 +1,110 @@
+"attribute"                 = { fg = "white"                                   }
+"comment"                   = { fg = "light_gray"                              }
+"constant"                  = { fg = "green"                                   }
+"constant.numeric"          = { fg = "green"                                   }
+"constant.builtin"          = { fg = "green"                                   }
+"constant.character.escape" = { fg = "moss_green"                              }
+"constructor"               = { fg = "light_yellow"                            }
+"function"                  = { fg = "light_yellow"                            }
+"function.builtin"          = { fg = "light_yellow"                            }
+"function.macro"            = { fg = "light_yellow"                            }
+"preproc_ifdef"             = { fg = "light_yellow"                            }
+"keyword"                   = { fg = "white"                                   }
+"keyword.control"           = { fg = "red"                                     }
+"keyword.control.import"    = { fg = "red"                                     }
+"keyword.control.exception" = { fg = "red"                                     }
+"keyword.operator"          = { fg = "red"                                     }
+"keyword.control.return"    = { fg = "lightsalmon", modifiers=["underlined"]   }
+"keyword.directive"         = { fg = "white"                                   }
+"keyword.storage.modifier"  = { fg = "red"                                     }
+"label"                     = { fg = "white"                                   }
+"namespace"                 = { fg = "white"                                   }
+"operator"                  = { fg = "red"                                     }
+"special"                   = { fg = "white"                                   }
+"string"                    = { fg = "green"                                   }
+"type"                      = { fg = "cyan"                                    }
+"variable.builtin"          = { fg = "red"                                     }
+"variable.parameter"        = { fg = "white"                                   }
+"variable.other.member"     = { fg = "white"                                   }
+"variable.other.enummember" = { fg = "red"                                     }
+"variable"                  = { fg = "white"                                   }
+"punctuation"               = { fg = "white"                                   }
+"punctuation.special"       = { fg = "red"                                     }
+
+"markup.heading"            = { fg = "red"   , modifiers = ["bold"]            }
+"markup.raw.inline"         = { fg = "green"                                   }
+"markup.raw.block"          = { fg = "white"                                   }
+"markup.bold"               = { fg = "gold"  , modifiers = ["bold"]            }
+"markup.italic"             = { fg = "gold", modifiers = ["italic"]            }
+"markup.strikethrough"      = { fg = "white" , modifiers = ["crossed_out"]     }
+"markup.list"               = { fg = "white"                                   }
+"markup.quote"              = { fg = "cyan"                                    }
+"markup.link.url"           = { fg = "cyan"  , modifiers = ["underlined"]      }
+"markup.link.text"          = { fg = "gold"                                    }
+"markup.link.label"         = { fg = "gold"                                    }
+
+"diff.plus"                 = "green"
+"diff.delta"                = "gold"
+"diff.minus"                = "red"
+
+"info"                      = { fg = "white"                                   }
+"hint"                      = { fg = "green"                                   }
+"diagnostic"                = { modifiers = ["underlined"]                     }
+"warning"                   = { fg = "yellow"                                  }
+"error"                     = { fg = "red"                                     }
+
+"ui.background"             = { bg = "dark"                                    }
+
+"ui.cursor"                 = { fg = "white", modifiers = ["reversed"]         }
+"ui.cursor.primary"         = { fg = "cyan", modifiers = ["reversed"]          }
+"ui.cursor.match"           = { fg = "red", modifiers = ["underlined", "bold"] }
+
+"ui.selection"              = { bg = "#474B43A4"                               }
+"ui.selection.primary"      = { bg = "#474B43A4"                               }
+"ui.cursorline.primary"     = { bg = "#313131"                                 }
+
+"ui.linenr"                 = { fg = "#7d7d7d"                                 }
+"ui.linenr.selected"        = { fg = "white", modifiers = ["bold"]             }
+"ui.excerpt.header"         = { fg = "gold", modifiers = ["bold"]              }
+"ui.excerpt.match"          = { fg = "red", modifiers = ["bold"]               }
+
+# Rendered tabs. Dimmer than the gutter: the point of drawing them is that the
+# shape of an indent can be checked when it matters, not that it competes with
+# the code for attention.
+"ui.virtual.whitespace"     = { fg = "#4a4a4a"                                 }
+
+# The keys `leap` paints over its targets. The one scope here that is meant to
+# be read before the code under it, so it takes a background of its own -- and
+# light_yellow rather than the statusline's gold, because a screenful of these
+# should not read as a row of mode blocks.
+"ui.virtual.jump-label"     = { fg = "dark", bg = "light_yellow", modifiers = ["bold"] }
+
+"ui.statusline"             = { fg = "white", bg = "#313131"                   }
+"ui.statusline.inactive"    = { fg = "white", bg = "#313131"                   }
+"ui.statusline.normal"      = { fg = "dark", bg = "green"                      }
+"ui.statusline.insert"      = { fg = "dark", bg = "gold"                       }
+"ui.statusline.select"      = { fg = "dark", bg = "light_yellow"               }
+
+"ui.text"                   = { fg = "white"                                   }
+"ui.text.focus"             = { fg = "white", bg = "#404040"                   }
+
+"ui.help"                   = { fg = "white", bg = "#282928"                   }
+"ui.popup"                  = { bg = "#282928"                                 }
+"ui.window"                 = { fg = "white"                                   }
+"ui.menu"                   = { fg = "white", bg = "#282928"                   }
+"ui.menu.selected"          = { fg = "black", bg = "red"                       }
+"ui.menu.scroll"            = { fg = "white", bg = "#474B43A4"                 }
+
+[palette]
+light_yellow = "#ffce78"
+red          = "#ff8665"
+green        = "#8EC87C"
+cyan         = "#65B0B2"
+white        = "#bfbfbf"
+dark         = "#252524"
+moss_green   = "#58865A"
+black        = "#16181A"
+light_gray   = "#636C6E"
+gold         = "#D19A66"
+navajowhite  = "#ffdead"
+lightsalmon  = "#ffa07a"

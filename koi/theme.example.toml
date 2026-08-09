@@ -1,0 +1,229 @@
+# koi theme -- every option, with the structure explained.
+#
+# Themes live in `<runtime>/themes/<name>.toml` and are selected with
+# `theme = "name"` at the *top level* of ~/.config/koi/config.toml, or at
+# runtime with `:theme name`. The runtime path is searched in this order, so
+# putting a file earlier in it overrides one later:
+#
+#   1. $KOI_RUNTIME/themes/
+#   2. ~/.config/ronin/koi/themes/
+#   3. <koi binary>/../share/koi/themes/
+#   4. the koi/ source directory, for a build tree
+#
+# The format is helix's, unchanged: same keys, same scope names, same palette
+# indirection. A helix theme file dropped into ~/.config/koi/themes works as
+# it is, and so does this one in helix. koi ships `ronin` (the default) and
+# `calm`; both were copied across from helix without edits.
+
+# ---------------------------------------------------------------------------
+# Structure
+# ---------------------------------------------------------------------------
+#
+# Every key is a *scope*: a dotted name that either the highlight queries
+# produce or koi draws its own furniture with. A value is one of:
+#
+#   "scope" = "colour"                              -- a foreground, nothing else
+#   "scope" = { fg = "...", bg = "...", modifiers = [...] }
+#
+# A colour is either `#rrggbb`, or `#rrggbbaa` (the alpha is read and dropped,
+# because a terminal cell has nowhere to put it), or a name. A name is looked
+# up in `[palette]` first and, failing that, among the sixteen built-ins:
+#
+#   black red green yellow blue magenta cyan gray
+#   light-red light-green light-yellow light-blue light-magenta light-cyan
+#   light-gray white
+#
+# Modifiers, all optional:
+#
+#   bold  dim  italic  underlined  slow_blink  rapid_blink  reversed
+#   hidden  crossed_out
+#
+# `underline` is accepted as a spelling of `underlined`. Whether a terminal
+# honours italic, blink or crossed_out is between you and your terminal.
+#
+# `#000000` means black and is drawn as black. (Worth saying because the
+# terminal layer underneath reads an all-zero colour as "use the terminal's own
+# default"; koi translates pure black so that a light theme -- `calm` sets its
+# foreground to #000000 -- is not silently invisible.) A colour left *unset* is
+# what falls back to the terminal's default, which is how a theme asks for a
+# transparent background.
+#
+# Scopes resolve by longest dotted prefix, merging as they go. A theme naming
+# only "keyword" still colours "keyword.control.return"; a theme naming
+# "markup.link" for the colour and "markup.link.url" for an underline gets
+# both. That is why a short theme is not a broken one -- only the roots below
+# are worth setting, and the rest is refinement.
+
+# Optional: start from another theme and change only what follows.
+# inherits = "ronin"
+
+# ---------------------------------------------------------------------------
+# Interface. These are the scopes koi itself draws with -- the complete list.
+# ---------------------------------------------------------------------------
+
+"ui.background"          = { bg = "#252524" }   # the editor's own background
+"ui.text"                = { fg = "#BFBFBF" }   # default foreground, and the : prompt
+"ui.linenr"              = { fg = "#7D7D7D" }   # the gutter
+"ui.linenr.selected"     = { fg = "#BFBFBF", modifiers = ["bold"] }  # cursor's line
+"ui.excerpt.header"      = { fg = "#D19A66", modifiers = ["bold"] }  # path:line in the excerpt view
+"ui.excerpt.match"       = { fg = "#EF2929", modifiers = ["bold"] }  # the word being looked up -- gai's bold red
+"ui.selection"           = { bg = "#474B43" }   # a selection
+"ui.selection.primary"   = { bg = "#474B43" }   # ...the primary one, if it differs
+"ui.cursor"              = { fg = "#BFBFBF", modifiers = ["reversed"] }
+"ui.cursor.primary"      = { fg = "#65B0B2", modifiers = ["reversed"] }
+"ui.cursor.match"        = { bg = "#6C4E1E" }   # search matches, and `mm`
+"ui.cursorline.primary"  = { bg = "#313131" }   # band behind the cursor's line
+# "ui.cursorline.secondary" = { bg = "#2B2B2B" } # ...and behind the other cursors'
+#                                                # lines. Left out here: naming
+#                                                # nothing is how you ask for
+#                                                # nothing, and one band is
+#                                                # usually enough.
+"ui.statusline"          = { fg = "#BFBFBF", bg = "#313131" }
+"ui.statusline.normal"   = { fg = "#252524", bg = "#8EC87C" }  # the NOR block
+"ui.statusline.insert"   = { fg = "#252524", bg = "#D19A66" }  # the INS block
+"ui.virtual.jump-label"  = { fg = "#252524", bg = "#FFCE78", modifiers = ["bold"] }
+#                                              # the keys `leap` paints over its
+#                                              # targets. One cell each, over
+#                                              # the text, so it wants a
+#                                              # background: a foreground alone
+#                                              # is a letter among letters.
+"ui.virtual.wrap"        = { fg = "#7D7D7D" }   # the soft-wrap indicator
+"ui.virtual.whitespace"  = { fg = "#4A4A4A" }   # rendered tabs, if `[editor.whitespace]`
+#                                              # asked for them. Only the
+#                                              # foreground is taken: the cell's
+#                                              # background still belongs to the
+#                                              # selection or the cursorline, so
+#                                              # a tab inside a selection still
+#                                              # looks selected.
+
+# koi has no menus, popups, pickers or diagnostics of its own -- `:` pipes its
+# candidates to an external picker and splits are tmux's -- so the ui.menu,
+# ui.popup, ui.help and diagnostic scopes a helix theme carries are read and
+# ignored rather than rejected.
+
+# ---------------------------------------------------------------------------
+# Syntax. Every capture the shipped highlight queries can produce.
+# ---------------------------------------------------------------------------
+#
+# Setting the roots is enough to have a complete-looking theme; the children
+# are listed so it is clear what can be refined.
+
+"comment"                    = { fg = "#636C6E" }
+"comment.line"               = { fg = "#636C6E" }
+"comment.line.documentation" = { fg = "#636C6E" }
+"comment.block"              = { fg = "#636C6E" }
+"comment.block.documentation" = { fg = "#636C6E" }
+"comment.unused"             = { fg = "#636C6E" }
+
+"string"                 = { fg = "#8EC87C" }
+"string.regexp"          = { fg = "#8EC87C" }
+"string.escape"          = { fg = "#58865A" }
+"string.special"         = { fg = "#8EC87C" }
+"string.special.symbol"  = { fg = "#8EC87C" }
+
+"constant"                  = { fg = "#8EC87C" }
+"constant.builtin"          = { fg = "#8EC87C" }
+"constant.builtin.boolean"  = { fg = "#8EC87C" }
+"constant.character"        = { fg = "#8EC87C" }
+"constant.character.escape" = { fg = "#58865A" }
+"constant.numeric"          = { fg = "#8EC87C" }
+"constant.numeric.integer"  = { fg = "#8EC87C" }
+"constant.numeric.float"    = { fg = "#8EC87C" }
+
+"keyword"                          = { fg = "#BFBFBF" }
+"keyword.control"                  = { fg = "#FF8665" }
+"keyword.control.conditional"      = { fg = "#FF8665" }
+"keyword.control.repeat"           = { fg = "#FF8665" }
+"keyword.control.import"           = { fg = "#FF8665" }
+"keyword.control.exception"        = { fg = "#FF8665" }
+"keyword.control.return"           = { fg = "#FFA07A", modifiers = ["underlined"] }
+"keyword.directive"                = { fg = "#BFBFBF" }
+"keyword.function"                 = { fg = "#BFBFBF" }
+"keyword.operator"                 = { fg = "#FF8665" }
+"keyword.storage"                  = { fg = "#FF8665" }
+"keyword.storage.type"             = { fg = "#FF8665" }
+"keyword.storage.modifier"         = { fg = "#FF8665" }
+"keyword.storage.modifier.mut"     = { fg = "#FF8665" }
+"keyword.storage.modifier.ref"     = { fg = "#FF8665" }
+
+"function"                = { fg = "#FFCE78" }
+"function.builtin"        = { fg = "#FFCE78" }
+"function.macro"          = { fg = "#FFCE78" }
+"function.method"         = { fg = "#FFCE78" }
+"function.method.private" = { fg = "#FFCE78" }
+"function.method.public"  = { fg = "#FFCE78" }
+"function.public"         = { fg = "#FFCE78" }
+"function.special"        = { fg = "#FFCE78" }
+"constructor"             = { fg = "#FFCE78" }
+
+"type"                        = { fg = "#65B0B2" }
+"type.builtin"                = { fg = "#65B0B2" }
+"type.definition"             = { fg = "#65B0B2" }
+"type.parameter"              = { fg = "#65B0B2" }
+"type.enum.variant"           = { fg = "#8EC87C" }
+"type.enum.variant.builtin"   = { fg = "#8EC87C" }
+
+"variable"                       = { fg = "#BFBFBF" }
+"variable.builtin"               = { fg = "#FF8665" }
+"variable.builtin.mutable"       = { fg = "#FF8665" }
+"variable.mutable"               = { fg = "#BFBFBF" }
+"variable.parameter"             = { fg = "#BFBFBF" }
+"variable.parameter.mutable"     = { fg = "#BFBFBF" }
+"variable.other.member"          = { fg = "#BFBFBF" }
+"variable.other.member.private"  = { fg = "#BFBFBF" }
+
+"namespace"              = { fg = "#BFBFBF" }
+"label"                  = { fg = "#BFBFBF" }
+"attribute"              = { fg = "#BFBFBF" }
+"special"                = { fg = "#BFBFBF" }
+"tag"                    = { fg = "#FF8665" }
+"error"                  = { fg = "#FF8665" }
+"embedded"               = { fg = "#BFBFBF" }
+
+"operator"               = { fg = "#FF8665" }
+"operator.special"       = { fg = "#FF8665" }
+"punctuation"            = { fg = "#BFBFBF" }
+"punctuation.bracket"    = { fg = "#BFBFBF" }
+"punctuation.delimiter"  = { fg = "#BFBFBF" }
+"punctuation.special"    = { fg = "#FF8665" }
+
+# Markup -- markdown, and the doc comments of every other language.
+"markup.heading"          = { fg = "#FF8665", modifiers = ["bold"] }
+"markup.heading.marker"   = { fg = "#FF8665" }
+"markup.heading.1"        = { fg = "#FF8665", modifiers = ["bold"] }
+"markup.heading.2"        = { fg = "#FF8665", modifiers = ["bold"] }
+"markup.heading.3"        = { fg = "#FF8665", modifiers = ["bold"] }
+"markup.heading.4"        = { fg = "#FF8665", modifiers = ["bold"] }
+"markup.heading.5"        = { fg = "#FF8665", modifiers = ["bold"] }
+"markup.heading.6"        = { fg = "#FF8665", modifiers = ["bold"] }
+"markup.bold"             = { fg = "#D19A66", modifiers = ["bold"] }
+"markup.italic"           = { fg = "#D19A66", modifiers = ["italic"] }
+"markup.strikethrough"    = { fg = "#BFBFBF", modifiers = ["crossed_out"] }
+"markup.quote"            = { fg = "#65B0B2" }
+"markup.raw.block"        = { fg = "#BFBFBF" }
+"markup.link.url"         = { fg = "#65B0B2", modifiers = ["underlined"] }
+"markup.link.label"       = { fg = "#D19A66" }
+"markup.list.numbered"    = { fg = "#BFBFBF" }
+"markup.list.unnumbered"  = { fg = "#BFBFBF" }
+"markup.list.checked"     = { fg = "#8EC87C" }
+"markup.list.unchecked"   = { fg = "#BFBFBF" }
+
+# ---------------------------------------------------------------------------
+# Palette. Optional: names the colours above may use instead of literals, so
+# that changing one shade changes it everywhere. Palette values must be
+# literal colours -- a palette entry cannot name another palette entry.
+# ---------------------------------------------------------------------------
+
+[palette]
+light_yellow = "#ffce78"
+red          = "#ff8665"
+green        = "#8EC87C"
+cyan         = "#65B0B2"
+white        = "#bfbfbf"
+dark         = "#252524"
+moss_green   = "#58865A"
+black        = "#16181A"
+light_gray   = "#636C6E"
+gold         = "#D19A66"
+navajowhite  = "#ffdead"
+lightsalmon  = "#ffa07a"

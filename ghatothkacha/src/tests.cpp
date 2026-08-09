@@ -272,8 +272,11 @@ static void TestDecodeRejections() {
   TEST_CASE("a valid datagram built by hand is accepted");
   {
     // Proves the rejections above are rejecting for the stated reason and not
-    // because the hand-built shape is wrong.
-    const Message got = DecodeMessage(Datagram("I", {"id", "1", "/tmp", "ls"}));
+    // because the hand-built shape is wrong. The datagram is a named local,
+    // not a temporary: a decoded item's fields are views into the datagram's
+    // bytes (the zero-copy contract), so the buffer must outlive the reads.
+    const std::string wire = Datagram("I", {"id", "1", "/tmp", "ls"});
+    const Message got = DecodeMessage(wire);
     EXPECT_TRUE(got.action == Action::kInsert);
     EXPECT_EQ(got.item.id, "id");
     EXPECT_EQ(got.item.start_timestamp_ns, 1u);
@@ -281,7 +284,8 @@ static void TestDecodeRejections() {
     EXPECT_EQ(got.item.cmd, "ls");
   }
   {
-    const Message got = DecodeMessage(Datagram("U", {"id", "7", "130"}));
+    const std::string wire = Datagram("U", {"id", "7", "130"});
+    const Message got = DecodeMessage(wire);
     EXPECT_TRUE(got.action == Action::kUpdate);
     EXPECT_EQ(got.item.end_timestamp_ns, 7u);
     EXPECT_EQ(got.item.retcode, 130);

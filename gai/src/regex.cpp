@@ -8,30 +8,66 @@
 namespace gai {
 using namespace std::string_literals;
 
-// Manages JIT resources. An instance of this will be created per thread.
-struct JITContext {
+// pcre2's defaults are 10 million match steps and 10 million frames of depth,
+// which is not a budget anyone waits out: a catastrophic pattern like
+// `(x+x+)+$` spends the whole 10 million on a single 30-character subject, and
+// that costs ~35 ms -- as a constant, not as a failure. koi runs the pattern
+// once per document line and re-runs the whole document on every prompt
+// keystroke, so 10M/subject is minutes of frozen, unkillable editor.
+//
+// 100k steps caps one subject at well under a millisecond and is still far
+// more than an honest search over a line of text ever asks for: a literal or a
+// `\w+` walks the subject roughly once. Hitting the cap is a match-time error,
+// which since the errors were classified travels out to the status line -- a
+// runaway pattern now fails fast and says so instead of hanging.
+constexpr uint32_t kMatchLimit = 100000;
+
+// The depth limit caps how deeply the interpreter nests its backtracking
+// frames, which is what bounds the frame memory one match can ask for. It is
+// deliberately the same number as the match limit rather than something
+// tighter: nesting depth is never more than the number of backtracks, so at
+// this value the match limit is always the one that fires, and the two engines
+// keep agreeing. A tighter depth is not free -- the JIT ignores the depth
+// limit entirely, so a depth low enough to bite is a pattern that matches on a
+// JIT box and reports an error on a no-JIT one. At 2000, `(word ?)+` over a
+// three-thousand-word line and `(ab)+` over a twenty-thousand-token line -- an
+// ordinary minified file -- did exactly that.
+constexpr uint32_t kDepthLimit = kMatchLimit;
+
+// Manages the per-thread match resources: the JIT stack, and the limits every
+// match runs under. Both engines use it -- the interpreter is the leg that
+// runs under TSan and wherever the JIT will not compile, and an unbounded
+// interpreter is the same hang with a different stack.
+struct MatchContext {
   pcre2_match_context* match_context{nullptr};
   pcre2_jit_stack* jit_stack{nullptr};
 
-  JITContext() {
+  MatchContext() {
     match_context = pcre2_match_context_create(nullptr);
     jit_stack = pcre2_jit_stack_create(32 * 1024, 512 * 1024, nullptr);
-    pcre2_jit_stack_assign(match_context, nullptr, jit_stack);
+    if (match_context) {
+      pcre2_jit_stack_assign(match_context, nullptr, jit_stack);
+      // A pattern may still say (*LIMIT_MATCH=n) for itself, but pcre2 honours
+      // it only when it is lower than the context's.
+      pcre2_set_match_limit(match_context, kMatchLimit);
+      pcre2_set_depth_limit(match_context, kDepthLimit);
+    }
   }
 
-  ~JITContext() {
+  ~MatchContext() {
     if (match_context)
       pcre2_match_context_free(match_context);
     if (jit_stack)
       pcre2_jit_stack_free(jit_stack);
   }
 
-  JITContext(const JITContext&) = delete;
-  JITContext& operator=(const JITContext&) = delete;
+  MatchContext(const MatchContext&) = delete;
+  MatchContext& operator=(const MatchContext&) = delete;
 };
-thread_local JITContext thread_local_jit_context;
+thread_local MatchContext thread_local_match_context;
 
-Pcre2Compiled::Pcre2Compiled(pcre2_code* p_, bool jitted_, bool utf_) : p{p_}, jitted{jitted_}, utf{utf_} {}
+Pcre2Compiled::Pcre2Compiled(pcre2_code* p_, bool jitted_, bool utf_, std::string_view pattern_)
+    : p{p_}, jitted{jitted_}, utf{utf_}, pattern{pattern_} {}
 
 Pcre2Compiled::~Pcre2Compiled() {
   if (p)
@@ -53,32 +89,36 @@ Pcre2Compiled Compile(std::string_view pattern, bool jit_compile, bool enable_ut
   PCRE2_SIZE erroroffset{0};
 
   uint32_t compile_options = 0;
-  if (enable_utf)
-    compile_options = PCRE2_UTF | PCRE2_UCP;  // enable UTF-8 and Unicode property support
+  if (enable_utf) {
+    // PCRE2_MATCH_INVALID_UTF, not plain PCRE2_UTF: without it pcre2_match
+    // validates the whole subject up front and refuses the line on the first
+    // bad byte, while pcre2_jit_match does no such check and matches anyway.
+    // Which of the two runs is decided by whether pcre2_jit_compile happened to
+    // succeed, so the same pattern over the same bytes found different things
+    // on different machines. The two paths have to agree, and agreeing on "scan
+    // what is there" is the only answer that finds the ASCII word sitting next
+    // to a latin-1 byte. Ill-formed stretches simply never match; the rest of
+    // the subject is searched normally.
+    compile_options = PCRE2_UTF | PCRE2_UCP | PCRE2_MATCH_INVALID_UTF;
+  }
 
   Pcre2Compiled compiled{pcre2_compile(reinterpret_cast<PCRE2_SPTR>(pattern.data()), pattern.size(), compile_options,
                                        &errornumber, &erroroffset, nullptr),
-                         false /* jitted */, enable_utf};
+                         false /* jitted */, enable_utf, pattern};
+#if defined(__SANITIZE_THREAD__)
+  // JIT-emitted match code is invisible to ThreadSanitizer's shadow memory
+  // and returns wrong results under it; the interpreter is correct and only
+  // slower, which a sanitizer run is anyway.
+  jit_compile = false;
+#endif
   if (compiled.p && jit_compile) {
-    int jit_errorcode = pcre2_jit_compile(compiled.p, PCRE2_JIT_COMPLETE);
-    if (jit_errorcode != 0) {
-      std::string error;
-      switch (jit_errorcode) {
-        case PCRE2_ERROR_JIT_BADOPTION:
-          error = "PCRE2 JIT compilation failed -- 'BADOPTION'\n"s;
-          break;
-        case PCRE2_ERROR_NOMEMORY:
-          error = "PCRE2 JIT compilation failed -- cannot allocate memory\n"s;
-          break;
-        case PCRE2_ERROR_JIT_UNSUPPORTED:
-          error = "PCRE2 JIT no supported on pattern\n"s;
-          break;
-        default:
-          break;
-      }
-      throw std::runtime_error(error);
+    // A JIT that will not compile is not an error worth failing the search
+    // over. Find and FindSpans both branch on `jitted` and call pcre2_match
+    // when it is false, so the interpreter is a supported path, not a
+    // fallback bolted on here -- it is only slower.
+    if (pcre2_jit_compile(compiled.p, PCRE2_JIT_COMPLETE) == 0) {
+      compiled.jitted = true;
     }
-    compiled.jitted = true;
   }
   if (!compiled.p) {
     std::string msg(256, '.');
@@ -97,39 +137,82 @@ Pcre2Regex Regex(Pcre2Compiled&& pattern) {
   return out;
 }
 
-bool Find(const Pcre2Regex& search_pattern, std::string_view content) {
+namespace {
+
+// pcre2 says three different things through one int, and only one of them means
+// "not here". PCRE2_ERROR_NOMATCH is -1 and every real failure -- the UTF
+// validation codes, the match/depth/JIT-stack limits, out of memory -- is more
+// negative still, so `retcode >= 0` as the whole answer silently turned each of
+// them into an empty result.
+enum class MatchOutcome : std::uint8_t { kMatch, kNoMatch, kError };
+
+MatchOutcome MatchOnce(const Pcre2Regex& search_pattern, std::string_view content, PCRE2_SIZE offset,
+                       uint32_t options, int& retcode) {
+  const PCRE2_SPTR subject = reinterpret_cast<PCRE2_SPTR>(content.data());
+  retcode = search_pattern.re.jitted
+                ? pcre2_jit_match(search_pattern.re.p, subject, content.size(), offset, options,
+                                  search_pattern.match_data, thread_local_match_context.match_context)
+                : pcre2_match(search_pattern.re.p, subject, content.size(), offset, options,
+                              search_pattern.match_data, thread_local_match_context.match_context);
+
+  // Zero is a match too: it only means the ovector was too small for every
+  // capture, and the whole-match pair at [0] and [1] is always there.
+  if (retcode >= 0)
+    return MatchOutcome::kMatch;
+  // PCRE2_ERROR_PARTIAL cannot arrive without PCRE2_PARTIAL_*, but it is a
+  // report about the subject rather than a failure, so it belongs with no-match.
+  if ((retcode == PCRE2_ERROR_NOMATCH) || (retcode == PCRE2_ERROR_PARTIAL))
+    return MatchOutcome::kNoMatch;
+  return MatchOutcome::kError;
+}
+
+void DescribeError(int retcode, std::string* error) {
+  if (!error)
+    return;
+  std::string msg(256, '\0');
+  const int len = pcre2_get_error_message(retcode, reinterpret_cast<PCRE2_UCHAR*>(msg.data()), msg.size());
+  if (len > 0) {
+    msg.resize(static_cast<size_t>(len));
+    *error = std::move(msg);
+  } else {
+    *error = "PCRE2 match failed with code " + std::to_string(retcode);
+  }
+}
+
+}  // namespace
+
+bool Find(const Pcre2Regex& search_pattern, std::string_view content, std::string* error) {
   if (!search_pattern.re.p)
     return false;
 
   int retcode{0};
-  if (!search_pattern.re.jitted) {
-    retcode = pcre2_match(search_pattern.re.p, reinterpret_cast<PCRE2_SPTR>(content.data()), content.size(), 0, 0,
-                          search_pattern.match_data, nullptr);
-  } else {
-    retcode = pcre2_jit_match(search_pattern.re.p, reinterpret_cast<PCRE2_SPTR>(content.data()), content.size(), 0, 0,
-                              search_pattern.match_data, thread_local_jit_context.match_context);
-  }
-  return retcode >= 0;
+  const MatchOutcome outcome = MatchOnce(search_pattern, content, 0, 0, retcode);
+  if (outcome == MatchOutcome::kError)
+    DescribeError(retcode, error);
+  return outcome == MatchOutcome::kMatch;
 }
 
-size_t FindSpans(const Pcre2Regex& search_pattern, std::string_view content, std::vector<MatchSpan>& spans) {
+size_t FindSpans(const Pcre2Regex& search_pattern, std::string_view content, std::vector<MatchSpan>& spans,
+                 std::string* error) {
   if (!search_pattern.re.p)
     return 0;
 
   const size_t initial = spans.size();
-  const PCRE2_SPTR subject = reinterpret_cast<PCRE2_SPTR>(content.data());
   PCRE2_SIZE offset = 0;
   uint32_t options = 0;
 
   for (;;) {
-    const int retcode =
-        search_pattern.re.jitted
-            ? pcre2_jit_match(search_pattern.re.p, subject, content.size(), offset, options,
-                              search_pattern.match_data, thread_local_jit_context.match_context)
-            : pcre2_match(search_pattern.re.p, subject, content.size(), offset, options,
-                          search_pattern.match_data, nullptr);
+    int retcode{0};
+    const MatchOutcome outcome = MatchOnce(search_pattern, content, offset, options, retcode);
 
-    if (retcode < 0) {
+    if (outcome == MatchOutcome::kError) {
+      // Whatever was found before the failure stays in `spans` and is counted;
+      // `error` is how the caller learns the answer is a prefix, not the whole.
+      DescribeError(retcode, error);
+      break;
+    }
+
+    if (outcome == MatchOutcome::kNoMatch) {
       // With no options set this is a genuine end of matches. Otherwise it is the
       // retry after an empty match failing, which only means nothing else starts
       // here -- step over one character and carry on.

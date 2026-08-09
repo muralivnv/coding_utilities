@@ -51,12 +51,13 @@ std::vector<std::string_view> Split(std::string_view expr) {
   return out;
 }
 
-bool Range::IsStartReached(std::string_view content, size_t linenum) {
+bool Range::IsStartReached(std::string_view content, size_t linenum, std::string* error) {
   if (!is_start_reached_) {
-    is_start_reached_ = std::visit(Overloaded{[](const std::monostate&) { return true; },
-                                              [&linenum](size_t start_line) { return linenum == start_line; },
-                                              [&content](const Pcre2Regex& regex) { return Find(regex, content); }},
-                                   start);
+    is_start_reached_ =
+        std::visit(Overloaded{[](const std::monostate&) { return true; },
+                              [&linenum](size_t start_line) { return linenum == start_line; },
+                              [&content, error](const Pcre2Regex& regex) { return Find(regex, content, error); }},
+                   start);
     if (is_start_reached_) {
       // do not reset 'end' if end represents line-numbers
       if (!std::holds_alternative<size_t>(end)) {
@@ -67,12 +68,13 @@ bool Range::IsStartReached(std::string_view content, size_t linenum) {
   return is_start_reached_;
 }
 
-bool Range::IsEndReached(std::string_view content, size_t linenum) {
+bool Range::IsEndReached(std::string_view content, size_t linenum, std::string* error) {
   if (!is_end_reached_) {
-    is_end_reached_ = std::visit(Overloaded{[](const std::monostate&) { return false; },
-                                            [&linenum](size_t end_line) { return linenum == end_line; },
-                                            [&content](const Pcre2Regex& regex) { return Find(regex, content); }},
-                                 end);
+    is_end_reached_ =
+        std::visit(Overloaded{[](const std::monostate&) { return false; },
+                              [&linenum](size_t end_line) { return linenum == end_line; },
+                              [&content, error](const Pcre2Regex& regex) { return Find(regex, content, error); }},
+                   end);
     if (is_end_reached_) {
       // only reset if we are in regex mode for 'start'
       if (std::holds_alternative<Pcre2Regex>(start)) {

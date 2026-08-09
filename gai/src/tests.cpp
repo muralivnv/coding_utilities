@@ -7,8 +7,14 @@
 #include <string_view>
 #include <vector>
 
+#include <sys/wait.h>
+
+#include <fstream>
+#include <sstream>
+
 #include "input.h"
 #include "operation.h"
+#include "process.h"
 #include "regex.h"
 #include "test_harness.h"
 
@@ -70,6 +76,133 @@ std::vector<MatchSpan> SpansOf(const char* pattern, std::string_view subject, bo
   std::vector<MatchSpan> spans;
   FindSpans(Regex(Compile(pattern, jit, utf)), subject, spans);
   return spans;
+}
+
+// A subject that makes `kCatastrophic` exhaust the match limit. Twenty x's is
+// the length that costs more than 100 thousand steps and far less than pcre2's
+// own ten million, so it is a match-time error under gai's limits and a slow
+// no-match without them -- the same shape TestBacktrackingIsBounded uses.
+const char* const kCatastrophic = "(x+x+)+$";
+const std::string kBlowsTheLimit = std::string(20, 'x') + "z";
+
+// What one Process() run did: the lines it emitted, the diagnostics it
+// produced, and the counters the exit status is built from.
+struct ScanResult {
+  std::vector<std::string> lines;
+  std::vector<size_t> linenums;
+  std::vector<std::string> diagnostics;
+  bool any_error{false};
+  size_t reported{0};     // distinct failures printed
+  size_t occurrences{0};  // lines that ran into one
+};
+
+struct ScanRequest {
+  std::string content;
+  std::vector<std::string_view> filters{};
+  std::vector<std::string_view> excludes{};
+  std::string_view range{};
+  bool color{false};
+  bool jit{false};
+  std::string_view filename{};
+};
+
+ScanResult RunScan(const ScanRequest& request) {
+  ScanResult out;
+  const std::vector<Pcre2Regex> filters = ParseFilters(request.filters, request.jit, false);
+  const std::vector<Pcre2Regex> excludes = ParseFilters(request.excludes, request.jit, false);
+  const std::vector<Pcre2Substitution> replacements;
+  std::optional<Range> range = ParseRange(request.range, request.jit, false);
+
+  MatchDiagnostics diagnostics([&out](std::string_view text) { out.diagnostics.emplace_back(text); });
+  InputMemMappedFile input(request.content.data(), request.content.data() + request.content.size(), false);
+  const ScanConfig config{filters, excludes, replacements, request.color, request.filename};
+  Process(
+      config,
+      [&out](std::string_view line, size_t linenum) {
+        out.lines.emplace_back(line);
+        out.linenums.push_back(linenum);
+      },
+      range, &input, diagnostics);
+
+  out.any_error = diagnostics.Any();
+  out.reported = diagnostics.reported();
+  out.occurrences = diagnostics.occurrences();
+  return out;
+}
+
+bool Mentions(const std::string& text, std::string_view needle) { return text.find(needle) != std::string::npos; }
+
+// The gai binary sits next to this test binary in the build tree; CMake makes
+// gai_tests depend on it so it is always there to run.
+std::string GaiBinaryPath() {
+  char buf[4096];
+  const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n <= 0)
+    return {};
+  std::string path(buf, static_cast<size_t>(n));
+  const size_t slash = path.rfind('/');
+  if (slash == std::string::npos)
+    return {};
+  return path.substr(0, slash + 1) + "gai";
+}
+
+std::string TempPath(std::string_view tag) {
+  const char* tmpdir = std::getenv("TMPDIR");
+  std::string tmpl = std::string(tmpdir != nullptr ? tmpdir : "/tmp") + "/gai_cli_" + std::string(tag) + "_XXXXXX";
+  std::vector<char> path(tmpl.begin(), tmpl.end());
+  path.push_back('\0');
+  const int fd = mkstemp(path.data());
+  if (fd >= 0)
+    ::close(fd);
+  return std::string(path.data());
+}
+
+std::string ReadWholeFile(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  std::ostringstream buffer;
+  buffer << in.rdbuf();
+  return buffer.str();
+}
+
+struct CliResult {
+  int status{-1};
+  std::string out;
+  std::string err;
+};
+
+// Runs the real CLI end to end: only the process itself can be asked what its
+// exit status is, and stderr is a channel no in-process call exercises.
+CliResult RunCli(std::string_view args, std::string_view stdin_content) {
+  CliResult result;
+  const std::string in_path = TempPath("in");
+  const std::string out_path = TempPath("out");
+  const std::string err_path = TempPath("err");
+  {
+    std::ofstream in(in_path, std::ios::binary);
+    in.write(stdin_content.data(), static_cast<std::streamsize>(stdin_content.size()));
+  }
+
+  const std::string command = GaiBinaryPath() + " " + std::string(args) + " < " + in_path + " > " + out_path + " 2> " +
+                              err_path;
+  const int raw = std::system(command.c_str());
+  if (WIFEXITED(raw))
+    result.status = WEXITSTATUS(raw);
+  result.out = ReadWholeFile(out_path);
+  result.err = ReadWholeFile(err_path);
+
+  ::unlink(in_path.c_str());
+  ::unlink(out_path.c_str());
+  ::unlink(err_path.c_str());
+  return result;
+}
+
+size_t CountLines(const std::string& text) {
+  size_t n = 0;
+  for (const char c : text) {
+    if (c == '\n')
+      ++n;
+  }
+  return n;
 }
 
 }  // namespace
@@ -138,16 +271,25 @@ static void TestCompileAndFind() {
     EXPECT_FALSE(Find(regex, ""));
   }
 
+  TEST_CASE("asking for JIT never fails the compile");
+  // Whether PCRE2 has a JIT is a property of the build and the kernel, not of
+  // the pattern: built without JIT support, or running where W^X mappings are
+  // refused, pcre2_jit_compile answers BADOPTION for everything. That has to
+  // fall back to the interpreter -- Find and FindSpans both branch on `jitted`
+  // -- and not throw, which used to make every search return nothing at all.
+  EXPECT_NO_THROW(Compile("world", true, false));
+  const bool jit_available = Regex(Compile("world", true, false)).re.jitted;
+
   TEST_CASE("Find with JIT gives the same answers");
   {
     auto regex = Regex(Compile("world", true, false));
-    EXPECT_TRUE(regex.re.jitted);
+    EXPECT_EQ(regex.re.jitted, jit_available);
     EXPECT_TRUE(Find(regex, "hello world"));
     EXPECT_TRUE(Find(regex, "goodbyeworld"));
   }
   {
     auto regex = Regex(Compile("\\bworld\\b", true, false));
-    EXPECT_TRUE(regex.re.jitted);
+    EXPECT_EQ(regex.re.jitted, jit_available);
     EXPECT_TRUE(Find(regex, "hello world"));
     EXPECT_FALSE(Find(regex, "goodbyeworld"));
   }
@@ -363,6 +505,179 @@ static void TestFindSpans() {
   }
 }
 
+// ============================================================================
+// round 7 -- one answer whichever engine runs, and match-time errors that
+// do not pass for "nothing found"
+// ============================================================================
+static void TestBothEnginesAgreeOnIllFormedSubjects() {
+  TEST_CASE("a byte that is not UTF-8 does not hide the ASCII match next to it");
+
+  // Compiling with jit=false is the only way to reach the interpreter: once
+  // pcre2_jit_compile has succeeded, pcre2_match dispatches to the JIT itself,
+  // so flipping the `jitted` flag on a JIT-compiled pattern changes nothing.
+  // These two Compile calls are the two engines.
+  const std::string needle = "needle";
+  struct Case {
+    const char* name;
+    std::string subject;
+    bool expect_hit;
+  };
+  const std::vector<Case> cases{
+      {"valid utf-8", std::string("caf\xC3\xA9 needle here"), true},
+      {"latin-1 byte before the needle", std::string("caf\xE9 needle here"), true},
+      {"stray continuation byte before the needle", std::string("\x80 needle here"), true},
+      {"truncated sequence before the needle", std::string("\xE2\x82 needle here"), true},
+      {"bad byte after the match", std::string("needle here caf\xE9"), true},
+      {"bad byte glued to the needle", std::string("\xE9") + "needle here", true},
+      {"bad byte on both sides", std::string("\xF0 needle \xC0 here"), true},
+      {"genuinely absent", std::string("caf\xE9 nothing here"), false},
+  };
+
+  for (const Case& one : cases) {
+    for (const bool jit : {false, true}) {
+      Pcre2Regex regex = Regex(Compile(needle.c_str(), jit, true));
+      std::vector<MatchSpan> spans;
+      std::string error;
+      const size_t found = FindSpans(regex, one.subject, spans, &error);
+
+      // Never an error: a subject that is not UTF-8 is content to scan, not a
+      // failure, and "genuinely absent" must come back as a clean no-match.
+      EXPECT_EQ(error, std::string{});
+      EXPECT_EQ(found, one.expect_hit ? 1u : 0u);
+      if (one.expect_hit && (spans.size() == 1u)) {
+        const size_t at = one.subject.find(needle);
+        EXPECT_EQ(spans[0].start, static_cast<uint32_t>(at));
+        EXPECT_EQ(spans[0].end, static_cast<uint32_t>(at + needle.size()));
+      }
+      // Find agrees with FindSpans, on both engines.
+      std::string find_error;
+      EXPECT_EQ(Find(regex, one.subject, &find_error), one.expect_hit);
+      EXPECT_EQ(find_error, std::string{});
+      (void)one.name;
+    }
+  }
+
+  // A pattern with no ill-formed bytes anywhere still behaves; the option is
+  // not a licence to match rubbish.
+  {
+    std::vector<MatchSpan> spans;
+    std::string error;
+    EXPECT_EQ(FindSpans(Regex(Compile("\\w+", false, true)), std::string("a\xE9"), spans, &error), 1u);
+    EXPECT_EQ(error, std::string{});
+    EXPECT_EQ(spans.size(), 1u);
+    EXPECT_EQ(spans[0].start, 0u);
+    EXPECT_EQ(spans[0].end, 1u);  // the lone 0xE9 is not a word character, it is not anything
+  }
+}
+
+static void TestMatchTimeErrorsAreReported() {
+  TEST_CASE("a match-time failure is reported, not returned as an empty result");
+
+  // (*LIMIT_MATCH=1) is the one deterministic, fast route to a match-time
+  // error: `a*ab` over a run of a's backtracks past the limit on the first
+  // attempt, and both the interpreter and the JIT count it the same way.
+  const std::string subject = std::string(8, 'a') + "b";
+  for (const bool jit : {false, true}) {
+    Pcre2Regex regex = Regex(Compile("(*LIMIT_MATCH=1)a*ab", jit, false));
+
+    std::vector<MatchSpan> spans;
+    std::string error;
+    EXPECT_EQ(FindSpans(regex, subject, spans, &error), 0u);
+    EXPECT_FALSE(error.empty());
+    EXPECT_TRUE(error.find("match limit") != std::string::npos);
+
+    // Find reports it too, and says false -- a failure is not a match.
+    std::string find_error;
+    EXPECT_FALSE(Find(regex, subject, &find_error));
+    EXPECT_FALSE(find_error.empty());
+
+    // A caller that passes nothing still compiles and still gets no match.
+    std::vector<MatchSpan> ignored;
+    EXPECT_EQ(FindSpans(regex, subject, ignored), 0u);
+    EXPECT_FALSE(Find(regex, subject));
+  }
+
+  TEST_CASE("error is left untouched on a match and on a clean no-match");
+  for (const bool jit : {false, true}) {
+    Pcre2Regex regex = Regex(Compile("needle", jit, true));
+    std::vector<MatchSpan> spans;
+    std::string error = "sentinel";
+    EXPECT_EQ(FindSpans(regex, "a needle here", spans, &error), 1u);
+    EXPECT_EQ(error, std::string("sentinel"));
+    spans.clear();
+    EXPECT_EQ(FindSpans(regex, "nothing here", spans, &error), 0u);
+    EXPECT_EQ(error, std::string("sentinel"));
+  }
+
+  TEST_CASE("what was found before the failure is still returned");
+  for (const bool jit : {false, true}) {
+    // The leading `x` matches inside the budget; the scan that resumes after it
+    // spends the rest on `a*ab` backtracking and blows the limit. The span
+    // already collected stays, and `error` is what says the list is a prefix.
+    Pcre2Regex regex = Regex(Compile("(*LIMIT_MATCH=2)x|a*ab", jit, false));
+    std::vector<MatchSpan> spans;
+    std::string error;
+    const size_t found = FindSpans(regex, "x" + std::string(20, 'a') + "b", spans, &error);
+    EXPECT_EQ(found, 1u);
+    EXPECT_EQ(found, spans.size());
+    EXPECT_TRUE(!spans.empty() && (spans[0].start == 0u) && (spans[0].end == 1u));
+    EXPECT_FALSE(error.empty());
+  }
+}
+
+static void TestBacktrackingIsBounded() {
+  TEST_CASE("a catastrophic pattern is stopped by the match limit, on both engines");
+
+  // With no limit on the match context pcre2 allows ten million match steps,
+  // which does terminate -- at ~35 ms per subject under the JIT and ~275 ms
+  // under the interpreter, as a constant cost rather than as a failure. A
+  // pattern is run once per line of every file gai scans, and once per line of
+  // the document on every keystroke typed into koi's search prompt, so ten
+  // million steps a subject is measured in minutes of unkillable wait.
+  //
+  // Twenty x's is the length that tells the two budgets apart: `(x+x+)+$`
+  // needs somewhere over 100 thousand steps to give up on it and well under
+  // ten million, so it is an error here and a slow, silent no-match if the
+  // limits come off. Nothing is timed -- which budget applies is the
+  // observable.
+  const std::string subject = std::string(20, 'x') + "z";
+  for (const bool jit : {false, true}) {
+    Pcre2Regex regex = Regex(Compile("(x+x+)+$", jit, true));
+    std::vector<MatchSpan> spans;
+    std::string error;
+    EXPECT_EQ(FindSpans(regex, subject, spans, &error), 0u);
+    EXPECT_FALSE(error.empty());
+    EXPECT_TRUE(error.find("match limit") != std::string::npos);
+
+    std::string find_error;
+    EXPECT_FALSE(Find(regex, subject, &find_error));
+    EXPECT_TRUE(find_error.find("match limit") != std::string::npos);
+  }
+
+  TEST_CASE("the limits leave ordinary work alone, and leave the engines agreeing");
+  {
+    // The depth limit is the one that has to stay generous. The JIT ignores it
+    // outright, so any depth low enough to bite is a pattern that matches under
+    // the JIT and reports an error under the interpreter -- the same
+    // engine-dependent answer the invalid-UTF fix was about. `(word ?)+` over a
+    // three-thousand-word line nests a frame per word and is a search someone
+    // would really type; at a depth limit of 2000 the two engines disagreed
+    // about it, which is why the depth limit is set no lower than the match
+    // limit that will always fire first.
+    std::string line;
+    for (int i = 0; i < 3000; ++i) line += "word ";
+    for (const bool jit : {false, true}) {
+      for (const char* pattern : {"\\w+", "(word ?)+", "(\\w+\\s*)+$", "[a-z]+"}) {
+        Pcre2Regex regex = Regex(Compile(pattern, jit, true));
+        std::vector<MatchSpan> spans;
+        std::string error;
+        EXPECT_TRUE(FindSpans(regex, line, spans, &error) > 0u);
+        EXPECT_EQ(error, std::string{});
+      }
+    }
+  }
+}
+
 static void TestParsers() {
   TEST_CASE("ParseSub");
   {
@@ -562,12 +877,232 @@ static void TestInputReaders() {
   }
 }
 
+// ============================================================================
+// process.h -- a match-time failure inside the scan is reported, not swallowed
+// ============================================================================
+static void TestScanReportsMatchTimeErrors() {
+  TEST_CASE("a filter that fails at match time says so, and the run keeps going");
+  for (const bool jit : {false, true}) {
+    ScanRequest request;
+    request.content = "hello\n" + kBlowsTheLimit + "\nsay hello again\n" + kBlowsTheLimit + "\n";
+    request.filters = {"hello", kCatastrophic};
+    request.jit = jit;
+    const ScanResult result = RunScan(request);
+
+    // The lines the working pattern matched are still printed, with their real
+    // line numbers: the scan continued past the failure.
+    EXPECT_EQ(result.lines.size(), 2u);
+    EXPECT_TRUE(result.lines.size() == 2u && result.lines[0] == "hello");
+    EXPECT_TRUE(result.lines.size() == 2u && result.lines[1] == "say hello again");
+    EXPECT_TRUE(result.linenums.size() == 2u && result.linenums[0] == 1u && result.linenums[1] == 3u);
+
+    // Two lines failed; one diagnostic came out, naming the pattern, the stage,
+    // the place, and what the failure cost.
+    EXPECT_TRUE(result.any_error);
+    EXPECT_EQ(result.occurrences, 2u);
+    EXPECT_EQ(result.reported, 1u);
+    EXPECT_EQ(result.diagnostics.size(), 1u);
+    if (!result.diagnostics.empty()) {
+      const std::string& said = result.diagnostics.front();
+      EXPECT_TRUE(Mentions(said, kCatastrophic));
+      EXPECT_TRUE(Mentions(said, "match limit"));
+      EXPECT_TRUE(Mentions(said, "--filter"));
+      EXPECT_TRUE(Mentions(said, "(standard input):2"));
+      EXPECT_TRUE(Mentions(said, "treated as not matching"));
+    }
+  }
+
+  TEST_CASE("a filename replaces (standard input) in the diagnostic");
+  {
+    ScanRequest request;
+    request.content = kBlowsTheLimit + "\n";
+    request.filters = {kCatastrophic};
+    request.filename = "notes.txt";
+    const ScanResult result = RunScan(request);
+    EXPECT_EQ(result.diagnostics.size(), 1u);
+    EXPECT_TRUE(!result.diagnostics.empty() && Mentions(result.diagnostics.front(), "notes.txt:1"));
+  }
+
+  TEST_CASE("an exclude that fails does not silently exclude, and later excludes still run");
+  for (const bool jit : {false, true}) {
+    ScanRequest request;
+    request.content = "keep me\n" + kBlowsTheLimit + "\ndrop me\n";
+    request.excludes = {kCatastrophic, "drop"};
+    request.jit = jit;
+    const ScanResult result = RunScan(request);
+
+    // The failing exclude cannot claim a match it never made, so the line it
+    // failed on stays in the output -- and is reported, which is the whole
+    // difference from before: dropping or keeping a line on the strength of a
+    // failed match is a decision no one was told about.
+    EXPECT_EQ(result.lines.size(), 2u);
+    EXPECT_TRUE(result.lines.size() == 2u && result.lines[0] == "keep me");
+    EXPECT_TRUE(result.lines.size() == 2u && result.lines[1] == kBlowsTheLimit);
+    EXPECT_TRUE(result.any_error);
+    EXPECT_EQ(result.diagnostics.size(), 1u);
+    if (!result.diagnostics.empty()) {
+      EXPECT_TRUE(Mentions(result.diagnostics.front(), "--exclude"));
+      EXPECT_TRUE(Mentions(result.diagnostics.front(), "not excluded"));
+    }
+  }
+
+  TEST_CASE("a range start that fails is reported, not a quiet swallowing of every line");
+  for (const bool jit : {false, true}) {
+    ScanRequest request;
+    request.content = kBlowsTheLimit + "\nplain\n";
+    request.range = "@(x+x+)+$@@";
+    request.jit = jit;
+    const ScanResult result = RunScan(request);
+
+    // The range never opens, so nothing prints -- which used to be an empty run
+    // with no explanation anywhere.
+    EXPECT_EQ(result.lines.size(), 0u);
+    EXPECT_TRUE(result.any_error);
+    EXPECT_EQ(result.diagnostics.size(), 1u);
+    if (!result.diagnostics.empty()) {
+      EXPECT_TRUE(Mentions(result.diagnostics.front(), "--range start"));
+      EXPECT_TRUE(Mentions(result.diagnostics.front(), kCatastrophic));
+      EXPECT_TRUE(Mentions(result.diagnostics.front(), "does not open"));
+    }
+  }
+
+  TEST_CASE("a range end that fails is reported, and the range stays open");
+  for (const bool jit : {false, true}) {
+    ScanRequest request;
+    request.content = "first\n" + kBlowsTheLimit + "\nafter\n";
+    request.range = "@1@(x+x+)+$@";
+    request.jit = jit;
+    const ScanResult result = RunScan(request);
+
+    EXPECT_EQ(result.lines.size(), 3u);
+    EXPECT_TRUE(result.lines.size() == 3u && result.lines[2] == "after");
+    EXPECT_TRUE(result.any_error);
+    EXPECT_EQ(result.diagnostics.size(), 1u);
+    if (!result.diagnostics.empty()) {
+      EXPECT_TRUE(Mentions(result.diagnostics.front(), "--range end"));
+      EXPECT_TRUE(Mentions(result.diagnostics.front(), "does not close"));
+    }
+  }
+
+  TEST_CASE("a highlight that fails still prints the line, and says the paint is partial");
+  for (const bool jit : {false, true}) {
+    ScanRequest request;
+    request.content = "needle " + kBlowsTheLimit + "\n";
+    request.filters = {"needle", kCatastrophic};
+    request.color = true;
+    request.jit = jit;
+    const ScanResult result = RunScan(request);
+
+    EXPECT_EQ(result.lines.size(), 1u);
+    EXPECT_TRUE(!result.lines.empty() && Mentions(result.lines.front(), "\x1b[01;31mneedle"));
+    EXPECT_TRUE(result.any_error);
+    EXPECT_EQ(result.diagnostics.size(), 1u);
+    if (!result.diagnostics.empty()) {
+      EXPECT_TRUE(Mentions(result.diagnostics.front(), "highlighting"));
+      EXPECT_TRUE(Mentions(result.diagnostics.front(), "unhighlighted"));
+    }
+  }
+
+  TEST_CASE("one report per pattern, however many lines fail");
+  {
+    ScanRequest request;
+    for (int i = 0; i < 50; ++i) request.content += kBlowsTheLimit + "\n";
+    request.filters = {kCatastrophic};
+    const ScanResult result = RunScan(request);
+    EXPECT_EQ(result.occurrences, 50u);
+    EXPECT_EQ(result.reported, 1u);
+    EXPECT_EQ(result.diagnostics.size(), 1u);
+  }
+
+  TEST_CASE("two patterns that fail are two reports");
+  {
+    ScanRequest request;
+    request.content = kBlowsTheLimit + "\n" + std::string(20, 'y') + "z\n";
+    request.filters = {kCatastrophic, "(y+y+)+$"};
+    const ScanResult result = RunScan(request);
+    EXPECT_EQ(result.lines.size(), 0u);
+    EXPECT_EQ(result.occurrences, 2u);
+    EXPECT_EQ(result.reported, 2u);
+    EXPECT_EQ(result.diagnostics.size(), 2u);
+  }
+
+  TEST_CASE("a scan with nothing wrong reports nothing");
+  {
+    ScanRequest request;
+    request.content = "hello\nworld\n";
+    request.filters = {"hello"};
+    const ScanResult result = RunScan(request);
+    EXPECT_EQ(result.lines.size(), 1u);
+    EXPECT_FALSE(result.any_error);
+    EXPECT_EQ(result.occurrences, 0u);
+    EXPECT_EQ(result.diagnostics.size(), 0u);
+  }
+}
+
+// ============================================================================
+// the CLI's exit status: 0 clean, 1 nothing scanned, 2 partially scanned
+// ============================================================================
+static void TestCliExitStatus() {
+  TEST_CASE("a clean run prints matches, says nothing on stderr, and exits 0");
+  {
+    const CliResult run = RunCli("-f hello", "hello\nworld\n");
+    EXPECT_EQ(run.status, 0);
+    EXPECT_EQ(run.out, std::string("hello\n"));
+    EXPECT_EQ(run.err, std::string{});
+  }
+
+  TEST_CASE("no match is still exit 0 -- gai does not use grep's 1 for it");
+  {
+    const CliResult run = RunCli("-f zzz", "hello\nworld\n");
+    EXPECT_EQ(run.status, 0);
+    EXPECT_EQ(run.out, std::string{});
+  }
+
+  TEST_CASE("a match-time failure is exit 2, once on stderr, with the matches still on stdout");
+  {
+    const std::string input = "hello\n" + kBlowsTheLimit + "\nsay hello again\n" + kBlowsTheLimit + "\n";
+    const CliResult run = RunCli("-f hello -f '(x+x+)+$'", input);
+
+    // 2, not 1: the scan ran and printed real answers. Not 0 either: some lines
+    // were never honestly tested, and a script piping this must be able to tell.
+    EXPECT_EQ(run.status, 2);
+    EXPECT_EQ(run.out, std::string("hello\nsay hello again\n"));
+    EXPECT_EQ(CountLines(run.err), 1u);
+    EXPECT_TRUE(Mentions(run.err, "match limit"));
+    EXPECT_TRUE(Mentions(run.err, kCatastrophic));
+    EXPECT_TRUE(Mentions(run.err, "gai: (standard input):2:"));
+  }
+
+  TEST_CASE("a pattern that will not compile is still exit 1, and nothing is scanned");
+  {
+    const CliResult run = RunCli("-f 'bad['", "hello\n");
+    EXPECT_EQ(run.status, 1);
+    EXPECT_EQ(run.out.find("hello\n"), std::string::npos);
+  }
+
+  TEST_CASE("the failing pattern is named per stage: an exclude reports as an exclude");
+  {
+    const std::string input = "keep me\n" + kBlowsTheLimit + "\n";
+    const CliResult run = RunCli("-e '(x+x+)+$'", input);
+    EXPECT_EQ(run.status, 2);
+    EXPECT_EQ(CountLines(run.err), 1u);
+    EXPECT_TRUE(Mentions(run.err, "--exclude"));
+    // Fail-open: the line the exclude could not test is still printed.
+    EXPECT_EQ(run.out, "keep me\n" + kBlowsTheLimit + "\n");
+  }
+}
+
 int main() {
   TestTrimAndSplit();
   TestCompileAndFind();
   TestSubstitute();
   TestFindSpans();
+  TestBothEnginesAgreeOnIllFormedSubjects();
+  TestMatchTimeErrorsAreReported();
+  TestBacktrackingIsBounded();
   TestParsers();
   TestInputReaders();
+  TestScanReportsMatchTimeErrors();
+  TestCliExitStatus();
   return common::TestSummary();
 }

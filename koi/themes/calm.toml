@@ -1,0 +1,68 @@
+"ui.background"          = { bg = "background" }
+"ui.text" = "foreground"
+"ui.text.focus"          = { bg = "accent_color", fg = "foreground" }
+"ui.linenr"              = { bg = "background", fg = "foreground" }
+"ui.linenr.selected"     = { bg = "highlight_purple", fg = "foreground" }
+"ui.excerpt.header"      = { fg = "foreground", bg = "accent_color", modifiers = ["bold"] }
+"ui.excerpt.match"       = { fg = "red", modifiers = ["bold"] }
+"ui.selection"           = { bg = "highlight_purple" }
+"ui.cursorline"          = { bg = "accent_color" }
+"ui.statusline"          = { fg = "foreground", bg = "accent_color" }
+"ui.statusline.inactive" = { fg = "foreground", bg = "accent_color" }
+"ui.virtual" = "indent"
+"ui.virtual.ruler"       = { bg = "accent_color" }
+"ui.virtual.jump-label"  = { bg = "highlight_green", fg = "foreground", modifiers = ["bold"] }
+"ui.cursor.match"        = { bg = "accent_color" }
+"ui.cursor"              = { bg = "cursor", fg = "background" }
+"ui.debug"               = { fg = "orange" }
+"ui.highlight.frameline" = { bg = "highlight_purple" }
+"ui.help"                = { fg = "foreground", bg = "accent_color" }
+"ui.popup"               = { fg="foreground", bg = "accent_color" }
+"ui.menu"                = { fg = "foreground", bg = "accent_color" }
+"ui.menu.selected"       = { bg = "highlight_yellow", fg = "foreground" }
+"ui.window"              = { bg = "background" }
+"ui.bufferline"          = { fg = "foreground", bg = "accent_color" }
+"ui.bufferline.active"   = { fg = "foreground", bg = "background" }
+
+# Markup
+"markup.heading" = { fg = "foreground", modifiers = ["bold"] }
+"markup.raw" = { fg = "foreground", bg = "gray" }
+
+# Picker
+"ui.picker.header.column.active" = { fg = "foreground", bg = "highlight_yellow" }
+
+# Diagnostics
+"diagnostic.error" = { bg = "highlight_red", fg = "foreground", modifiers = ["bold"] }
+"diagnostic.warning" = { bg = "highlight_orange", fg = "foreground", modifiers = ["bold"] }
+"diagnostic.hint" = { bg = "gray", fg = "foreground", modifiers = ["bold"] }
+
+error = { bg = "highlight_red", fg = "foreground" }
+warning = { bg = "highlight_orange", fg = "foreground" }
+hint = { bg = "gray", fg = "foreground" }
+
+# Git
+"diff.plus" = { fg = "green" }
+"diff.delta" = { fg = "blue" }
+"diff.minus" = { fg = "red" }
+
+# Syntax
+"string" = "foreground"
+"comment" = { fg = "foreground", modifiers = ["bold"] }
+
+[palette]
+background = "#ffffff"
+foreground = "#000000"
+accent_color = "#ccf4ff"
+cursor = "#000000"
+red = "#c32e2e"
+green = "#2ec347"
+blue = "#2e93c3"
+indent = "#aaaaaa"
+orange = "#f0d9c7"
+gray = "#dddddd"
+yellow = "#c3c32e"
+highlight_red = "#ffcdcd"
+highlight_orange = "#ffedce"
+highlight_yellow = "#ffffcf"
+highlight_green = "#cfffd9"
+highlight_purple = "#eccfff"

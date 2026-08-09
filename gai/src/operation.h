@@ -13,8 +13,12 @@ struct Range {
   RangeValue start;
   RangeValue end;
 
-  bool IsStartReached(std::string_view content, size_t linenum);
-  bool IsEndReached(std::string_view content, size_t linenum);
+  // Both latch: once a bound is reached it stays reached until Reset(). When the
+  // bound is a regex, a match-time failure is not a "not reached" -- pass
+  // `error` to be told about it. As in Find, `error` is left untouched unless
+  // the match failed, so a caller with nowhere to report may pass nullptr.
+  bool IsStartReached(std::string_view content, size_t linenum, std::string* error = nullptr);
+  bool IsEndReached(std::string_view content, size_t linenum, std::string* error = nullptr);
   void Reset();
 
  private:

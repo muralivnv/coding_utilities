@@ -3,10 +3,19 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_BINARY_DIR}")
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_BINARY_DIR}")
 
-project(coding_utilities VERSION 26.08 LANGUAGES C CXX)
+project(coding_utilities VERSION 26.08.3 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Release binaries are link-time-optimised and stripped at the link. LTO
+# measured smaller AND slightly faster here (size_report.md: koi -10%, symbol
+# extraction -4%, clean builds faster); -s removes .symtab/.strtab, which is
+# never mapped at runtime -- Release carries no DWARF, and crash handling does
+# not symbolise, so nothing shipped reads what -s removes. Debug keeps both.
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+add_link_options("$<$<CONFIG:Release>:-s>")
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH "$ORIGIN")
 set(CMAKE_INSTALL_MESSAGE LAZY)
@@ -32,7 +41,7 @@ enable_testing()
 add_subdirectory(external)
 
 add_subdirectory(common)
-add_subdirectory(sakura)
 add_subdirectory(gai)
 add_subdirectory(ghatothkacha)
 add_subdirectory(tooey)
+add_subdirectory(koi)
