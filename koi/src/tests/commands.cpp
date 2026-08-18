@@ -2337,7 +2337,14 @@ void MultiCursorCopyAndPasteCarryEverySelection() {
       EXPECT_EQ(ed.registers[0], std::string("alpha"));
       EXPECT_EQ(ed.registers[2], std::string("gamma"));
     }
-    EXPECT_TRUE(ed.status.find("3 selections") != std::string::npos);
+    // The count only reaches the status line on the branch where the clipboard
+    // really took the text. Where the copy cannot land -- a nix build sandbox,
+    // whose PATH is the derivation's inputs and nothing else, or a headless CI
+    // with xclip installed but no X server to reach -- the yank still fills the
+    // registers and says so instead. Both are the command working; asserting
+    // only the first passed on a desktop and failed in the build.
+    EXPECT_TRUE(ed.status.find(ed.clipboard_parts.empty() ? "internal register" : "3 selections") !=
+                std::string::npos);
 
     // The primary-selection command is still there, and still means one.
     RunCommands(ed, {"yank_main_selection_to_clipboard"});
