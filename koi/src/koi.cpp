@@ -688,7 +688,11 @@ terminal, so they compose in a pipeline and can back a picker's preview window.
 
   if (args.Has("-h") || args.Has("--help")) {
     rostd::printf<"%s">(kCliHelpMessage);
-    return 0;
+    return EXIT_SUCCESS;
+  }
+  if (args.Has("--version")) {
+    rostd::printf<"%s">(PROJECT_VERSION); // defined in root CMakeLists.txt
+    return EXIT_SUCCESS;
   }
   if (args.Has("--render-mode")) return koi::RunRenderMode(argc, argv);
   if (args.Has("--symbol-mode")) return koi::RunSymbolMode(argc, argv);

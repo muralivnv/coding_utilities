@@ -15,12 +15,6 @@ constexpr const char* kVersion = PROJECT_VERSION;  // defined in root CMakeLists
 
 namespace gai {
 
-// grep's contract, and now gai's: 0 is a clean run, 1 is "gai could not do what
-// it was asked at all", and 2 is "the scan ran, but part of the answer is
-// missing". A pattern that exhausts pcre2's match limit on some lines is
-// exactly that third case -- the lines that matched are still printed and still
-// correct, so failing the whole run would be a lie, and succeeding silently
-// would hide that other lines were never really tested.
 constexpr int kExitOk = EXIT_SUCCESS;
 constexpr int kExitFatal = EXIT_FAILURE;
 constexpr int kExitMatchError = 2;
