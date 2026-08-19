@@ -72,6 +72,21 @@ TSInputEdit ToTsEdit(const Edit& edit) {
   return out;
 }
 
+// Whether the last token under `node` is one the parser inserted to finish a
+// construct the buffer never finished -- a MISSING `}` at the caret, which is
+// what every unterminated block looks like while it is being typed. Walking the
+// last-child chain rather than asking ts_node_has_error is deliberate: an error
+// anywhere inside a block says nothing about whether the block was closed, and
+// only the closing end of it decides whether the node owns the lines below.
+bool EndsInInventedToken(TSNode node) {
+  for (;;) {
+    if (ts_node_is_missing(node)) return true;
+    const uint32_t children = ts_node_child_count(node);
+    if (children == 0) return false;
+    node = ts_node_child(node, children - 1);
+  }
+}
+
 constexpr auto kIncrementalBudget = std::chrono::milliseconds{500};
 constexpr auto kFullParseBudget = std::chrono::milliseconds{500};
 
@@ -133,6 +148,49 @@ struct Injection {
   std::string language;
 };
 
+// Where an injected region sits, and nothing else about it. What grammar owns
+// it and what it parsed as are questions for `region_trees_`, whose entries are
+// tied to the revision they were parsed at and thrown away by the next edit; an
+// extent is the one thing about a region that an edit *moves* rather than
+// invalidates, so it is kept apart and carried forward. See InInjectedRegion.
+struct InjectedSpan {
+  Index from{0};
+  Index to{0};
+};
+
+// Maps one span through one edit, widening wherever the edit and the span
+// overlap. The direction is deliberate: the only consumer that reads a `kNo`
+// acts on it by indenting those bytes with the host's query, so a region
+// reported one byte short indents JavaScript by html's rules, while a region
+// reported one byte long merely declines to indent a byte of html. Widening is
+// the cheap mistake.
+//
+//  * an edit wholly before the span moves it by the edit's delta;
+//  * an edit wholly after it leaves it alone;
+//  * an insertion at either edge counts as inside -- text typed at the first or
+//    last byte of a <script> body lands in that body -- and grows it;
+//  * anything overlapping takes the union of what the span covered and what the
+//    edit wrote: `from` down to the edit's start, `to` up to whichever of the
+//    shifted end and the edit's new end is further along.
+//
+// A span the edit deleted outright comes back empty, which is how the caller
+// drops it.
+InjectedSpan MapSpanThrough(const InjectedSpan& span, const Edit& edit) {
+  const Index start = edit.start_byte;
+  const Index old_end = edit.old_end_byte;
+  const Index new_end = edit.new_end_byte;
+  const Index delta = new_end - old_end;
+
+  if (start == old_end) {  // an insertion has no extent to overlap with
+    if (start < span.from) return InjectedSpan{span.from + delta, span.to + delta};
+    if (start > span.to) return span;
+    return InjectedSpan{span.from, span.to + delta};
+  }
+  if (old_end <= span.from) return InjectedSpan{span.from + delta, span.to + delta};
+  if (start >= span.to) return span;
+  return InjectedSpan{std::min(span.from, start), std::max(span.to + delta, new_end)};
+}
+
 // What one Paint is willing to spend on injected regions, as bytes of document
 // handed to another grammar rather than as a count of regions.
 //
@@ -168,6 +226,13 @@ constexpr auto kInjectionBudget = std::chrono::milliseconds{50};
 // throw away the frame before it -- and it rises with that constant for the
 // same reason.
 constexpr Index kMaxCachedRegionTrees = 2 * kMaxInjectedRegions;
+
+// Injected *extents* kept, which is a different list from the trees above and
+// far cheaper per entry -- two offsets, no parse. Scrolling a long markdown file
+// accumulates one per region met, so it needs a bound of its own; it is the same
+// bound for the same reason, a whole-list drop that must not be reachable by one
+// frame's worth of regions.
+constexpr Index kMaxInjectedSpans = kMaxCachedRegionTrees;
 
 class TreeSitterSyntax final : public Syntax {
  public:
@@ -226,7 +291,10 @@ class TreeSitterSyntax final : public Syntax {
   Index InjectionParses() const override { return injection_parses_; }
 
   bool Captures(const PieceTable& table, std::span<const std::string_view> query_files,
-                Interval range, std::vector<Capture>& out, std::string& error) override {
+                Interval range, std::vector<Capture>& out, std::string& error,
+                bool* budget_exhausted = nullptr, bool keep_zero_width = false,
+                const std::chrono::steady_clock::time_point* deadline = nullptr) override {
+    if (budget_exhausted != nullptr) *budget_exhausted = false;
     out.clear();
     error.clear();
     Sync(table);
@@ -246,22 +314,52 @@ class TreeSitterSyntax final : public Syntax {
     TSQueryCursor* cursor = ts_query_cursor_new();
     ts_query_cursor_set_byte_range(cursor, static_cast<uint32_t>(scan_from),
                                    static_cast<uint32_t>(scan_to));
-    StartQueryBudget();
+    StartQueryBudget(deadline);
     ExecUnderBudget(cursor, QueryOf(*query), ts_tree_root_node(tree_));
 
     TSQueryMatch match;
     while (ts_query_cursor_next_match(cursor, &match)) {
       if (!PredicatesHold(*query, match, DocNodeText, &table)) continue;
+      // The structure fields cost real work and only one caller reads them --
+      // see the declaration for the contract. `ts_node_parent` in particular
+      // re-descends from the root, so asking it per capture on a document-wide
+      // text-object query spends the frame budget walking for an answer nobody
+      // looks at, and returns a short list of what the caller did want.
+      // Narrowed twice: to the caller that asked for zero-width spans (the
+      // indent engine), and within it to the patterns whose `scope` is
+      // `header`, the only ones for which a parent means anything.
+      const bool structure = keep_zero_width;
+      const bool wants_parent = structure && ScopeIsHeader(*query, match.pattern_index);
       for (uint16_t i = 0; i < match.capture_count; ++i) {
         const TSQueryCapture& capture = match.captures[i];
         const auto from = static_cast<Index>(ts_node_start_byte(capture.node));
         const auto to = static_cast<Index>(ts_node_end_byte(capture.node));
-        if ((to <= from) || (capture.index >= names.size())) continue;
-        out.push_back(Capture{from, to, names[capture.index]});
+        // A node spanning no bytes is one the parser completed with a token it
+        // invented, and only the indent engine has any use for it -- see the
+        // declaration.
+        if (((to <= from) && !keep_zero_width) || (capture.index >= names.size())) continue;
+        Index parent_from = from;
+        if (wants_parent) {
+          const TSNode parent = ts_node_parent(capture.node);
+          if (!ts_node_is_null(parent)) parent_from = static_cast<Index>(ts_node_start_byte(parent));
+        }
+        out.push_back(Capture{from, to, names[capture.index], match.id, match.pattern_index,
+                              parent_from, structure && EndsInInventedToken(capture.node)});
       }
     }
     ts_query_cursor_delete(cursor);
+    // The deadline, and *only* the deadline: this cursor has no match limit set,
+    // so the one other way a tree-sitter query run comes back incomplete cannot
+    // happen here. Whoever adds ts_query_cursor_set_match_limit to the cursor
+    // above -- kMaxQueryMatchStates in query.h, as overview.cpp, textobject.cpp
+    // and symbols.cpp set it, each reading the flag back afterwards -- has to
+    // fold ts_query_cursor_did_exceed_match_limit into `expired` here as well.
+    // A dropped match is a capture the indent engine never sees and reads
+    // as a scope that is not there, which is a silently wrong column rather than
+    // a decline; `budget_exhausted` is what turns an incomplete run into one.
+    const bool expired = query_deadline_.expired;
     NoteQueryBudget();
+    if (budget_exhausted != nullptr) *budget_exhausted = expired;
     return true;
   }
 
@@ -286,7 +384,32 @@ class TreeSitterSyntax final : public Syntax {
         ts_node_descendant_for_byte_range(ts_tree_root_node(tree_), at, at + 1));
   }
 
+  // The half of the question above that is only about ownership: which grammar's
+  // rules apply to this byte, without asking what it parsed as.
+  //
+  // Answered from `injected_spans_` rather than from `region_trees_`, which this
+  // used to read. Two things that map is not: it is emptied by every Sync, so
+  // one caret's query blinded the guard for the next caret of the same command;
+  // and its entries are only valid at the revision they were parsed at, so
+  // between an edit and the paint that follows it every offset in it is one edit
+  // out of date -- which is exactly the state auto-indent asks this in. Spans
+  // survive both: nothing but a paint replaces them, and an edit moves them.
+  Injected InInjectedRegion(const PieceTable& table, Index pos) override {
+    AdvanceSpans(table);
+    if (spans_unmapped_) return Injected::kUnknown;
+    if (pos < 0) return Injected::kNo;
+    // Sorted and disjoint, so the only candidate is the last span starting at or
+    // before `pos`.
+    const auto after = std::ranges::upper_bound(injected_spans_, pos, {}, &InjectedSpan::from);
+    if (after == injected_spans_.begin()) return Injected::kNo;
+    return (pos < (after - 1)->to) ? Injected::kYes : Injected::kNo;
+  }
+
   void Sync(const PieceTable& table) override {
+    // Before the early returns: the spans are the one piece of state here that
+    // an unchanged tree does not make current, and a Sync that decides it has
+    // nothing to parse has still seen the table.
+    AdvanceSpans(table);
     if (revision_ == table.revision) {
       if ((tree_ != nullptr) || timed_out_) return;
     }
@@ -299,6 +422,10 @@ class TreeSitterSyntax final : public Syntax {
     // `revision == revision_` test in PaintInjections is what actually makes
     // reuse safe; clearing here is belt and braces, so the map cannot carry
     // entries from a dead revision forward.
+    //
+    // A tree is worth nothing at moved offsets, so dropping it is right; where
+    // a region *is* survives the edit that moved it, and that half lives in
+    // `injected_spans_`, which AdvanceSpans above has already carried forward.
     region_trees_.clear();
     // Lowered here and raised only in CollectInjections, exactly as `timed_out_`
     // is: giving up on part of a document is a fact about the revision that was
@@ -385,16 +512,31 @@ class TreeSitterSyntax final : public Syntax {
   // Opens a query budget for one call into this object. Every cursor started
   // between here and the matching NoteQueryBudget() shares it, so the cost is
   // bounded per frame and not per cursor.
-  void StartQueryBudget() {
-    query_deadline_ = Deadline{std::chrono::steady_clock::now() + kQueryBudget, nullptr, false, 0};
+  //
+  // `caller` is a deadline this call may not run past whatever the frame budget
+  // says -- see Captures. Taken as the earlier of the two rather than as a
+  // replacement: a caller may shorten a frame and may not lengthen one, so a
+  // generous deadline handed in from outside cannot turn the 25 ms bound below
+  // into a stall. Written afresh here on every call, so what a caller hands in
+  // governs its own call and nothing after it.
+  void StartQueryBudget(const std::chrono::steady_clock::time_point* caller = nullptr) {
+    const auto frame = std::chrono::steady_clock::now() + kQueryBudget;
+    query_budget_borrowed_ = (caller != nullptr) && (*caller < frame);
+    query_deadline_ = Deadline{query_budget_borrowed_ ? *caller : frame, nullptr, false, 0};
   }
 
   // Closes it, and tells the truth about it. Only ever raises the flag: what
   // lowers it is the next parse in Sync, exactly as for a parse that gave up.
   // A query that ran out is a fact about this revision, and it holds until the
   // buffer changes.
+  //
+  // Which is exactly why a run the *caller's* deadline cut does not raise it:
+  // that run stopped because whoever asked had spent its own time, not because
+  // this document is more than a frame can match, and the same query on the same
+  // revision with a budget of its own would finish. The caller is told through
+  // `budget_exhausted`, which is its answer to give.
   void NoteQueryBudget() {
-    if (query_deadline_.expired) timed_out_ = true;
+    if (query_deadline_.expired && !query_budget_borrowed_) timed_out_ = true;
   }
 
   // `query_options_` is a member and not a local because the cursor keeps a
@@ -504,26 +646,23 @@ class TreeSitterSyntax final : public Syntax {
   }
 
   // Reads the one directive koi understands, `(#set! injection.language "x")`,
-  // off a pattern. Read straight from the TSQuery rather than through
-  // CompiledQuery::predicates, which keeps a predicate's arguments but not its
-  // name, so a directive is indistinguishable from any other unknown one there.
+  // off a pattern.
+  //
+  // Through PropertiesFor, which is where `#set!` is parsed for everybody: this
+  // used to walk the predicate steps itself, looking for the literal "set!" with
+  // two string steps behind it, and two parsers for one directive drift. They
+  // already disagreed in two places -- the hand-scan matched a "set!" anywhere in
+  // the run, including one that was some other predicate's *argument*, and it
+  // refused the capture-scoped `(#set! @content injection.language "x")` that
+  // PropertiesFor reads pattern-wide. Neither shape is in a shipped
+  // injections.scm, so the answer for every file koi ships is unchanged.
+  //
+  // The first `injection.language` on the pattern wins, which is the step order
+  // PropertiesFor preserves and the one the scan it replaces read. The view is
+  // into the CompiledQuery, which outlives this call: `injections_` is a member.
   std::string_view LiteralLanguageOf(const CompiledQuery& query, uint32_t pattern) const {
-    uint32_t steps = 0;
-    const TSQueryPredicateStep* step =
-        ts_query_predicates_for_pattern(QueryOf(query), pattern, &steps);
-    const auto text = [&](uint32_t at) {
-      uint32_t length = 0;
-      const char* raw = ts_query_string_value_for_id(QueryOf(query), step[at].value_id, &length);
-      return std::string_view{raw, length};
-    };
-    for (uint32_t at = 0; at + 2 < steps; ++at) {
-      if (step[at].type != TSQueryPredicateStepTypeString) continue;
-      if (text(at) != "set!") continue;
-      if ((step[at + 1].type != TSQueryPredicateStepTypeString) ||
-          (step[at + 2].type != TSQueryPredicateStepTypeString)) {
-        continue;
-      }
-      if (text(at + 1) == "injection.language") return text(at + 2);
+    for (const QueryProperty& property : PropertiesFor(query, pattern)) {
+      if (property.key == "injection.language") return property.value;
     }
     return {};
   }
@@ -574,6 +713,114 @@ class TreeSitterSyntax final : public Syntax {
     const auto at = static_cast<uint32_t>(pos - cached.from);
     if (at >= ts_node_end_byte(root)) return false;
     return NamesLiteralOrComment(ts_node_descendant_for_byte_range(root, at, at + 1));
+  }
+
+  // Carries `injected_spans_` from the revision its offsets are in to the
+  // table's, through the same journal Sync replays into the base tree. Cheap
+  // enough to call from the guard itself -- the common case is one edit and a
+  // handful of spans, and the alternative is answering from stale offsets.
+  void AdvanceSpans(const PieceTable& table) {
+    if (spans_revision_ == table.revision) return;
+    if (injected_spans_.empty()) {
+      // Nothing to carry. Deliberately not a place that lowers `spans_unmapped_`
+      // -- the list is empty *because* the carrying failed, and only a paint
+      // knows anything again. A document that injects nothing never raised it,
+      // which is what keeps most documents from ever meeting `kUnknown`.
+      spans_revision_ = table.revision;
+      return;
+    }
+
+    // Replayable on the same terms as the tree: the journal must still reach
+    // back to where the spans stand. It cannot reach *forward* -- a document
+    // that moved backwards under this object (a reload) leaves offsets nothing
+    // here can undo -- and either way the honest answer is that the regions are
+    // still there and their whereabouts are not.
+    bool mapped = (spans_revision_ >= table.journal_base) && (spans_revision_ <= table.revision);
+    if (mapped) {
+      for (Index r = spans_revision_; r < table.revision; ++r) {
+        const Index at = r - table.journal_base;
+        if ((at < 0) || (at >= std::ssize(table.journal))) {
+          mapped = false;
+          break;
+        }
+        const Edit& edit = table.journal[static_cast<std::size_t>(at)];
+        for (InjectedSpan& span : injected_spans_) span = MapSpanThrough(span, edit);
+      }
+    }
+    spans_revision_ = table.revision;
+    if (mapped) {
+      NormalizeSpans();
+      return;
+    }
+    injected_spans_.clear();
+    spans_unmapped_ = true;
+  }
+
+  // Drops what an edit emptied and restores the sorted-disjoint invariant the
+  // lookup depends on: widening two neighbours through one edit can leave them
+  // overlapping.
+  //
+  // Checked before it is done, because the check is a scan and the repair is a
+  // sort, and the caller that runs per caret per keystroke almost never needs
+  // the repair: mapping moves spans monotonically, so only an edit that spans
+  // the gap between two of them can put a pair out of shape. The paint path,
+  // which appends a window's worth of new regions at the end, always does.
+  void NormalizeSpans() {
+    bool intact = true;
+    for (std::size_t at = 0; at < injected_spans_.size(); ++at) {
+      const InjectedSpan& span = injected_spans_[at];
+      if ((span.to <= span.from) || ((at > 0) && (span.from < injected_spans_[at - 1].to))) {
+        intact = false;
+        break;
+      }
+    }
+    if (intact) return;
+
+    std::erase_if(injected_spans_, [](const InjectedSpan& span) { return span.to <= span.from; });
+    std::ranges::sort(injected_spans_, {}, &InjectedSpan::from);
+    std::size_t kept = 0;
+    for (const InjectedSpan& span : injected_spans_) {
+      if ((kept > 0) && (span.from <= injected_spans_[kept - 1].to)) {
+        injected_spans_[kept - 1].to = std::max(injected_spans_[kept - 1].to, span.to);
+        continue;
+      }
+      injected_spans_[kept++] = span;
+    }
+    injected_spans_.resize(kept);
+  }
+
+  // What one paint of [start, end) leaves the guard knowing. Every region the
+  // collection found goes in, whether or not koi has a grammar for it and
+  // whether or not the parse that follows succeeds: which grammar owns a byte is
+  // not a question about how well it was painted, and a ```mermaid fence is as
+  // wrong to indent by markdown's rules as a <script> is by html's.
+  //
+  // `complete` is the collection's own account of itself. When it holds, this
+  // window's regions are the whole truth about this window and whatever was
+  // known of it before is replaced -- which is what retires the span of a
+  // <script> the user has since turned into a <div>. When it does not (the
+  // region budget cut the collection short), the two are unioned instead:
+  // dropping a region the collection never got to would be the expensive
+  // mistake. Outside the window nothing is touched either way, which is what
+  // lets scrolling accumulate the document rather than forget it.
+  void RecordInjectedSpans(Index start, Index end, bool complete) {
+    spans_unmapped_ = false;
+    if (complete) {
+      std::vector<InjectedSpan> kept;
+      kept.reserve(injected_spans_.size());
+      for (const InjectedSpan& span : injected_spans_) {
+        if (span.from < start) kept.push_back(InjectedSpan{span.from, std::min(span.to, start)});
+        if (span.to > end) kept.push_back(InjectedSpan{std::max(span.from, end), span.to});
+      }
+      injected_spans_ = std::move(kept);
+    }
+    if ((std::ssize(injected_spans_) + std::ssize(injections_found_)) > kMaxInjectedSpans) {
+      injected_spans_.clear();
+    }
+    for (const Injection& region : injections_found_) {
+      injected_spans_.push_back(InjectedSpan{region.from, region.to});
+    }
+    NormalizeSpans();
   }
 
   // The regions inside [start, end) that another grammar owns.
@@ -648,6 +895,16 @@ class TreeSitterSyntax final : public Syntax {
   void PaintInjections(const PieceTable& table, Index start, Index end,
                        std::vector<CaptureId>& out) {
     CollectInjections(table, start, end, injections_found_);
+    // Recorded before the early return below, and from what the collection found
+    // rather than from what the loop manages to parse: a window that no longer
+    // has a region in it is exactly the case that has to retire the span it used
+    // to have. Only when the tree the regions came out of is the table's own --
+    // a paint over a stale tree has stale offsets, and the spans are kept in the
+    // table's coordinates.
+    if (revision_ == table.revision) {
+      AdvanceSpans(table);
+      RecordInjectedSpans(start, end, !injections_truncated_);
+    }
     if (injections_found_.empty()) return;
 
     for (const Injection& region : injections_found_) {
@@ -726,6 +983,9 @@ class TreeSitterSyntax final : public Syntax {
   // Live only between StartQueryBudget() and NoteQueryBudget(); the calls do
   // not nest, and Captures' own cursor is gone before either returns.
   Deadline query_deadline_{};
+  // Whether the deadline in force is a caller's rather than this frame's, which
+  // is what decides who a run that stopped short belongs to. See NoteQueryBudget.
+  bool query_budget_borrowed_{false};
   TSQueryCursorOptions query_options_{};
   int full_parse_failures_{0};
   std::vector<Span> spans_;
@@ -744,6 +1004,14 @@ class TreeSitterSyntax final : public Syntax {
   std::map<std::string, Layer, std::less<>> layers_;
   // Keyed on the region's start byte. Emptied by Sync; see PaintInjections.
   std::map<Index, CachedRegion> region_trees_;
+  // Where the regions the paints so far have found sit, sorted and disjoint, in
+  // the coordinates of `spans_revision_` -- a *table* revision, not this
+  // object's, because these are carried through the journal rather than rebuilt
+  // by a parse. `spans_unmapped_` says the carrying failed and the offsets have
+  // been dropped; see AdvanceSpans and InInjectedRegion.
+  std::vector<InjectedSpan> injected_spans_;
+  Index spans_revision_{-1};
+  bool spans_unmapped_{false};
   Index injection_parses_{0};
   bool injections_truncated_{false};
 

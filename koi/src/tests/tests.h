@@ -73,6 +73,21 @@ void TrimOnSave();
 void AtomicWriteFollowsSymlinksAndKeepsHardLinks();
 void ConcurrentSavesNeitherBlendNorShareATemp();
 
+// indent.cpp -- the tree-sitter indent engine and the newline path it feeds
+void TreeIndentEngine();
+void TreeIndentFallbacks();
+void TreeIndentNewlinePath();
+void TreeIndentReindentOnType();
+void TreeIndentLanguageMatrix();
+void TreeIndentVendoredQueryAdditions();
+void TreeIndentTabsUtf8AndCrlf();
+void TreeIndentHeaderParentFold();
+void TreeIndentInjectionGuardOutlivesEdits();
+void TreeIndentSaysNothingAboutAParseItNeverGot();
+void TreeIndentWarnsOncePerBrokenQuery();
+void TreeIndentBudgetsBoundTheKeystroke();
+void TreeIndentFuzz(Rng& rng);
+
 // jumplist.cpp -- the jump list
 void JumpList();
 
@@ -145,9 +160,13 @@ void StorePathsResolveAgainstTheRootFromBelowIt();
 void VisitReadsAreBoundedAndTheTableIsPruned();
 void SymbolReadsAreBoundedAndTheTableIsPruned();
 
-// query.cpp -- the file/query layer: whole-file reads and byte ranges
+// query.cpp -- the file/query layer: whole-file reads, byte ranges, predicates and properties
 void ReadWholeFileContract();
 void ABufferPastFourGigabytesGetsNoByteRangeAtAll();
+void QueryPropertiesAreReadOffThePatternThatSetThem();
+void KindAndLinePredicatesAreAnsweredFromTheTree();
+void CapturesRememberTheMatchTheyCameFrom();
+void EveryVendoredIndentQueryCompilesAndItsPredicatesBite();
 
 // render.cpp -- what reaches the terminal: the frame, its gaps, and its escapes
 void Rendering();

@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <deque>
 #include <limits>
 #include <optional>
 #include <span>
 
+#include "indent.h"
 #include "jumplist.h"
 #include "keylog.h"
 #include "keymap.h"
@@ -260,7 +262,14 @@ char CloserFor(char opener) {
   }
 }
 
-NewlineIndent IndentForNewline(Editor& ed, Index cursor) {
+// The indent koi has always computed: the current line's leading whitespace,
+// plus a unit when the part of the line left of the caret opened a bracket that
+// the syntax tree agrees is a bracket and not text. It knows only about the line
+// it is on, which is why the tree engine sits in front of it -- but it is also
+// the answer for every language with no `indents.scm`, for a buffer with no
+// syntax at all, and for a query that could not be run, so it stays exactly as
+// it was.
+NewlineIndent BracketIndentForNewline(Editor& ed, Index cursor) {
   const PieceTable& table = ed.doc.table;
   const Index line = LineAt(table, cursor);
   const Index start = LineStart(table, line);
@@ -311,15 +320,113 @@ NewlineIndent IndentForNewline(Editor& ed, Index cursor) {
   return out;
 }
 
+// What is left of a command's indent deadline, floored at zero and in the whole
+// milliseconds TreeIndentFor* is paid in. Truncating rather than rounding costs
+// one caret under a millisecond of its share and can only ever end the run
+// early, which is the direction a bound is allowed to be wrong in. Measured from
+// one absolute deadline per command, so it does not accumulate: each caret is
+// short by less than a millisecond of the same fixed end, not of the last
+// caret's.
+std::chrono::milliseconds RemainingIndentBudget(std::chrono::steady_clock::time_point deadline) {
+  const auto left = deadline - std::chrono::steady_clock::now();
+  if (left <= std::chrono::steady_clock::duration::zero()) return std::chrono::milliseconds::zero();
+  return std::chrono::duration_cast<std::chrono::milliseconds>(left);
+}
+
+// The tree's answer where there is one, today's heuristic where there is not.
+//
+// Only the two indent *strings* change hands: whether a closer belongs on a line
+// of its own is still auto-pairs' question, answered by the bracket scan above,
+// and the tree only says which column it lands in. The two cannot disagree about
+// placement that way, and a language with an `indents.scm` that says nothing
+// about the construct being typed degrades to the same shape it had before.
+//
+// Caret sitting between an auto-paired `{` and `}` is the one case where the
+// tree's answer is the *closer's* line and not the caret's: the `}` has not
+// moved yet, so it still begins the line the newline opens and its `@outdent`
+// counts against it. That is the right column for the brace, and the caret goes
+// one level inside it -- which is the same shape the bracket heuristic builds,
+// and the same one helix builds for a pair it is splitting.
+//
+// Unless the answer is an `@align`, where it is a column and not a depth: the
+// argument after `foo(a,` lines up under `a` whether or not the `)` came along
+// for the ride, so pushing the caret a level past it would put it where nothing
+// else in that list sits. The closer takes the same column -- which is what the
+// tree answers for the `)` line on its own, and what keeps a later keystroke on
+// that line from moving a brace this code just placed.
+// `deadline` is the whole keystroke's, not this cursor's: what this cursor may
+// spend is whatever is left of it when it is reached. A cursor that finds it
+// spent keeps the bracket heuristic's answer, which is already computed on the
+// line above -- so the fallback for a spent budget costs nothing and is the same
+// answer a language without an `indents.scm` gets.
+NewlineIndent IndentForNewline(Editor& ed, Index cursor, std::string& error,
+                               std::chrono::steady_clock::time_point deadline) {
+  NewlineIndent out = BracketIndentForNewline(ed, cursor);
+  if (ed.doc.syntax == nullptr) return out;
+
+  const std::chrono::milliseconds left = RemainingIndentBudget(deadline);
+  if (left <= std::chrono::milliseconds::zero()) return out;
+
+  const IndentStyle style{ed.doc.tab_width, ed.doc.insert_spaces};
+  bool aligned = false;
+  const std::optional<std::string> tree =
+      TreeIndentForNewline(ed.doc.table, *ed.doc.syntax, cursor, style, error, left, &aligned);
+  if (!tree.has_value()) return out;
+
+  if (out.closing_line.empty()) {
+    out.indent = *tree;
+  } else {
+    out.closing_line = "\n" + *tree;
+    out.indent = aligned ? *tree : IndentedOnce(*tree, style);
+  }
+  return out;
+}
+
+// What one Enter has to say about the indent query, said at most once per
+// buffer. See IndentWarning for why the repeat is dropped rather than shown:
+// nothing but a broken `indents.scm` gets this far, and it breaks the same way
+// on every keystroke.
+void WarnAboutIndentOnce(Editor& ed, const std::string& error) {
+  if (error.empty()) {
+    ed.indent_warned = IndentWarning{};
+    return;
+  }
+  if ((ed.indent_warned.document == ed.doc.id) && (ed.indent_warned.message == error)) return;
+  ed.indent_warned = IndentWarning{ed.doc.id, error};
+  ed.status.Warn(error);
+}
+
 void InsertNewlineAutoIndent(Editor& ed) {
   if (ed.doc.syntax != nullptr) ed.doc.syntax->Sync(ed.doc.table);
 
   UndoGroup group(ed.doc.table);
   auto ranges = ed.doc.selections.Ranges();
 
+  // The first message any cursor produced, shown once. A query that will not
+  // compile fails identically for every cursor -- the language and the query
+  // file belong to the buffer, not to the caret -- and an Enter with sixty
+  // carets in it must not be sixty status messages, nor sixty Enters be sixty of
+  // them, which is what WarnAboutIndentOnce below is for.
+  //
+  // First and not last on purpose. Only indent.cpp's Prepare writes into the
+  // string it is handed, and it never clears one, so keeping the last write
+  // would come to the same thing today; it would stop doing so the moment a
+  // second writer appeared or the compile started failing differently on the
+  // second attempt, and which message a status line shows should not rest on a
+  // promise made in another file.
+  std::string error;
+  std::string reported;
+  // One deadline for the Enter and not one per cursor. A budget each cursor
+  // mints fresh is no bound on the keystroke -- sixty carets was sixty times
+  // 25 ms, with every millisecond of it between the key going down and the line
+  // appearing -- and what a cursor that runs into the end of it loses is the
+  // tree's answer for its own line, not the newline. See kIndentBudget.
+  const auto deadline = std::chrono::steady_clock::now() + kIndentBudget;
   for (size_t i = ranges.size(); i-- > 0;) {
     const Index cursor = CursorOf(ed.doc.table, ranges[i]);
-    const NewlineIndent indent = IndentForNewline(ed, cursor);
+    reported.clear();
+    const NewlineIndent indent = IndentForNewline(ed, cursor, reported, deadline);
+    if (error.empty()) error = reported;
     const std::string to_insert = "\n" + indent.indent + indent.closing_line;
 
     Edit edit;
@@ -332,6 +439,7 @@ void InsertNewlineAutoIndent(Editor& ed) {
     MapLaterRanges(ranges, i, edit);
   }
   ed.doc.selections.Replace(ed.doc.table, std::move(ranges));
+  WarnAboutIndentOnce(ed, error);
 }
 
 template <typename F>
@@ -2054,6 +2162,255 @@ bool ShouldPair(const Editor& ed, std::string_view typed, Index cursor, std::str
   return true;
 }
 
+namespace {
+
+// -- re-indent on type --------------------------------------------------------
+//
+// Vim has always kept two mechanisms apart: computing a line's indent, and
+// deciding which keystroke should recompute it (`indentkeys`). indent.cpp is the
+// first; this is the second, and without it a typed `}` lands wherever the line
+// above put it and nothing ever brings it back.
+//
+// The trigger is deliberately narrow, because it moves text the user did not ask
+// to move. What fires it is the keystroke that *completes* the token, which is
+// vim's `indentkeys` semantics: the line is a single run of non-blank bytes --
+// whitespace, one token, then nothing but whitespace -- the keystroke put a
+// non-blank byte on it, the caret is exactly at that token's end, and the tree
+// says the token is what dedents the line. Middle-of-line typing is never
+// touched, because a caret with code in front of it fails the single-run test;
+// nor is a plain statement on a fresh line, because its first token carries no
+// `@outdent` and the editor has no business having an opinion about where the
+// user is putting it. Nor is a line the caret has already walked away from: a
+// space typed after a `}` leaves the caret past the token and is the user saying
+// they are done with it, not asking for the column back.
+//
+// The exception is a line this code has already moved: `else` dedents and
+// `elsewhere` does not, so the `w` has to be able to put back what the `e` took.
+// ReindentMemory (editor.h) is that and only that.
+
+// The line's leading whitespace and the token that follows it, in offsets. This
+// is the cheap half of the trigger, and it is all a keystroke that does not
+// qualify ever pays: a scan of one line, no query, no tree.
+struct LeadingToken {
+  Index start{0};    // first byte of the line
+  Index content{0};  // first non-blank byte, == start when there is no indent
+  Index end{0};      // one past the last byte of the first non-blank run
+  // The run is the only non-blank text on the line -- everything after it up to
+  // the line's end is blank.
+  bool sole{false};
+};
+
+bool IsBlank(char c) { return (c == ' ') || (c == '\t') || (c == '\r'); }
+
+LeadingToken MeasureLeadingToken(const PieceTable& table, Index line) {
+  LeadingToken out;
+  out.start = LineStart(table, line);
+  const Index line_end = LineContentEnd(table, line);
+
+  char c = 0;
+  out.content = out.start;
+  while ((out.content < line_end) && ByteAt(table, out.content, c) && IsBlank(c)) ++out.content;
+  out.end = out.content;
+  while ((out.end < line_end) && ByteAt(table, out.end, c) && !IsBlank(c)) ++out.end;
+
+  Index after = out.end;
+  while ((after < line_end) && ByteAt(table, after, c) && IsBlank(c)) ++after;
+  out.sole = (out.content < out.end) && (after == line_end);
+  return out;
+}
+
+// Longer than any token a query outdents on -- `default:` is the longest in the
+// vendored corpus at eight bytes -- and short enough that typing an identifier at
+// the start of a line stops costing a query after a few keystrokes.
+constexpr Index kMaxOutdentToken = 32;
+
+bool TypedAtLeadingToken(const LeadingToken& token, Index cursor) {
+  if (!token.sole) return false;
+  // Exactly at the token's end: the caret is finishing the token, not sitting in
+  // front of it and not standing off in the blanks behind it. Each grapheme of
+  // `else` -- and of the `elsewhere` that has to undo it -- lands the caret at
+  // the new end, so growing a token keeps firing; the auto-pairs skip-over lands
+  // there too. Past the end is a line whose token is finished, and re-indenting
+  // it is how a column somebody placed by hand gets taken away from them.
+  if (cursor != token.end) return false;
+  return (token.end - token.content) <= kMaxOutdentToken;
+}
+
+// Whether any caret is standing strictly inside the line's leading whitespace.
+// Those bytes are that caret's property this keystroke -- typing at a caret in
+// the indent is what put them there -- and replacing the run wholesale maps
+// every position inside it onto the line's start, where Normalize merges the
+// now-coincident carets and the input they just took goes with the whitespace.
+// A position exactly at either edge survives the mapping intact and is fine;
+// the caret that owns the re-indent is at or past the token's end, so it can
+// never be the one that trips this.
+bool CaretInsideIndent(std::span<const Selection> ranges, const LeadingToken& token) {
+  const auto inside = [&token](Index pos) {
+    return (pos > token.start) && (pos < token.content);
+  };
+  return std::ranges::any_of(
+      ranges, [&inside](const Selection& s) { return inside(s.anchor) || inside(s.head); });
+}
+
+const ReindentedLine* RememberedLine(const ReindentMemory& memory, Index line,
+                                     std::string_view leading) {
+  for (const ReindentedLine& one : memory.lines) {
+    // Still standing where this code left it. Anything else on that line is
+    // somebody else's edit, and the memory of it is not ours to act on.
+    if ((one.line == line) && (one.written == leading)) return &one;
+  }
+  return nullptr;
+}
+
+// Runs after the keystroke's own insertion and inside its UndoGroup, so a typed
+// `}` and the dedent it causes are one undo step rather than two.
+void ReindentTypedLines(Editor& ed, const ReindentMemory& memory) {
+  if (ed.doc.syntax == nullptr) return;
+  if (!HasIndentQuery(ed.doc.syntax->Language())) return;
+
+  // The cheap half, run over the carets where they sit. Nearly every keystroke
+  // lands with code in front of it and is ruled out here by a scan of one line --
+  // no copy of the selections, no query, no tree. Everything below this line is
+  // paid for only by a caret that is finishing the first token on its line.
+  const auto candidate = [&ed](const Selection& s) {
+    const Index cursor = CursorOf(ed.doc.table, s);
+    const LeadingToken token = MeasureLeadingToken(ed.doc.table, LineAt(ed.doc.table, cursor));
+    return TypedAtLeadingToken(token, cursor);
+  };
+  if (!std::ranges::any_of(ed.doc.selections.Ranges(), candidate)) return;
+
+  const IndentStyle style{ed.doc.tab_width, ed.doc.insert_spaces};
+  auto ranges = ed.doc.selections.Ranges();
+  ReindentMemory next;
+  next.document = ed.doc.id;
+  bool moved = false;
+  std::string error;
+  // Before the clock is read, exactly as the newline path syncs before its loop:
+  // the first query would otherwise run the parse of the edit that just landed
+  // *inside* the first caret's share of the budget, and on a buffer whose
+  // incremental parse is itself tens of milliseconds that caret would spend the
+  // whole keystroke's budget on work every other caret then benefits from. The
+  // parse has budgets of its own; this one is for queries. Free when a paint has
+  // already synced this revision, which between keystrokes it has.
+  ed.doc.syntax->Sync(ed.doc.table);
+  // One deadline for the keystroke, as on the newline path: twenty carets on
+  // twenty qualifying lines used to be twenty budgets, and a `}` typed at all of
+  // them in a deeply nested buffer measured 261 ms of query for one keystroke.
+  // See kIndentBudget.
+  const auto deadline = std::chrono::steady_clock::now() + kIndentBudget;
+  // Lines this keystroke has already had an answer for. Two carets can qualify
+  // on one line -- both standing at the end of its leading token, which two
+  // selections with different anchors can do without Normalize merging them --
+  // and the second of them would run the whole query again to be told what the
+  // first was told, then push a second memory entry for the same line. One
+  // query per line per keystroke, and one entry.
+  std::vector<Index> answered;
+
+  // Back to front, like every other multi-cursor edit here: a line's indent
+  // changing shifts the byte offsets of every caret below it, and MapLaterRanges
+  // is what carries the ones already visited.
+  for (std::size_t i = ranges.size(); i-- > 0;) {
+    const Index cursor = CursorOf(ed.doc.table, ranges[i]);
+    const Index line = LineAt(ed.doc.table, cursor);
+    const LeadingToken token = MeasureLeadingToken(ed.doc.table, line);
+    if (!TypedAtLeadingToken(token, cursor)) continue;
+    if (std::ranges::find(answered, line) != answered.end()) continue;
+    answered.push_back(line);
+
+    const std::string leading = ReadDocRange(ed.doc.table, Interval(token.start, token.content));
+    const ReindentedLine* was = RememberedLine(memory, line, leading);
+
+    // Still a cheap precondition -- a scan of the selections, no query and no
+    // tree. A line somebody else's caret is sitting in the indent of is refused
+    // outright rather than remapped through: an indent is not worth a silently
+    // merged cursor and the bytes it had just typed. As on the decline path, a
+    // line already moved keeps its memory so a later keystroke can put it back.
+    if (CaretInsideIndent(ranges, token)) {
+      if (was != nullptr) next.lines.push_back(*was);
+      continue;
+    }
+
+    // What is left of the keystroke's budget, and nothing at all once it is
+    // spent: a caret past the deadline declines exactly as one whose query ran
+    // out does, which is the branch below.
+    const std::chrono::milliseconds left = RemainingIndentBudget(deadline);
+    bool outdent_token = false;
+    const std::optional<std::string> tree =
+        (left > std::chrono::milliseconds::zero())
+            ? TreeIndentForLine(ed.doc.table, *ed.doc.syntax, line, style, error, left,
+                                &outdent_token)
+            : std::nullopt;
+    // Declined -- no `indents.scm`, an injected region, a query that will not
+    // compile, a budget spent. Nothing is known about this line so nothing is
+    // done to it, and the error is swallowed: the newline path is where a broken
+    // query gets said out loud, and saying it once per keystroke is not a status
+    // line, it is a stutter. A line already moved keeps its memory, so the
+    // keystroke after this one can still put it back.
+    if (!tree.has_value()) {
+      if (was != nullptr) next.lines.push_back(*was);
+      continue;
+    }
+
+    const std::string* want = nullptr;
+    if (outdent_token) {
+      want = &*tree;
+    } else if (was != nullptr) {
+      // The token grew out of being an outdent. Back to exactly what was there,
+      // not to the tree's answer for it: this code moved the line because the
+      // token dedented it, and with that gone it has no licence to hold an
+      // opinion about a line somebody typed by hand.
+      want = &was->original;
+    }
+    if (want == nullptr) continue;
+
+    const std::string& original = (was != nullptr) ? was->original : leading;
+    if (*want != leading) {
+      Edit edit;
+      const std::string text = *want;
+      if (!Edited(ed, [&] {
+            return Replace(text, token.start, token.content, ed.doc.table, &edit);
+          })) {
+        return;
+      }
+      // Every range and not just the later ones, which is where this differs
+      // from its neighbours: their edit lands *at* the caret that owns it, so
+      // only the ranges past it move. This one lands at the head of the line,
+      // behind every caret on it -- a second caret further along the same line
+      // is earlier in `ranges` and still sits after the bytes just replaced.
+      // Mapping the whole list is safe for the rest: a position before the edit
+      // maps to itself.
+      for (Selection& s : ranges) {
+        const Index anchor = MapPositionAfter(s.anchor, edit);
+        const Index head = MapPositionAfter(s.head, edit);
+        // A goal column is a column, and a caret the remap moved is in a new
+        // one: the whole point of the edit is that the line's indent changed
+        // width. Every caret on the moved line has to lose it, not just the one
+        // that owns the keystroke -- a second caret further along the same line
+        // kept the column it had before the dedent, and the next Up or Down
+        // jumped it back there. Positions the mapping left alone -- everything
+        // above the edit -- keep the goal they had; nothing moved them.
+        if ((anchor != s.anchor) || (head != s.head)) s.goal_column = -1;
+        s.anchor = anchor;
+        s.head = head;
+      }
+      // The owning caret unconditionally, even where the replacement happened to
+      // be the same length: its line is the one that changed shape.
+      ranges[i].goal_column = -1;
+      moved = true;
+    }
+    // Remembered exactly while the line stands somewhere this code put it. Back
+    // at its original -- which is the common case of typing a `}` whose column
+    // was already right -- there is nothing left to undo and nothing to keep.
+    if (*want != original) next.lines.push_back(ReindentedLine{line, original, *want});
+  }
+
+  if (moved) ed.doc.selections.Replace(ed.doc.table, std::move(ranges));
+  next.revision = ed.doc.table.revision;
+  if (!next.lines.empty()) ed.reindent = std::move(next);
+}
+
+}
+
 void TypeOneKey(Editor& ed, const std::string& typed) {
   auto ranges = ed.doc.selections.Ranges();
   const std::string_view close = AutoPairClose(typed);
@@ -2091,15 +2448,33 @@ void FlushPendingAsText(Editor& ed, std::vector<Key>& pending) {
   UndoGroup group(ed.doc.table);
   std::string text;
 
+  // Read before a single byte lands, because the insertion below moves the very
+  // revision the memory is keyed on: what has to be decided is whether the
+  // keystroke that set it was this one's immediate predecessor.
+  ReindentMemory memory;
+  if ((ed.reindent.document == ed.doc.id) && (ed.reindent.revision == ed.doc.table.revision)) {
+    memory = std::move(ed.reindent);
+  }
+  ed.reindent = {};
+
   const auto flush_plain = [&] {
     if (text.empty()) return;
     Edited(ed, [&] { return InsertAtCursorsKeeping(text, ed.doc.table, ed.doc.selections); });
     text.clear();
   };
 
+  bool typed_non_blank = false;
   for (const Key& k : pending) {
     if (!IsSelfInsert(k)) continue;
     const std::string typed = KeyText(k);
+    // Only a keystroke that puts a non-blank byte on the line can be the one
+    // that completes a token, so this is the rule said out loud rather than left
+    // to fall out of the caret test. It falls out of it as well -- the trigger
+    // is judged after the insertion, and a blank pushes the caret past the end
+    // it would have to be standing on -- which is why nothing observable rests
+    // on this line; what it buys is the per-caret line scan a held-down space
+    // would otherwise pay on every repeat.
+    if (!std::ranges::all_of(typed, IsBlank)) typed_non_blank = true;
     if (ed.settings.auto_pairs && (!AutoPairClose(typed).empty() || ClosesAutoPair(typed))) {
       flush_plain();
       TypeOneKey(ed, typed);
@@ -2108,6 +2483,10 @@ void FlushPendingAsText(Editor& ed, std::vector<Key>& pending) {
     text += typed;
   }
   flush_plain();
+  // The one chokepoint both typing paths pass through: the auto-pairs one above,
+  // including the skip-over that only moves a caret, and the batched plain
+  // inserts that a `}` typed with auto-pairs off arrives on.
+  if (typed_non_blank) ReindentTypedLines(ed, memory);
   pending.clear();
 }
 
@@ -3899,6 +4278,11 @@ void RunCommands(Editor& ed, const std::vector<std::string>& names) {
   // when the edit happened -- not where the batch that led there started.
   // Batches that only move (every motion binding, the scroll wheel) must leave
   // no note at all, so the run drops whatever it did not spend on the way out.
+  //
+  // Any command at all ends the run of typed graphemes the re-indent memory
+  // belongs to -- a motion, a mode change, an undo, the Return that opens the
+  // next line. Only one more keystroke on the same word may consume it.
+  ed.reindent = {};
   for (const std::string& name : names) {
     if (!name.empty() && (name.front() == ':')) {
       // Notes and drops for itself -- it is also reachable from the prompt.

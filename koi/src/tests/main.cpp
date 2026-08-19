@@ -72,6 +72,19 @@ void RunUnicodeTests(Rng& rng) {
   SymbolLookupSaysWhyThePickerIsEmpty();
   SymbolQueriesCompile();
   TextObjectSuite();
+  TreeIndentEngine();
+  TreeIndentFallbacks();
+  TreeIndentNewlinePath();
+  TreeIndentReindentOnType();
+  TreeIndentLanguageMatrix();
+  TreeIndentVendoredQueryAdditions();
+  TreeIndentTabsUtf8AndCrlf();
+  TreeIndentHeaderParentFold();
+  TreeIndentInjectionGuardOutlivesEdits();
+  TreeIndentSaysNothingAboutAParseItNeverGot();
+  TreeIndentWarnsOncePerBrokenQuery();
+  TreeIndentBudgetsBoundTheKeystroke();
+  TreeIndentFuzz(rng);
   SymbolExtraction();
   SymbolRows();
   WordMatching();
@@ -263,6 +276,10 @@ int main() {
   koi::AQueryThatWillNotCompileFailsOncePerRunNotOncePerFile();
   koi::AProjectScaleScanKeepsItsOrderAndItsFrames();
   koi::ABufferPastFourGigabytesGetsNoByteRangeAtAll();
+  koi::QueryPropertiesAreReadOffThePatternThatSetThem();
+  koi::KindAndLinePredicatesAreAnsweredFromTheTree();
+  koi::CapturesRememberTheMatchTheyCameFrom();
+  koi::EveryVendoredIndentQueryCompilesAndItsPredicatesBite();
   koi::TextObjectLookupsAreBoundedAndSayWhenTheyFallShort();
   koi::OverviewMarksTheSectionsItCouldNotFinish();
 

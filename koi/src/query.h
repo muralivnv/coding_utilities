@@ -29,6 +29,58 @@ const TSLanguage* LanguageOf(const CompiledQuery& compiled);
 TSQuery* QueryOf(const CompiledQuery& compiled);
 std::span<const std::string> CaptureNamesOf(const CompiledQuery& compiled);
 
+// One `#set!` on a pattern: `(#set! "scope" "header")`, or the capture-scoped
+// `(#set! @indent "scope" "header")`. A key with no value at all is legal in the
+// dialect and arrives with `value` empty.
+//
+// The capture the second shape names is recognised -- it has to be, or the
+// capture step would be counted as the key -- and then dropped: every property
+// koi stores applies to the whole pattern, and every consumer reads it that way
+// (ScopeIsHeader, and syntax.cpp's LiteralLanguageOf). So a capture-scoped
+// `#set!` is treated as if it had been written pattern-wide, which is wider
+// than the dialect means it and is what the code has always done. Nothing koi
+// ships uses the shape; giving it its own field and no reader was a promise the
+// engine did not keep. A consumer that genuinely needs per-capture scope has to
+// carry the id here *and* narrow the readers to match.
+//
+// Kept as an untyped key and value rather than as a scope enum: the vendored
+// corpus sets nothing but `scope` and `injection.language` today, and what a key
+// means belongs to the algorithm that reads it, not to the parser that finds it.
+//
+// Not a predicate, and deliberately kept out of the predicate list: a property
+// says something *about* a pattern that matched, it does not decide whether it
+// matched, so a pattern carrying nothing but a `#set!` must still match
+// everything it names. tree-sitter's C API has no property call of its own --
+// ts_query_property_settings_for_pattern is on the Rust side, and the header
+// koi links against offers only ts_query_predicates_for_pattern -- so these
+// come back as ordinary predicate steps and are picked out of them by name.
+struct QueryProperty {
+  std::string key;
+  std::string value;
+};
+
+// The properties set on one pattern, in the order the query file wrote them,
+// or empty for a pattern that set none and for an index no pattern has.
+std::span<const QueryProperty> PropertiesFor(const CompiledQuery& compiled,
+                                             std::uint32_t pattern_index);
+
+// Whether pattern `pattern_index` carries `(#set! "scope" "header")`: the one
+// property the shipped indent corpus sets, decided once per pattern at compile
+// time rather than re-derived from PropertiesFor at every use.
+//
+// About the pattern and never about one capture on it, including for the
+// capture-scoped spelling -- see QueryProperty. A pattern with two `@indent`
+// captures and a `#set!` naming one of them makes both of them headers.
+//
+// Precomputed because both readers ask it on the indent hot path -- once per
+// capture in syntax.cpp's Captures, to decide whether that capture is worth an
+// O(depth) walk to its parent, and once per match in indent.cpp's fold -- and
+// because two hand-rolled scans for the same two strings is exactly the drift
+// that a single accessor rules out. The name of the property stays generic
+// data in `properties`; only this one question, asked often enough to matter,
+// gets an answer cached beside it.
+bool ScopeIsHeader(const CompiledQuery& compiled, std::uint32_t pattern_index);
+
 using NodeText = std::string_view (*)(const void* ctx, TSNode node, std::string& scratch);
 
 bool PredicatesHold(const CompiledQuery& compiled, const TSQueryMatch& match, NodeText text,

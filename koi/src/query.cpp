@@ -154,6 +154,9 @@ struct Predicate {
     kEq,
     kAnyOf,
     kMatch,
+    kKindEq,
+    kSameLine,
+    kOneLine,
     kAlways,
   };
   Op op{Op::kAlways};
@@ -196,6 +199,9 @@ struct CompiledQuery {
   TSQuery* query{nullptr};
   std::vector<std::string> capture_names;
   std::vector<std::vector<Predicate>> predicates;
+  std::vector<std::vector<QueryProperty>> properties;
+  // Parallel to `properties`: whether that pattern set `scope` to `header`.
+  std::vector<bool> header_scope;
   std::vector<gai::Pcre2Regex> regexes;
 
   ~CompiledQuery() {
@@ -209,11 +215,24 @@ std::span<const std::string> CaptureNamesOf(const CompiledQuery& compiled) {
   return compiled.capture_names;
 }
 
+std::span<const QueryProperty> PropertiesFor(const CompiledQuery& compiled,
+                                             std::uint32_t pattern_index) {
+  if (pattern_index >= compiled.properties.size()) return {};
+  return compiled.properties[pattern_index];
+}
+
+bool ScopeIsHeader(const CompiledQuery& compiled, std::uint32_t pattern_index) {
+  if (pattern_index >= compiled.header_scope.size()) return false;
+  return compiled.header_scope[pattern_index];
+}
+
 namespace {
 
 void ParsePredicates(CompiledQuery& compiled) {
   const uint32_t patterns = ts_query_pattern_count(compiled.query);
   compiled.predicates.resize(patterns);
+  compiled.properties.resize(patterns);
+  compiled.header_scope.assign(patterns, false);
 
   for (uint32_t pattern = 0; pattern < patterns; ++pattern) {
     uint32_t steps = 0;
@@ -228,6 +247,44 @@ void ParsePredicates(CompiledQuery& compiled) {
         const char* raw = ts_query_string_value_for_id(compiled.query, step[at].value_id, &length);
         const std::string_view name{raw, length};
 
+        // `#set!` is not a predicate and must not end up in the predicate list
+        // even as a no-op: it carries the scope an indent capture applies at,
+        // which is a property of the pattern, and a pattern whose only
+        // parenthesis is a `#set!` still matches everything it names. Both
+        // shapes of it reach here as the same flat run of steps -- the key and
+        // the value are strings either way, and the capture-scoped form simply
+        // has a capture step in front of them.
+        if (name == "set!") {
+          QueryProperty property;
+          uint32_t strings = 0;
+          for (uint32_t i = at + 1; i < end; ++i) {
+            // Skipped rather than stored: the capture-scoped shape is read
+            // pattern-wide by every consumer -- see QueryProperty -- and what a
+            // capture step must not do is count as the key. `(#set! @x "a")` and
+            // `(#set! "a")` set the same thing here.
+            if (step[i].type == TSQueryPredicateStepTypeCapture) continue;
+            uint32_t value_length = 0;
+            const char* value =
+                ts_query_string_value_for_id(compiled.query, step[i].value_id, &value_length);
+            if (strings == 0) {
+              property.key.assign(value, value_length);
+            } else if (strings == 1) {
+              property.value.assign(value, value_length);
+            }
+            ++strings;
+          }
+          // A `#set!` with no key at all names nothing and is dropped rather
+          // than stored as an empty-keyed property no lookup can ask for.
+          if (strings > 0) {
+            if ((property.key == "scope") && (property.value == "header")) {
+              compiled.header_scope[pattern] = true;
+            }
+            compiled.properties[pattern].push_back(std::move(property));
+          }
+          at = end + 1;
+          continue;
+        }
+
         Predicate predicate;
         std::string_view base = name;
         if (base.starts_with("not-")) {
@@ -240,6 +297,12 @@ void ParsePredicates(CompiledQuery& compiled) {
           predicate.op = Predicate::Op::kAnyOf;
         } else if (base == "match?") {
           predicate.op = Predicate::Op::kMatch;
+        } else if (base == "kind-eq?") {
+          predicate.op = Predicate::Op::kKindEq;
+        } else if (base == "same-line?") {
+          predicate.op = Predicate::Op::kSameLine;
+        } else if (base == "one-line?") {
+          predicate.op = Predicate::Op::kOneLine;
         } else {
           predicate.op = Predicate::Op::kAlways;
         }
@@ -277,6 +340,17 @@ void ParsePredicates(CompiledQuery& compiled) {
           }
         }
         if (first_capture) predicate.op = Predicate::Op::kAlways;
+        // `(#kind-eq? @x)` names no kind to be equal to, so every node fails
+        // it and the negated spelling passes everything -- neither of which is
+        // what a query file that wrote that meant. Ignored like any other
+        // predicate that cannot be evaluated.
+        if ((predicate.op == Predicate::Op::kKindEq) && predicate.literals.empty()) {
+          predicate.op = Predicate::Op::kAlways;
+        }
+        // `#same-line?` is about two nodes and has nothing to compare with one.
+        if ((predicate.op == Predicate::Op::kSameLine) && !predicate.against_capture) {
+          predicate.op = Predicate::Op::kAlways;
+        }
 
         compiled.predicates[pattern].push_back(std::move(predicate));
       }
@@ -543,16 +617,69 @@ bool PredicatesHold(const CompiledQuery& compiled, const TSQueryMatch& match, No
   std::string scratch;
   std::string other_scratch;
 
+  const auto captured = [&match](std::uint32_t index) -> const TSQueryCapture* {
+    for (uint16_t i = 0; i < match.capture_count; ++i) {
+      if (match.captures[i].index == index) return &match.captures[i];
+    }
+    return nullptr;
+  };
+
   for (const Predicate& predicate : list) {
     if (predicate.op == Predicate::Op::kAlways) continue;
 
-    const TSQueryCapture* found = nullptr;
-    for (uint16_t i = 0; i < match.capture_count; ++i) {
-      if (match.captures[i].index == predicate.capture) {
-        found = &match.captures[i];
-        break;
+    // Answered from the tree alone, before anything asks for text: a node's
+    // kind is in the grammar, not in the buffer, which is what lets an indent
+    // query -- one byte at the caret, once per cursor per keystroke -- read
+    // `(#not-kind-eq? @indent "compound_statement")` without a read of the
+    // document behind it.
+    //
+    // Every node captured under that name has to agree, where helix looks at
+    // the first one only. The two answers differ only for a quantified
+    // capture, which the indent queries do not have, and requiring all of them
+    // is the reading that does not silently ignore the rest.
+    if (predicate.op == Predicate::Op::kKindEq) {
+      bool captured_any = false;
+      bool ok = true;
+      for (uint16_t i = 0; (i < match.capture_count) && ok; ++i) {
+        if (match.captures[i].index != predicate.capture) continue;
+        captured_any = true;
+        const char* kind = ts_node_type(match.captures[i].node);
+        ok = (kind != nullptr) &&
+             std::ranges::any_of(predicate.literals,
+                                 [kind](const std::string& one) { return one == kind; });
       }
+      // A capture the match never produced -- an optional one that was not
+      // there -- leaves the predicate with nothing to judge, and is skipped
+      // rather than being made to decide the match either way.
+      if (captured_any && (ok == predicate.negate)) return false;
+      continue;
     }
+
+    // `#not-same-line? @indent @expr-start` and `#not-one-line? @item`: the two
+    // other things an indent query asks that the tree already knows. Rows come
+    // off the node's own points, so these cost no document read either -- and
+    // the row is the tree's, which is the line the node was parsed on and not a
+    // display line.
+    //
+    // A named capture that the match did not produce fails the predicate
+    // whatever its spelling, including the negated one, which is helix's
+    // reading: `#not-same-line?` asserts something about two nodes, and with
+    // one of them missing there is nothing for it to be true of. That is the
+    // opposite of `#not-kind-eq?` above, deliberately, and both halves are
+    // helix's.
+    if ((predicate.op == Predicate::Op::kSameLine) || (predicate.op == Predicate::Op::kOneLine)) {
+      const bool pairwise = (predicate.op == Predicate::Op::kSameLine);
+      const TSQueryCapture* one = captured(predicate.capture);
+      const TSQueryCapture* two = pairwise ? captured(predicate.other_capture) : one;
+      if ((one == nullptr) || (two == nullptr)) return false;
+      const uint32_t from = ts_node_start_point(one->node).row;
+      const uint32_t to =
+          pairwise ? ts_node_start_point(two->node).row : ts_node_end_point(two->node).row;
+      if ((from == to) == predicate.negate) return false;
+      continue;
+    }
+
+    const TSQueryCapture* found = captured(predicate.capture);
     if (found == nullptr) continue;
 
     const std::string_view value = text(ctx, found->node, scratch);
@@ -560,13 +687,7 @@ bool PredicatesHold(const CompiledQuery& compiled, const TSQueryMatch& match, No
     switch (predicate.op) {
       case Predicate::Op::kEq:
         if (predicate.against_capture) {
-          const TSQueryCapture* other = nullptr;
-          for (uint16_t i = 0; i < match.capture_count; ++i) {
-            if (match.captures[i].index == predicate.other_capture) {
-              other = &match.captures[i];
-              break;
-            }
-          }
+          const TSQueryCapture* other = captured(predicate.other_capture);
           ok = (other != nullptr) && (value == text(ctx, other->node, other_scratch));
         } else {
           ok = !predicate.literals.empty() && (value == predicate.literals.front());
@@ -580,6 +701,9 @@ bool PredicatesHold(const CompiledQuery& compiled, const TSQueryMatch& match, No
         ok = (predicate.regex >= 0) &&
              gai::Find(compiled.regexes[static_cast<size_t>(predicate.regex)], value);
         break;
+      case Predicate::Op::kKindEq:
+      case Predicate::Op::kSameLine:
+      case Predicate::Op::kOneLine:
       case Predicate::Op::kAlways:
         ok = true;
         break;

@@ -8,6 +8,7 @@ set(KOI_LIB_SOURCES
     src/crash.cpp
     src/shell.cpp
     src/editor.cpp
+    src/indent.cpp
     src/search.cpp
     src/query.cpp
     src/syntax.cpp
@@ -51,6 +52,7 @@ set(KOI_TEST_SOURCES
     src/tests/editor.cpp
     src/tests/excerpt.cpp
     src/tests/files.cpp
+    src/tests/indent.cpp
     src/tests/jumplist.cpp
     src/tests/keylog.cpp
     src/tests/keymap.cpp

@@ -246,6 +246,51 @@ void TextObjectLookupsAreBoundedAndSayWhenTheyFallShort() {
     EXPECT_TRUE((error == kMatchLine) || (error == kBudgetLine));
   });
 
+  // -- a node with no width in it -------------------------------------------
+  //
+  // Auto-indentation asks Syntax::Captures to keep captures whose node spans no
+  // bytes, because mid-keystroke that is what a brace-less body is. Nothing here
+  // asks, and nothing here may get them: a text object is a range somebody is
+  // about to put a cursor in, and an empty one selects nothing while still
+  // counting as a match. The query below captures the `if`'s consequence, which
+  // in this buffer is an `expression_statement` holding only the `;` the parser
+  // supplied -- so it fires, and both paths still hand back nothing.
+  queries.Write("textobjects.scm",
+                "(if_statement consequence: (_) @function.inside) @function.around");
+  const std::string half_typed = "int main() {\n    if (x)\n}\n";
+  const std::filesystem::path half_typed_file = scratch.Write("halftyped.cpp", half_typed);
+
+  OnAThreadOfItsOwn([&] {
+    PieceTable table = MakeTable(half_typed);
+    std::string syntax_error;
+    const auto syntax = OpenSyntax(half_typed_file, syntax_error);
+    EXPECT_TRUE(syntax != nullptr);
+
+    std::vector<ObjectRange> out;
+    std::string error;
+    // The standalone path, which runs its own cursor and carries its own guard.
+    EXPECT_TRUE(TextObjectRanges(table, half_typed_file, "function",
+                                 std::array<std::string_view, 1>{"inside"}, out, error));
+    EXPECT_EQ(error, std::string{});
+    EXPECT_TRUE(out.empty());
+    // And the Syntax-backed one, which relies on Captures defaulting to today's
+    // behaviour. The `around` capture is the whole `if_statement` and does come
+    // back, so this is the empty span being dropped and not the query failing to
+    // match.
+    if (syntax != nullptr) {
+      out.clear();
+      EXPECT_TRUE(TextObjectRanges(table, half_typed_file, "function",
+                                   std::array<std::string_view, 1>{"inside"}, out, error,
+                                   syntax.get()));
+      EXPECT_TRUE(out.empty());
+      out.clear();
+      EXPECT_TRUE(TextObjectRanges(table, half_typed_file, "function",
+                                   std::array<std::string_view, 1>{"around"}, out, error,
+                                   syntax.get()));
+      EXPECT_EQ(out.size(), std::size_t{1});
+    }
+  });
+
   // -- and an ordinary file, with the query koi ships ------------------------
   //
   // The control that makes the two cases above about the budget and not about

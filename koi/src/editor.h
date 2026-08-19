@@ -470,6 +470,59 @@ enum class PromptKind {
   kSearchExcerpts,
 };
 
+// One line the re-indent-on-type trigger moved on its own, and the whitespace it
+// moved it away from.
+struct ReindentedLine {
+  Index line{0};
+  // What the line's leading whitespace was before the *first* adjustment of this
+  // typing run, not before the last one: four keystrokes of `else` may move the
+  // line four times, and what has to be restorable is where it started.
+  std::string original;
+  // What was left there. A line whose leading whitespace is no longer this is a
+  // line something else has touched, and the memory of it is dead.
+  std::string written;
+};
+
+// What the previous keystroke's re-indent did, kept only until the next one
+// answers for it.
+//
+// `else` dedents its line and `elsewhere` does not, so the `w` that turns one
+// into the other has to be able to put back what the `e` took away. That is the
+// whole purpose: this is not a cache and nothing reads it for an answer.
+//
+// It cannot survive anything but one more keystroke of the same word. `document`
+// is a Document::id, never reused, so a memory taken in one buffer is never
+// mistaken for one in another; `revision` is the table revision the adjustment
+// left behind, and every mutation of any kind moves it -- the next keystroke's
+// own insertion included, which is why the check happens before it lands. An
+// undo, a paste, a command, a jump to another file: all of them move one of the
+// two. RunCommands clears it outright besides.
+struct ReindentMemory {
+  Index document{-1};
+  Index revision{-1};
+  std::vector<ReindentedLine> lines;
+};
+
+// What the indent engine last complained about, so that it complains once.
+//
+// Only one thing ever reaches here: an `indents.scm` that will not compile --
+// the user's own file, named with the line it broke on. Everything else the
+// engine can decline for is silent by construction (indent.h), because a
+// message about a buffer too large to parse is not a message anybody can act
+// on and it arrives on every Enter forever.
+//
+// A broken query, though, fails identically for every cursor of every Enter,
+// and `ed.status` is one slot shared with every other message in the editor:
+// said once it is news, said again on the next keystroke it is a buffer that
+// has taken the status line over. `document` is a Document::id, never reused,
+// so the same message in another buffer is that buffer's own news and is
+// shown; an Enter that reports nothing clears the memory, so a failure that
+// returns after things worked is news again too.
+struct IndentWarning {
+  Index document{-1};
+  std::string message;
+};
+
 struct Editor {
 
   Document doc;
@@ -504,6 +557,10 @@ struct Editor {
   std::string pending_char_arg;
 
   LeapState leap;
+
+  ReindentMemory reindent;
+
+  IndentWarning indent_warned;
 
   Index pending_count{0};
 
