@@ -610,6 +610,8 @@ std::size_t WindowCount(const Editor& ed);
 
 std::vector<int> WindowOrder(const Editor& ed);
 
+bool BufferOnScreen(const Editor& ed, std::size_t buffer);
+
 std::vector<Rect> LayoutWindows(const Editor& ed, Rect screen);
 
 std::vector<Rect> LayoutNodes(const Editor& ed, Rect screen);

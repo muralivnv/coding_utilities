@@ -3961,16 +3961,67 @@ void ReloadEveryBuffer(Editor& ed, bool force) {
   }
 }
 
+// Every buffer a pane is drawing, not only the focused one. A split leaves the
+// other panes showing text their files no longer hold, and nothing else looks
+// at them: the disk check runs on focus-in alone, so a stale pane stayed stale
+// until the user happened to run :reload. Buffers with no pane on them are left
+// out on purpose -- nobody is reading those, and swapping the ground under a
+// buffer the user has not looked at in an hour is the surprise this check is
+// careful to avoid for a modified one.
 void CheckDiskChange(Editor& ed) {
-  if (!ExternallyModified(ed.doc)) return;
-  if (ed.doc.modified) {
-    ed.status.Warn(DisplayPath(ed.doc.file) +
-                " changed on disk -- :reload to take that, :w! to overwrite");
+  std::vector<std::string> took;
+  std::vector<std::string> held;
+  std::vector<std::string> failed;
+  std::string first_error;
+
+  for (std::size_t i = 0; i < BufferCount(ed); ++i) {
+    Document& doc = (ed.buffers.empty() || (i == ed.active)) ? ed.doc : ed.buffers[i];
+    if (!HasDiskFile(doc)) continue;
+    if (!BufferOnScreen(ed, i)) continue;
+    if (!ExternallyModified(doc)) continue;
+    if (doc.modified) {
+      held.push_back(DisplayPath(doc.file));
+      continue;
+    }
+    if (const ErrorCtx err = ReloadInto(doc); err) {
+      failed.push_back(DisplayPath(doc.file));
+      if (first_error.empty()) first_error = FormatErrorCtx(err);
+      continue;
+    }
+    took.push_back(DisplayPath(doc.file));
+  }
+
+  if (took.empty() && held.empty() && failed.empty()) return;
+
+  // Named rather than counted. "3 files changed on disk" is a fact the reader
+  // then has to go and turn into names one buffer at a time, which is the work
+  // this message exists to save them.
+  const auto list = [](const std::vector<std::string>& names) {
+    constexpr std::size_t kMaxNamed = 3;
+    std::string out;
+    for (std::size_t i = 0; (i < names.size()) && (i < kMaxNamed); ++i) {
+      if (i > 0) out += ", ";
+      out += names[i];
+    }
+    if (names.size() > kMaxNamed) {
+      out += " and " + std::to_string(names.size() - kMaxNamed) + " more";
+    }
+    return out;
+  };
+
+  std::string report;
+  if (!took.empty()) report = list(took) + " changed on disk -- reloaded";
+  if (!held.empty()) {
+    if (!report.empty()) report += "; ";
+    report += list(held) + " changed on disk -- :reload to take that, :w! to overwrite";
+  }
+  if (!failed.empty()) {
+    if (!report.empty()) report += "; ";
+    report += "cannot reload " + list(failed) + ": " + first_error;
+    ed.status.Fail(report);
     return;
   }
-  if (ReloadDocument(ed)) {
-    ed.status.Warn(DisplayPath(ed.doc.file) + " changed on disk -- reloaded");
-  }
+  ed.status.Warn(report);
 }
 
 namespace {

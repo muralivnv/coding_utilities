@@ -833,14 +833,6 @@ void ClampScrollToText(Editor& ed, std::size_t buffer, Document& doc) {
   }
 }
 
-bool BufferOnScreen(const Editor& ed, std::size_t buffer) {
-  if (buffer == ed.active) return true;
-  for (const int leaf : WindowOrder(ed)) {
-    if (ed.windows[static_cast<std::size_t>(leaf)].buffer == buffer) return true;
-  }
-  return false;
-}
-
 // Two builds can produce byte-identical view text and still disagree about the
 // model underneath it, so "the text did not change, keep the model we have" is
 // only sound once the parts of the model the text does not carry are compared

@@ -903,6 +903,23 @@ std::vector<int> WindowOrder(const Editor& ed) {
   return leaves;
 }
 
+// Whether anything is drawing this buffer right now. The focused buffer
+// always is, whether or not a window tree has been built yet; the rest are
+// on screen only while a pane points at them.
+bool BufferOnScreen(const Editor& ed, std::size_t buffer) {
+  if (buffer == ed.active) return true;
+  for (const int leaf : WindowOrder(ed)) {
+    // The focused leaf draws ed.doc whatever its `buffer` says: that field is
+    // rewritten on the way out of a pane, so between a buffer switch and the
+    // next stash it still names the document the pane has already left. Render
+    // reads it the same way, and a query that did not would call a buffer
+    // on screen that nothing is drawing.
+    if (leaf == ed.focused) continue;
+    if (ed.windows[static_cast<std::size_t>(leaf)].buffer == buffer) return true;
+  }
+  return false;
+}
+
 int SplitAt(int span, double ratio) {
   if (span < 2) return std::max(0, span);
   const int at = static_cast<int>(static_cast<double>(span) * ratio);

@@ -347,6 +347,97 @@ void DiskChangeOnFocus() {
     EXPECT_FALSE(ReloadDocument(ed));
   }
 
+  TEST_CASE("focus-in disk check: every pane on screen, not just the focused one");
+  {
+    const fs::path front = dir / "front.txt";
+    const fs::path beside = dir / "beside.txt";
+    const fs::path offscreen = dir / "offscreen.txt";
+    WriteFixtureFile(front, "front original\n");
+    WriteFixtureFile(beside, "beside original\n");
+    WriteFixtureFile(offscreen, "offscreen original\n");
+
+    Editor ed;
+    EXPECT_TRUE(!LoadDocument(front, ed.doc));
+    Document second;
+    EXPECT_TRUE(!LoadDocument(beside, second));
+    AddBuffer(ed, std::move(second));
+    Document third;
+    EXPECT_TRUE(!LoadDocument(offscreen, third));
+    AddBuffer(ed, std::move(third));
+
+    // Two panes: the focused one on `front`, the other on `beside`. `offscreen`
+    // is open but nothing is drawing it.
+    SplitWindow(ed, true);
+    SwitchToBuffer(ed, 1);
+    FocusWindow(ed, true);
+    SwitchToBuffer(ed, 0);
+
+    WriteFixtureFile(front, "front changed on disk\n");
+    WriteFixtureFile(beside, "beside changed on disk\n");
+    WriteFixtureFile(offscreen, "offscreen changed on disk\n");
+
+    ed.status.clear();
+    CheckDiskChange(ed);
+
+    EXPECT_EQ(AssembleDocContents(BufferAt(ed, 0).table), std::string{"front changed on disk\n"});
+    EXPECT_EQ(AssembleDocContents(BufferAt(ed, 1).table), std::string{"beside changed on disk\n"});
+    // Nothing is drawing this one, so nothing pulled the ground out from under
+    // it -- :reload is still what takes a buffer nobody is looking at.
+    EXPECT_EQ(AssembleDocContents(BufferAt(ed, 2).table), std::string{"offscreen original\n"});
+
+    EXPECT_FALSE(ExternallyModified(BufferAt(ed, 0)));
+    EXPECT_FALSE(ExternallyModified(BufferAt(ed, 1)));
+    EXPECT_TRUE(ExternallyModified(BufferAt(ed, 2)));
+
+    // Both reloaded files are named, so the reader does not have to go and find
+    // out which of the panes moved under them.
+    EXPECT_TRUE(ed.status.find("front.txt") != std::string::npos);
+    EXPECT_TRUE(ed.status.find("beside.txt") != std::string::npos);
+    EXPECT_TRUE(ed.status.find("offscreen.txt") == std::string::npos);
+    EXPECT_TRUE(ed.status.find("reloaded") != std::string::npos);
+  }
+
+  TEST_CASE("focus-in disk check: a pane with unsaved edits is warned about, not reloaded");
+  {
+    const fs::path clean = dir / "clean.txt";
+    const fs::path dirty = dir / "dirty.txt";
+    WriteFixtureFile(clean, "clean original\n");
+    WriteFixtureFile(dirty, "dirty original\n");
+
+    Editor ed;
+    EXPECT_TRUE(!LoadDocument(dirty, ed.doc));
+    RunCommands(ed, {"collapse_selection", "insert_mode"});
+    std::vector<Key> pending{K("Z")};
+    FlushPendingAsText(ed, pending);
+    RunCommands(ed, {"normal_mode"});
+    EXPECT_TRUE(ed.doc.modified);
+
+    Document front;
+    EXPECT_TRUE(!LoadDocument(clean, front));
+    AddBuffer(ed, std::move(front));
+
+    // The dirty buffer sits in the pane behind the focused one.
+    SplitWindow(ed, true);
+    SwitchToBuffer(ed, 0);
+    FocusWindow(ed, true);
+    SwitchToBuffer(ed, 1);
+
+    WriteFixtureFile(clean, "clean changed on disk\n");
+    WriteFixtureFile(dirty, "dirty changed on disk\n");
+
+    ed.status.clear();
+    CheckDiskChange(ed);
+
+    EXPECT_EQ(AssembleDocContents(BufferAt(ed, 1).table), std::string{"clean changed on disk\n"});
+    EXPECT_TRUE(AssembleDocContents(BufferAt(ed, 0).table).starts_with("Z"));
+    EXPECT_TRUE(BufferAt(ed, 0).modified);
+
+    EXPECT_TRUE(ed.status.find("clean.txt") != std::string::npos);
+    EXPECT_TRUE(ed.status.find("reloaded") != std::string::npos);
+    EXPECT_TRUE(ed.status.find("dirty.txt") != std::string::npos);
+    EXPECT_TRUE(ed.status.find(":w! to overwrite") != std::string::npos);
+  }
+
   RemoveAllQuietly(dir);
 }
 
