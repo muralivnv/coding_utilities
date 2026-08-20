@@ -1,10 +1,34 @@
 # koi -- every configuration option there is.
 #
+# Config files, both optional, read in this order:
+#
+#   1. ~/.config/ronin/koi.toml   global
+#   2. .ronin/koi.toml            per project, relative to koi's working dir
+#
+# If both exist both are read, later wins, key by key. This file is neither of
+# them -- it is a reference and is never loaded. Copy out what you want.
+#
+# `:config-reload` re-reads both. It resets to the built-in defaults first, so
+# deleting a key restores its default. Everything applies immediately except
+# scan-workers, which can be raised live but not lowered.
+#
+# Values below are the defaults unless a comment says otherwise.
+#
+# Bad values:
+#   wrong type    reported, default kept -- `tab-width = "4"` is an error
+#   out of range  clamped silently -- `scrolloff = 900` becomes 100
+#   unknown key   ignored
+#
+# Problems are counted on the status line at startup and after :config-reload.
+# `:messages` lists them.
 
 # ---------------------------------------------------------------------------
 # Top level
 # ---------------------------------------------------------------------------
 
+# Theme file name without the `.toml`, found along the runtime path described
+# in theme.example.toml. `:theme <name>` switches at runtime. An unknown name
+# falls back to the built-in theme and warns. koi ships `ronin` and `calm`.
 theme = "ronin"
 
 # ---------------------------------------------------------------------------
@@ -12,19 +36,31 @@ theme = "ronin"
 # ---------------------------------------------------------------------------
 [editor]
 
+# Tab width 1-16, and whether indenting inserts spaces or a tab. koi detects
+# the indentation of every file it opens and uses that instead, so these two
+# only apply when there is nothing to detect. `:set-indent tab|<1-16>`
+# overrides both for one buffer.
 tab-width                        = 4
-indent-spaces                    = true # `:set-indent tab|number` overrides both
+indent-spaces                    = true
+
 auto-pairs                       = true # a typed ( " [ closes itself around the caret
 scrolloff                        = 3 # Lines kept visible above and below the cursor when scrolling, 0-100.
-line-number                      = "relative" # "absolute"
-cursorline                       = true # highlight current line
+line-number                      = "relative" # "absolute". Any other string means relative.
+cursorline                       = true # highlight current line, with `ui.cursorline.primary`
 excerpt-context                  = 2 # Lines of context around a hit in the excerpt views, 0-100.
 scan-workers                     = 1 # Threads for searches/references/file scans, 1-32. Raising it
                                      # applies live (and on :config-reload); lowering it takes a
                                      # restart -- the pool only ever grows while koi runs.
-trim_trailing_whitespace_on_save = false
-record                           = false # whether to record key presses
+trim_trailing_whitespace_on_save = false # default is true. Runs on :w. Note the underscores:
+                                         # this is the only key that is not kebab-case.
+record                           = false # whether to record key presses, into keylog.db
+                                         # beside the project database
+
+# How the mode label is drawn: "bar" colours the text, "block" fills a block
+# behind it. Both use `ui.statusline.normal` / `ui.statusline.insert`.
 mode-indicator                   = "bar" # "block"
+
+# The mode label. Only used while icons are on -- with them off it is NOR/INS.
 mode-normal                      = "🐒"
 mode-insert                      = "🐑"
 
@@ -37,11 +73,17 @@ mode-insert                      = "🐑"
 # selection per cursor.
 multi-cursor-paste               = "full" # "spread"
 
+# Shell command the file pickers take their candidates from: one path per line
+# on stdout. A trailing `|` is trimmed. Unset, koi uses
+#   find . -type f -printf '%P\n' | gai -e '.*(build|.git)'
 file-filter = "find . -type f -not -path '*/.git/*' -printf '%P\\n'"
 
 # ---------------------------------------------------------------------------
 # [editor.icons]
 # ---------------------------------------------------------------------------
+#
+# `icons = false` directly under [editor] is shorthand for `enable = false`
+# here.
 [editor.icons]
 
 enable = true
@@ -59,6 +101,9 @@ file     = ""   # sits before the path
 [editor.soft-wrap]
 
 enable = false
+
+# Drawn at the start of every continuation row, in `ui.virtual.wrap`. Its width
+# is also the continuation indent, capped at one column less than the pane.
 wrap-indicator = "↳ "
 
 # How far back a break may travel to land after a space, 0-1000. A long path or
@@ -74,10 +119,11 @@ max-wrap = 20
 # "all"   draw tabs, using the glyphs below
 # "none"  leave them blank
 #
-# Anything that is not the string "none" draws them, so a value borrowed from
-# another editor -- "trailing", "leading" -- turns them all on rather than
-# failing. Only a non-string is refused. Tabs are the only whitespace koi
-# draws; there is no space, nbsp or newline rendering to ask for.
+# Default is "all". Anything that is not the string "none" draws them, so a
+# value borrowed from another editor -- "trailing", "leading" -- turns them all
+# on rather than failing. Only a non-string is refused. Tabs are the only
+# whitespace koi draws; there is no space, nbsp or newline rendering to ask
+# for.
 render = "none"
 
 # The per-kind table form is also accepted, and only `tab` is read from it:
@@ -87,9 +133,10 @@ render = "none"
 
 [editor.whitespace.characters]
 
-# Setting either of these turns rendering on by itself, unless `render` above
-# says otherwise. `tab` lands on the first column of the tab, `tabpad` fills
-# the rest of the way to the tab stop.
+# `tab` lands on the first column of the tab, `tabpad` fills the rest of the
+# way to the tab stop. Both are drawn in `ui.virtual.whitespace`, foreground
+# only. Setting `tab` turns rendering on unless `render` above says otherwise;
+# `tabpad` alone does not.
 tab    = "→"
 tabpad = "·"
 
