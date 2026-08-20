@@ -251,8 +251,10 @@ int main() {
   koi::NoOpEditsLeaveTheBufferClean();
   koi::InjectedRegionsKeepTheirParsedTree();
   koi::RunawayQueriesAreCutOffLikeRunawayParses();
+  koi::QueriesThatRunOutOfMatchSlotsAdmitIt();
   koi::EveryInjectedRegionOnScreenIsPaintedNotJustTheFirstFewHundred();
   koi::InjectedTextPastTheFrameBudgetIsRefusedAndSaidSo();
+  koi::FencesWithNoGrammarBehindThemDoNotSpendTheInjectionBudget();
   koi::AutoIndentSeesStringsInsideInjectedRegions();
   koi::ADocumentCannotNameTheSharedObjectKoiOpens();
   koi::AutoPairedKeysGoThroughTheEditFunnel();
@@ -310,6 +312,7 @@ int main() {
   koi::LeapCapitalsSelectToTheMatch();
   koi::LeapIdentifiesTheDocumentNotTheSlot();
   koi::ThemesFallBackToTheBuiltinForScopesTheyNeverNamed();
+  koi::ThemeAlphaIsCompositedAtLoad();
 
   koi::ScanWorkerSurvivesShutdownAndFailure();
 

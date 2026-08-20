@@ -230,8 +230,10 @@ void SyntaxPredicates();
 void MarkdownHighlightsItsInlineAndFencedLanguages();
 void InjectedRegionsKeepTheirParsedTree();
 void RunawayQueriesAreCutOffLikeRunawayParses();
+void QueriesThatRunOutOfMatchSlotsAdmitIt();
 void EveryInjectedRegionOnScreenIsPaintedNotJustTheFirstFewHundred();
 void InjectedTextPastTheFrameBudgetIsRefusedAndSaidSo();
+void FencesWithNoGrammarBehindThemDoNotSpendTheInjectionBudget();
 void AutoIndentSeesStringsInsideInjectedRegions();
 void ADocumentCannotNameTheSharedObjectKoiOpens();
 
@@ -242,6 +244,7 @@ void TextObjectLookupsAreBoundedAndSayWhenTheyFallShort();
 // theme.cpp -- theme loading, scope lookup and the builtin fallback
 void Themes();
 void ThemesFallBackToTheBuiltinForScopesTheyNeverNamed();
+void ThemeAlphaIsCompositedAtLoad();
 
 // thread_pool.cpp -- the shared scan workers and the jobs that run on them
 void ScanWorkersFollowTheSetting();

@@ -409,11 +409,23 @@ bool IsWordMotion(Motion motion) {
   }
 }
 
+// Where a vertical motion lands: `target_row`, at the column the cursor is
+// aiming for, with the row's start already in hand from the caller's descent.
+//
+// The goal column is read off the starting position when it is not already
+// set, and survives even when the move is refused at the document's edge, so
+// paging into the top of the file and back out keeps the column.
+Index RowJump(const PieceTable& table, Index from, Index row_start, Index target_row,
+              Index tab_width, Index& goal_column) {
+  if (goal_column < 0) goal_column = ColumnForByteFrom(table, row_start, from, tab_width);
+  if ((target_row < 0) || (target_row > LineCount(table) - 1)) return from;
+  return ByteForColumn(table, target_row, goal_column, tab_width);
+}
+
 // One step of a non-word motion, measured from and returning a cursor position.
 Index StepOnce(const PieceTable& table, Index from, Motion motion, Index tab_width,
                Index& goal_column) {
   const Index doc_len = DocLength(table);
-  const Index last_line = LineCount(table) - 1;
 
   switch (motion) {
     case Motion::kLeft:
@@ -426,12 +438,8 @@ Index StepOnce(const PieceTable& table, Index from, Motion motion, Index tab_wid
       Index row = 0;
       Index row_start = 0;
       LineAtAndStart(table, from, row, row_start);
-      const Index target = (motion == Motion::kUp) ? row - 1 : row + 1;
-      // The goal column survives even when the move is refused at the edge, so
-      // paging into the top of the file and back out keeps the column.
-      if (goal_column < 0) goal_column = ColumnForByteFrom(table, row_start, from, tab_width);
-      if ((target < 0) || (target > last_line)) return from;
-      return ByteForColumn(table, target, goal_column, tab_width);
+      return RowJump(table, from, row_start, (motion == Motion::kUp) ? row - 1 : row + 1, tab_width,
+                     goal_column);
     }
     case Motion::kLineStart: {
       Index row = 0;
@@ -629,6 +637,38 @@ void Move(const PieceTable& table, SelectionSet& sel, Motion motion, bool extend
     s.goal_column = goal;
   }
   sel.Normalize(table);
+}
+
+bool ClampCursorsToLines(const PieceTable& table, SelectionSet& sel, Index first, Index last,
+                         Index tab_width) {
+  const Index lo = std::min(first, last);
+  const Index hi = std::max(first, last);
+  const Index doc_len = DocLength(table);
+  bool moved = false;
+
+  for (Selection& s : sel.MutableRanges()) {
+    const Index cursor = CursorOf(table, s);
+    Index row = 0;
+    Index row_start = 0;
+    LineAtAndStart(table, cursor, row, row_start);
+    const Index target = std::clamp(row, lo, hi);
+    if (target == row) continue;
+
+    // One hop however far away the row is: the arithmetic a counted `j` ends
+    // up doing anyway, without walking the lines in between.
+    Index goal = s.goal_column;
+    const Index pos = RowJump(table, cursor, row_start, target, tab_width, goal);
+    s = PutCursor(table, s, std::clamp<Index>(pos, 0, doc_len), false);
+    s.goal_column = goal;
+    moved = true;
+  }
+
+  // Normalized once, after every cursor has landed. Two that clamp onto the
+  // same edge merge only because they now really are on the same grapheme --
+  // per-cursor normalization would also merge ones that merely passed over
+  // each other -- and a cursor that stayed put is left exactly as it was.
+  if (moved) sel.Normalize(table);
+  return moved;
 }
 
 // -- editing through the cursors --------------------------------------------

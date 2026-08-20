@@ -153,6 +153,15 @@ enum class Motion {
 void Move(const PieceTable& table, SelectionSet& sel, Motion motion, bool extend, Index tab_width,
           Index count = 1);
 
+// Pulls every cursor onto the closed line range [first, last] -- each one that
+// is outside it to the nearer edge, each one already inside left alone -- and
+// says whether anything moved. Vertical like `j` and `k`, so a cursor keeps
+// its goal column and a selection it has to move collapses onto the grapheme
+// it lands on. Scrolling is the caller: the viewport is what defines the
+// range, and every cursor owes it a position, not just the primary.
+bool ClampCursorsToLines(const PieceTable& table, SelectionSet& sel, Index first, Index last,
+                         Index tab_width);
+
 // -- editing through the cursors --------------------------------------------
 // Each is one undo step however many cursors there are. The acting cursor is
 // placed explicitly afterwards: mapping alone cannot say whether a cursor at

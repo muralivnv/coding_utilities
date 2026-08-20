@@ -92,10 +92,20 @@ bool TextObjectRanges(const PieceTable& table, const fs::path& path, std::string
 
   if ((syntax != nullptr) && (syntax->Language() == language)) {
     std::vector<Capture> captures;
-    if (!syntax->Captures(table, kFiles, limit, captures, error)) return false;
+    bool exhausted = false;
+    if (!syntax->Captures(table, kFiles, limit, captures, error, &exhausted)) return false;
     for (const Capture& capture : captures) {
       if (wants(capture.name)) out.push_back(ObjectRange{capture.from, capture.to});
     }
+    // The same complaint the standalone path below makes, from the path every
+    // `mi`, `ma` and `]f` in an open buffer takes. This one used not to ask at
+    // all, so a query the frame budget cut in half came back as a shorter list
+    // of objects and nothing else -- and the caller picked the innermost, or the
+    // next one along, out of *those*: a selection or a jump that is silently
+    // wrong rather than one that is missing. Which of the two ways it fell short
+    // is not asked here: Captures reports one state, and the answer either way
+    // is that what follows is built from part of the file.
+    if (exhausted) error = "the text-object query came back short -- some objects are missing";
     finish();
     return true;
   }

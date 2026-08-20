@@ -47,6 +47,7 @@ std::string_view StageName(MatchStage stage) {
     case MatchStage::kExclude: return "--exclude";
     case MatchStage::kRangeStart: return "--range start";
     case MatchStage::kRangeEnd: return "--range end";
+    case MatchStage::kReplace: return "--replace";
     case MatchStage::kHighlight: return "--filter (highlighting)";
   }
   return "regex";
@@ -61,6 +62,7 @@ std::string_view StageConsequence(MatchStage stage) {
     case MatchStage::kExclude: return "the line is not excluded";
     case MatchStage::kRangeStart: return "the range does not open here";
     case MatchStage::kRangeEnd: return "the range does not close here";
+    case MatchStage::kReplace: return "the line is printed with the replacement not made";
     case MatchStage::kHighlight: return "the line is printed with matches unhighlighted";
   }
   return "the line is skipped";
@@ -218,7 +220,10 @@ void Process(const ScanConfig& config, const OutputFunc& out_fn, std::optional<R
     if (!config.replacements.empty()) {
       replacement_line.assign(line);
       for (const Pcre2Substitution& r : config.replacements) {
-        std::string_view replace = Substitute(r, replacement_line, replacement_buffer);
+        match_error.clear();
+        std::string_view replace = Substitute(r, replacement_line, replacement_buffer, &match_error);
+        if (!match_error.empty())
+          diagnostics.Report(MatchStage::kReplace, r.re.pattern, config.filename, linenum, match_error);
         replacement_line.assign(replace);
       }
       emit = replacement_line;

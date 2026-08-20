@@ -143,6 +143,48 @@ bool LoadThemeInto(std::string_view name, Theme& out, std::unordered_set<std::st
   return true;
 }
 
+// src-over, per channel: what the author would see with the colour laid over
+// `under` at that alpha.
+std::uint32_t Composite(std::uint32_t over, std::uint32_t under, std::uint32_t alpha) {
+  std::uint32_t out = 0;
+  for (const int shift : {16, 8, 0}) {
+    const std::uint32_t a = (over >> shift) & 0xFFu;
+    const std::uint32_t b = (under >> shift) & 0xFFu;
+    out |= (((a * alpha) + (b * (0xFFu - alpha)) + 127u) / 0xFFu) << shift;
+  }
+  return out;
+}
+
+void Flatten(Color& color, const Color& under) {
+  if (color.set && (color.alpha != 0xFF) && under.set) {
+    color.rgb = Composite(color.rgb, under.rgb, color.alpha);
+  }
+  color.alpha = 0xFF;
+}
+
+// An alpha in a theme file says what the colour should end up *looking* like,
+// and a terminal cell can only be told one opaque colour, so the compositing
+// has to happen here rather than at the cell. Once, and last: the background a
+// colour is laid over is not known until the inherits chain, the palette and
+// the builtin fallback have all had their say.
+//
+// A background is laid over the theme's background. A foreground is laid over
+// its own scope's background where the scope has one, because that is what is
+// actually painted under the glyph, and over the theme's background otherwise.
+// `ui.background` is the bottom of the stack -- what is under it is whatever
+// the terminal draws, which koi neither knows nor controls -- so its alpha is
+// dropped rather than composited against a guess, and so is every alpha in a
+// theme that gives `ui.background` no background at all.
+void FlattenAlpha(Theme& theme) {
+  // Taken as authored, alpha and all: laid over itself it comes out unchanged,
+  // which is the "dropped" above, and what everything else is laid over.
+  const Color base = theme.Get("ui.background").bg;
+  for (auto& [scope, style] : theme.scopes) {
+    Flatten(style.bg, base);
+    Flatten(style.fg, style.bg.set ? style.bg : base);
+  }
+}
+
 }
 
 Style Style::Over(const Style& other) const {
@@ -163,11 +205,16 @@ bool ParseColor(std::string_view text, Color& out) {
       if (!HexDigit(digits[i], nibble)) return false;
       rgb = (rgb << 4) | nibble;
     }
-    for (size_t i = 6; i < digits.size(); ++i) {
-      std::uint32_t nibble = 0;
-      if (!HexDigit(digits[i], nibble)) return false;
+    std::uint32_t alpha = 0xFF;
+    if (digits.size() == 8) {
+      alpha = 0;
+      for (size_t i = 6; i < 8; ++i) {
+        std::uint32_t nibble = 0;
+        if (!HexDigit(digits[i], nibble)) return false;
+        alpha = (alpha << 4) | nibble;
+      }
     }
-    out = Color{true, rgb};
+    out = Color{true, rgb, static_cast<std::uint8_t>(alpha)};
     return true;
   }
   for (const NamedColor& known : kNamedColors) {
@@ -218,6 +265,7 @@ bool LoadTheme(std::string_view name, Theme& out, std::string& error) {
   }
   for (auto& [scope, style] : missing) loaded.scopes.insert_or_assign(std::move(scope), style);
 
+  FlattenAlpha(loaded);
   out = std::move(loaded);
   return true;
 }

@@ -67,11 +67,17 @@ Options:
 
 Exit status:
   0  the scan completed
-  1  nothing was scanned: a pattern would not compile, an expression was
-     malformed, or a substitution failed
-  2  the scan completed but some lines could not be matched: a pattern hit
-     pcre2's match or depth limit. The reason is on stderr, once per pattern,
-     and the output is a subset of what a working pattern would have printed
+  1  the scan stopped: a pattern would not compile, an expression was
+     malformed, or a replacement's text was rejected. The first two are found
+     before anything is read, so nothing is printed; the last is found on the
+     first line the replacement matches, and the lines already scanned have
+     already been written -- stdout is then a prefix, not an answer
+  2  the scan completed but some lines could not be matched: a pattern in a
+     filter, an exclude, a range bound or a replacement hit pcre2's match or
+     depth limit. The reason is on stderr, once per pattern, and the output is
+     not what a working pattern would have printed: a line a filter could not
+     test is missing, a line a replacement could not finish is printed as it
+     arrived
   )CLI";
 
   if (cli.Has("-h") || cli.Has("--help")) {

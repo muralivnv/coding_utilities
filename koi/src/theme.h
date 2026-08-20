@@ -24,6 +24,11 @@ enum StyleMod : std::uint16_t {
 struct Color {
   bool set{false};
   std::uint32_t rgb{0};
+  // From an `#rrggbbaa` colour, 255 being opaque. A terminal cell holds one
+  // colour and has nowhere to put transparency, so this means something only
+  // between ParseColor and the compositing at the end of LoadTheme: every
+  // colour a loaded theme hands to the renderer is opaque.
+  std::uint8_t alpha{255};
 };
 
 struct Style {

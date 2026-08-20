@@ -212,6 +212,24 @@ bool WriteSymbols(std::span<const std::string> paths, const SymbolModeOptions& o
     if (batch.size() >= kBatch) flush();
   };
 
+  // Two spellings of one file meet here: HotFiles comes back through
+  // ResolveStorePath while the scan keeps whatever the caller wrote, so
+  // `./f.cpp` in `paths` and `f.cpp` from the store are the same file under
+  // keys that compare unequal -- and its hot symbols print twice. Normalized
+  // lexically, and only in the keys: the rows still carry the caller's own
+  // spelling. Lexical is as far as this reaches -- a symlink or a relative
+  // next to an absolute stays two files -- because the store and the scan
+  // already speak cwd-relative or absolute alike, and touching the filesystem
+  // per symbol is a price a spelling problem does not rate.
+  const auto path_key = [](std::string_view path) {
+    return fs::path{path}.lexically_normal().string();
+  };
+  const auto row_key = [&](const Symbol& symbol) {
+    Symbol keyed = symbol;
+    keyed.path = path_key(symbol.path);
+    return FormatSymbolRow(keyed);
+  };
+
   std::unordered_set<std::string> hot_paths;
   std::unordered_map<std::string, int> written;
   std::string head_error;
@@ -229,16 +247,16 @@ bool WriteSymbols(std::span<const std::string> paths, const SymbolModeOptions& o
       std::vector<Symbol> head = CollectSymbols(hot, options.kind, head_error, options.containing);
       head.resize(std::min(store->RankSymbols(head, options.from), head.size()));
       for (const Symbol& symbol : head) {
-        ++written[FormatSymbolRow(symbol)];
+        ++written[row_key(symbol)];
         emit(symbol);
       }
-      hot_paths.insert(hot.begin(), hot.end());
+      for (const std::string& path : hot) hot_paths.insert(path_key(path));
     }
   }
 
   for (Symbol&& symbol : ScanSymbols(paths, options.kind, error, options.containing)) {
-    if (!written.empty() && hot_paths.contains(symbol.path)) {
-      const auto owed = written.find(FormatSymbolRow(symbol));
+    if (!written.empty() && hot_paths.contains(path_key(symbol.path))) {
+      const auto owed = written.find(row_key(symbol));
       if ((owed != written.end()) && (owed->second > 0)) {
         --owed->second;
         continue;

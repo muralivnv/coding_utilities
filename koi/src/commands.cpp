@@ -706,26 +706,34 @@ void ScrollBy(Editor& ed, Index delta) {
   const Index pad = std::clamp<Index>(ed.doc.view.scrolloff, 0, std::max<Index>(0, (rows - 1) / 2));
   const Index first = ed.doc.view.top_line + pad;
   const Index last = std::min(ed.doc.view.top_line + rows - 1 - pad, line_count - 1);
-  const Index line = LineAt(ed.doc.table, ed.doc.selections.Primary().head);
-  const Index target = std::clamp(line, std::min(first, last), std::max(first, last));
 
   ed.pending_count = 0;
 
-  // One counted move, not `target - line` of them. top_line has already jumped
-  // by the whole count, so the distance the cursor has to cover is bounded by
-  // the *document*, not by the viewport: 5000<C-e> on a 20k-line file walked
-  // 5000 separate Move+Normalize passes for one keypress, times every cursor.
+  // The band belongs to the view, so every cursor is measured against it, not
+  // just the primary. Clamping the primary alone and shifting the whole set by
+  // its correction was wrong from both ends: a cursor already off-screen was
+  // carried along still off-screen, and one sitting comfortably inside the
+  // viewport was dragged by a delta computed for somebody else, out through
+  // the far edge. Cursors inside the band stay where the text put them --
+  // scrolling out from under a cursor is what C-e is for -- and the rest land
+  // on the nearer edge. Two that land on the same grapheme merge, which is the
+  // price of not leaving one of them outside the window.
   //
-  // Move's own step loop carries the goal column across the steps and stops at
-  // the document edge exactly as the walk did. It differs in one place: the
-  // walk normalized after every line, so two cursors that only *transiently*
-  // shared a byte -- same starting line, different columns, passing over a
-  // line too short for both -- merged and never came apart again. One counted
-  // move keeps each cursor's goal column, which is what a counted `j` has
-  // always done; the scroll now agrees with it.
-  if (target != line) {
-    const bool down = (target > line);
-    DoMove(ed, down ? Motion::kDown : Motion::kUp, false, down ? target - line : line - target);
+  // The landing is one hop per cursor whatever the count. top_line has already
+  // jumped the whole way, so the distance to cover is bounded by the
+  // *document*, not the viewport: 5000<C-e> on a 20k-line file used to walk it
+  // a line at a time, 5000 Move+Normalize passes for one keypress, times every
+  // cursor. That walk also normalized after every line, so two cursors that
+  // only *transiently* shared a byte -- same starting line, different columns,
+  // passing over a line too short for both -- merged and never came apart
+  // again. Landing once keeps each cursor's goal column, which is what a
+  // counted `j` has always done; the scroll agrees with it.
+  if (ClampCursorsToLines(ed.doc.table, ed.doc.selections, first, last, ed.doc.tab_width) &&
+      (ed.mode == Mode::kInsert)) {
+    // Same rule DoMove applies to any unextended motion: the block cursors
+    // this leaves behind are collapsed back to carets at the end of the
+    // binding, or insert mode ends up holding a grapheme it never selected.
+    ed.collapse_insert_caret = true;
   }
 }
 

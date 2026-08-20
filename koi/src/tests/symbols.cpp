@@ -688,6 +688,26 @@ void HotFirstOrdering() {
     EXPECT_EQ(rows.size(), want.size() * 2);
   }
 
+  // One file under two spellings: the store hands b.cpp back resolved, the
+  // caller wrote it with a `.` segment. The head and the scan must still agree
+  // its symbols were written once -- the raw-string keys they used to compare
+  // by said two different files, and every hot symbol of b.cpp printed twice.
+  {
+    const std::string dotted = (scratch.dir / "." / "b.cpp").string();
+    std::vector<std::string> spelled = paths;
+    spelled[1] = dotted;
+    std::string spelled_error;
+    const std::vector<std::string> rows =
+        SplitLines(SymbolModeOutput(spelled, options, spelled_error));
+    EXPECT_TRUE(spelled_error.empty());
+    EXPECT_EQ(rows.size(), want.size());
+    Index beta_rows = 0;
+    for (const std::string& row : rows) {
+      if (row.ends_with("Beta")) ++beta_rows;
+    }
+    EXPECT_EQ(beta_rows, Index{1});
+  }
+
   {
     SymbolModeOptions tight = options;
     tight.hot_limit = 0;

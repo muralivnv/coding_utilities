@@ -2285,6 +2285,7 @@ struct GaveUpSyntax : Syntax {
   void Sync(const PieceTable&) override {}
   void Paint(const PieceTable&, Interval, std::vector<CaptureId>& out) override { out.clear(); }
   bool TimedOut() const override { return true; }
+  bool QueryTruncated() const override { return false; }
   bool InjectionsTruncated() const override { return false; }
   Index InjectionParses() const override { return 0; }
   bool Captures(const PieceTable&, std::span<const std::string_view>, Interval,
@@ -2440,6 +2441,7 @@ struct CutAfterSyntax : Syntax {
     inner->Paint(table, range, out);
   }
   bool TimedOut() const override { return inner->TimedOut(); }
+  bool QueryTruncated() const override { return inner->QueryTruncated(); }
   bool InjectionsTruncated() const override { return inner->InjectionsTruncated(); }
   Index InjectionParses() const override { return inner->InjectionParses(); }
   bool Captures(const PieceTable& table, std::span<const std::string_view> query_files,

@@ -20,9 +20,10 @@ using OutputFunc = std::function<void(std::string_view, size_t)>;
 // Which of the scan's regexes failed. The stage decides what the failure cost
 // the user, and the wording says so: a filter that fails drops a line that
 // might have matched, an exclude that fails keeps a line that might have been
-// excluded, a range bound that fails does not latch, and a highlight that fails
-// prints the line with some of its matches unpainted.
-enum class MatchStage : std::uint8_t { kFilter, kExclude, kRangeStart, kRangeEnd, kHighlight };
+// excluded, a range bound that fails does not latch, a replacement that fails
+// leaves the line as it arrived, and a highlight that fails prints the line
+// with some of its matches unpainted.
+enum class MatchStage : std::uint8_t { kFilter, kExclude, kRangeStart, kRangeEnd, kReplace, kHighlight };
 
 // Collects the match-time failures a scan runs into -- the match limit, the
 // depth limit, a JIT stack overflow -- and reports each one once.

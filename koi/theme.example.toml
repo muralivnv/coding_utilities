@@ -25,9 +25,14 @@
 #   "scope" = "colour"                              -- a foreground, nothing else
 #   "scope" = { fg = "...", bg = "...", modifiers = [...] }
 #
-# A colour is either `#rrggbb`, or `#rrggbbaa` (the alpha is read and dropped,
-# because a terminal cell has nowhere to put it), or a name. A name is looked
-# up in `[palette]` first and, failing that, among the sixteen built-ins:
+# A colour is either `#rrggbb`, or `#rrggbbaa`, or a name. A cell has nowhere
+# to put an alpha, so `#rrggbbaa` is composited when the theme loads: over the
+# scope's own `bg` for an `fg` that has one, over `ui.background` otherwise.
+# `ui.background` is the bottom layer, with the terminal's own colour under it
+# rather than anything koi knows, so an alpha there is dropped.
+#
+# A name is looked up in `[palette]` first and, failing that, among the sixteen
+# built-ins:
 #
 #   black red green yellow blue magenta cyan gray
 #   light-red light-green light-yellow light-blue light-magenta light-cyan

@@ -438,10 +438,12 @@ void RunawayQueriesAreCutOffLikeRunawayParses() {
   ResetToOriginal(ed.doc.table, plain_text);
   syntax.Sync(ed.doc.table);
   EXPECT_FALSE(syntax.TimedOut());
+  EXPECT_FALSE(syntax.QueryTruncated());
 
   std::vector<CaptureId> plain;
   syntax.Paint(ed.doc.table, Interval(0, DocLength(ed.doc.table)), plain);
   EXPECT_FALSE(syntax.TimedOut());
+  EXPECT_FALSE(syntax.QueryTruncated());
   EXPECT_EQ(plain.size(), static_cast<std::size_t>(DocLength(ed.doc.table)));
   EXPECT_TRUE(coloured(plain) > 0);
   // `const` is a keyword here and stays one; the budget must not cost the
@@ -463,7 +465,12 @@ void RunawayQueriesAreCutOffLikeRunawayParses() {
   const Index middle = DocLength(ed.doc.table) / 2;
   std::vector<CaptureId> window;
   syntax.Paint(ed.doc.table, Interval(middle, middle + kWindow), window);
-  EXPECT_TRUE(syntax.TimedOut());
+  EXPECT_TRUE(syntax.QueryTruncated());
+  // And the parse's own flag stays down, because the parse did not fail. The
+  // two used to be one flag, so a paint the frame budget cut left Captures
+  // answering "parse gave up -- file too large" for the rest of the revision --
+  // about a tree it was holding at the time.
+  EXPECT_FALSE(syntax.TimedOut());
   // Partial, not empty: what was matched before the deadline is kept, and the
   // rest of the window is left uncoloured rather than left undrawn.
   EXPECT_EQ(window.size(), static_cast<std::size_t>(kWindow));
@@ -472,11 +479,110 @@ void RunawayQueriesAreCutOffLikeRunawayParses() {
   ResetToOriginal(ed.doc.table, plain_text);
   syntax.Sync(ed.doc.table);
   EXPECT_FALSE(syntax.TimedOut());
+  EXPECT_FALSE(syntax.QueryTruncated());
 
   std::vector<CaptureId> again;
   syntax.Paint(ed.doc.table, Interval(0, DocLength(ed.doc.table)), again);
   EXPECT_FALSE(syntax.TimedOut());
+  EXPECT_FALSE(syntax.QueryTruncated());
   EXPECT_TRUE(again == plain);
+}
+
+void QueriesThatRunOutOfMatchSlotsAdmitIt() {
+  TEST_CASE("syntax: a query cursor that recycles a capture list says so");
+
+  // The other way a tree-sitter query comes back short, and the one that had no
+  // report at all here. tree-sitter keeps a capture list per match still in
+  // flight and, left at its UINT32_MAX default, allocates one for every partial
+  // match the document starts -- unbounded, on the path that runs inside
+  // DrawPane. With a limit set it recycles the list of the state that began
+  // earliest instead, which drops that match: for a paint that is a highlight
+  // missing from a byte that has one, and for the indent engine it is an
+  // ancestor that reads as a scope that is not there.
+  //
+  // The fixture is the symbol scan's, because the shape is the same: patterns
+  // of "an identifier, then later a number" over a call whose last argument is
+  // the only number in it, so every identifier starts a match that cannot
+  // finish until the argument list ends. Dialled the same way too -- many
+  // patterns over few identifiers, so the pool is full inside the first call
+  // rather than after a second of matching. A wide call and few patterns fills
+  // it just as surely and takes half a second to get there, which would leave
+  // this asserting on whichever bound this machine met first.
+  const FakeQueryDir queries{"cpp"};
+  EXPECT_TRUE(queries.Ready());
+  if (!queries.Ready()) return;
+  queries.Write("textobjects.scm", PilingUpQuery(128, "function.inside", "function.around"));
+  queries.Write("highlights.scm", PilingUpQuery(128, "variable", "constant"));
+
+  // On a thread of its own because the compiled-query cache is thread_local and
+  // sticky: cpp's queries have been compiled on the main thread by the time this
+  // runs, and what is cached there is what koi ships rather than the fixtures
+  // above.
+  OnAThreadOfItsOwn([&] {
+    std::string error;
+    const auto syntax = OpenSyntax(std::filesystem::path{"wide.cpp"}, error);
+    EXPECT_TRUE(syntax != nullptr);
+    if (syntax == nullptr) return;
+
+    static constexpr std::array<std::string_view, 1> kFiles{"textobjects.scm"};
+    const std::string plain_text = "void one() { g(x0, x1, 7); }\n";
+    const std::string wide = WideCalls(24, 8, true);
+
+    PieceTable table;
+    // Under a deadline of the caller's, and a short one, so that the run's own
+    // clock cannot be what raises the flag: a caller's deadline is reported to
+    // the caller and to nobody else -- see NoteQueryBudget -- which leaves the
+    // match limit as the only thing that can raise QueryTruncated() below.
+    const auto until = [] {
+      return std::chrono::steady_clock::now() + std::chrono::milliseconds{20};
+    };
+
+    // -- an ordinary file under the same query: nothing dropped, nothing said -
+    ResetToOriginal(table, plain_text);
+    std::vector<Capture> captures;
+    bool exhausted = true;
+    const auto plain_until = until();
+    EXPECT_TRUE(syntax->Captures(table, kFiles, Interval(0, DocLength(table)), captures, error,
+                                 &exhausted, false, &plain_until));
+    EXPECT_FALSE(exhausted);
+    EXPECT_FALSE(syntax->QueryTruncated());
+    EXPECT_TRUE(!captures.empty());
+
+    // -- and the pathological one: short, and it admits to being short --------
+    ResetToOriginal(table, wide);
+    const auto wide_until = until();
+    EXPECT_TRUE(syntax->Captures(table, kFiles, Interval(0, DocLength(table)), captures, error,
+                                 &exhausted, false, &wide_until));
+    // True with the captures it did find, not false: a caller that can use a
+    // partial answer still has one. What it may not do is mistake it for the
+    // whole file.
+    EXPECT_TRUE(exhausted);
+    EXPECT_TRUE(syntax->QueryTruncated());
+    EXPECT_TRUE(!captures.empty());
+
+    // -- lowered by the next parse of a changed buffer, like the others -------
+    ResetToOriginal(table, plain_text);
+    syntax->Sync(table);
+    EXPECT_FALSE(syntax->QueryTruncated());
+
+    // -- and the same for the cursor a paint runs on --------------------------
+    //
+    // A separate cursor from the one above, shared by the base query, the
+    // injection scan and every injected layer, and capped in the constructor
+    // for the same reason. Painted over one call rather than the file, so that
+    // the run is short enough that no deadline is what ends it: a highlight
+    // that went missing because its match was recycled is missing whether or
+    // not the frame also ran out of time.
+    ResetToOriginal(table, wide);
+    syntax->Sync(table);
+    EXPECT_FALSE(syntax->QueryTruncated());
+    const Index first_line = LineRange(table, 0).back() + 1;
+    std::vector<CaptureId> painted;
+    syntax->Paint(table, Interval(0, first_line), painted);
+    EXPECT_EQ(painted.size(), static_cast<std::size_t>(first_line));
+    EXPECT_TRUE(syntax->QueryTruncated());
+    EXPECT_FALSE(syntax->TimedOut());
+  });
 }
 
 namespace {
@@ -658,6 +764,154 @@ void InjectedTextPastTheFrameBudgetIsRefusedAndSaidSo() {
   EXPECT_FALSE(syntax.InjectionsTruncated());
   EXPECT_EQ(ScopeAfter(syntax, small, fits, "const tail", 0),
             std::string{"keyword.storage.modifier"});
+}
+
+void FencesWithNoGrammarBehindThemDoNotSpendTheInjectionBudget() {
+  TEST_CASE("syntax: a fence koi cannot paint leaves the budget for one it can");
+
+  // The budget above is spent on bytes handed to another parser. It used to be
+  // charged for bytes that were never handed to anybody: CollectInjections took
+  // whatever GrammarFor called a plausible name -- which is every bare word,
+  // `mermaid` included -- and only the paint loop, further down and too late,
+  // asked whether a grammar by that name existed. A document of diagrams
+  // therefore spent the frame's megabyte on nothing, the one region that could
+  // have been painted came back plain, and InjectionsTruncated() reported a
+  // paint that had given something up while doing no work at all.
+
+  // -- what an unpaintable fence is, and whose bytes it holds ----------------
+  //
+  // Small enough that no budget is anywhere near in play: this half is about the
+  // two facts the big one below rests on, that ```mermaid parses as nothing and
+  // that its body is nevertheless not markdown's.
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ed.doc.file = "diagrams.md";
+    AttachSyntax(ed);
+    EXPECT_TRUE(ed.doc.syntax != nullptr);
+    if (ed.doc.syntax == nullptr) return;
+    Syntax& syntax = *ed.doc.syntax;
+
+    const std::string doc =
+        "```mermaid\ngraph TD; a --> b;\n```\n\n```javascript\nconst tail = 1;\n```\n";
+    ResetToOriginal(ed.doc.table, doc);
+    syntax.Sync(ed.doc.table);
+
+    std::vector<CaptureId> ids;
+    syntax.Paint(ed.doc.table, Interval(0, DocLength(ed.doc.table)), ids);
+    EXPECT_EQ(ids.size(), doc.size());
+    // One region parsed, not two: the diagram has no grammar to be parsed by,
+    // and keeps the one flat run the block grammar gives every fence it cannot
+    // see into. Unchanged by this fix -- what changed is the price.
+    EXPECT_EQ(syntax.InjectionParses(), Index{1});
+    EXPECT_EQ(ScopeAfter(syntax, doc, ids, "graph TD", 0), std::string{"markup.raw.block"});
+    EXPECT_EQ(ScopeAfter(syntax, doc, ids, "const tail", 0),
+              std::string{"keyword.storage.modifier"});
+
+    // An unpaintable region stays in the collection with its language cleared
+    // rather than being dropped, and this is why. InInjectedRegion is the
+    // ownership guard the indent engine consults before running the host's query
+    // over a byte -- see TreeIndentForNewline -- and a ```mermaid body is no more
+    // markdown's to indent than a ```rust one is. Colours and ownership are
+    // separate questions, and only the first of them needs a grammar.
+    const auto inside = static_cast<Index>(doc.find("graph TD") + 2);
+    EXPECT_TRUE(syntax.InInjectedRegion(ed.doc.table, inside) == Injected::kYes);
+    // Which is a claim about the body and not about the file: the fence markers
+    // on either side of it are the block grammar's own.
+    EXPECT_TRUE(syntax.InInjectedRegion(ed.doc.table, 0) == Injected::kNo);
+    const auto marker = static_cast<Index>(doc.find("```javascript") + 1);
+    EXPECT_TRUE(syntax.InInjectedRegion(ed.doc.table, marker) == Injected::kNo);
+  }
+
+  // -- and what a megabyte of them costs -------------------------------------
+  //
+  // HTML rather than markdown, for the reason the case above this file's other
+  // budget test gives: the base parse has to fit too, and the markdown grammar
+  // spends its whole 500 ms on a megabyte and comes back with no tree, which
+  // would pass every assertion here for the wrong reason. So the unknown
+  // language arrives the other way koi can meet one, off a <script type>, which
+  // needs an injections.scm that reads that attribute -- the shipped one names
+  // javascript and css outright, and a literal is never unknown.
+  const FakeQueryDir queries{"html"};
+  EXPECT_TRUE(queries.Ready());
+  if (!queries.Ready()) return;
+  queries.Write("injections.scm",
+                "(script_element\n"
+                "  (start_tag (attribute (quoted_attribute_value\n"
+                "    (attribute_value) @injection.language)))\n"
+                "  (raw_text) @injection.content)\n");
+
+  // On a thread of its own because the compiled-query cache is thread_local:
+  // html's shipped injections.scm has been compiled on the main thread by now.
+  OnAThreadOfItsOwn([&] {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ed.doc.file = "budget.html";
+    AttachSyntax(ed);
+    EXPECT_TRUE(ed.doc.syntax != nullptr);
+    if (ed.doc.syntax == nullptr) return;
+    Syntax& syntax = *ed.doc.syntax;
+
+    // Two script bodies of 530 KB, over kMaxInjectedBytes between them, and a
+    // third body of one line after them -- so every byte of the bulk is charged,
+    // if it is charged at all, before the small one is reached. The bodies are
+    // identical in both pages; the only difference is whether a grammar by the
+    // name in `type` exists.
+    const auto page = [](std::string_view type) {
+      std::string out = "<html><body>\n";
+      for (int block = 0; block < 2; ++block) {
+        out += "<script type=\"";
+        out += type;
+        out += "\">\n";
+        const std::size_t target = out.size() + (530u * 1024u);
+        while (out.size() < target) out += "let a" + std::to_string(out.size()) + " = 1;\n";
+        out += "</script>\n";
+      }
+      out += "<script type=\"javascript\">const tail = 1;</script>\n</body></html>\n";
+      return out;
+    };
+
+    const std::string diagrams = page("mermaid");
+    ResetToOriginal(ed.doc.table, diagrams);
+    syntax.Sync(ed.doc.table);
+    EXPECT_FALSE(syntax.TimedOut());
+
+    std::vector<CaptureId> ids;
+    syntax.Paint(ed.doc.table, Interval(0, DocLength(ed.doc.table)), ids);
+    EXPECT_EQ(ids.size(), diagrams.size());
+    // The whole point: the last script on a page of a megabyte of diagrams is
+    // still JavaScript. It used to be plain.
+    EXPECT_EQ(ScopeAfter(syntax, diagrams, ids, "const tail", 0),
+              std::string{"keyword.storage.modifier"});
+    // And nothing was given up, so nothing is claimed to have been. That was the
+    // other half of it: a flag telling the user a paint had run short, raised by
+    // a budget spent on parses nobody asked for.
+    EXPECT_FALSE(syntax.InjectionsTruncated());
+    EXPECT_EQ(syntax.InjectionParses(), Index{1});
+    EXPECT_EQ(ScopeAfter(syntax, diagrams, ids, "let a", 0), std::string{"<plain>"});
+    // Still spoken for, a megabyte of them at a time.
+    const auto inside = static_cast<Index>(diagrams.find("let a") + 2);
+    EXPECT_TRUE(syntax.InInjectedRegion(ed.doc.table, inside) == Injected::kYes);
+
+    // -- the same page under a language that has a grammar ------------------
+    //
+    // Which is what says the bulk above was over the budget rather than merely
+    // near it. Nothing here makes a paint willing to parse a megabyte; what it
+    // makes it willing to do is stop counting bytes it will never hand over.
+    const std::string real = page("javascript");
+    ResetToOriginal(ed.doc.table, real);
+    syntax.Sync(ed.doc.table);
+    EXPECT_FALSE(syntax.TimedOut());
+
+    std::vector<CaptureId> spent;
+    syntax.Paint(ed.doc.table, Interval(0, DocLength(ed.doc.table)), spent);
+    EXPECT_TRUE(syntax.InjectionsTruncated());
+    // The trailing script is what the budget cost the page. What became of the
+    // two 530 KB bodies that spent it is not asked: each of those gets its own
+    // kInjectionBudget, and whether a parse that size finishes inside 50 ms is
+    // a fact about this machine.
+    EXPECT_EQ(ScopeAfter(syntax, real, spent, "const tail", 0), std::string{"<plain>"});
+  });
 }
 
 void AutoIndentSeesStringsInsideInjectedRegions() {

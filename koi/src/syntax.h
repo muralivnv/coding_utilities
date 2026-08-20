@@ -91,12 +91,36 @@ struct Syntax {
 
   virtual void Paint(const PieceTable& table, Interval range, std::vector<CaptureId>& out) = 0;
 
+  // Whether the *parse* gave up on this buffer: it wants more than the parse
+  // budget, or more bytes than tree-sitter can address at all. While it holds
+  // there is no tree, so Paint colours nothing and Captures fails with a
+  // reason, and it is what stops Sync re-parsing a buffer already known to be
+  // beyond it. Written by a parse and by nothing else. A query that ran out of
+  // budget used to raise it too, which left "the parse gave up -- file too
+  // large" standing behind a tree that was perfectly good; that half is
+  // QueryTruncated below.
   virtual bool TimedOut() const = 0;
+
+  // Whether the last query run on this object's own frame budget came back
+  // short of what the tree holds -- the 25 ms a draw is allowed ran out, or a
+  // cursor ran out of capture lists and recycled one that was still in use.
+  // Either way spans that belong on screen are missing and the bytes they
+  // covered are painted plain.
+  //
+  // Raised by a paint, or by a Captures call running on the frame budget rather
+  // than on a deadline of its own, and lowered by the next parse of a changed
+  // buffer. A Captures call under a caller's own deadline reports its cut
+  // through `budget_exhausted` and does not raise this -- see there -- but a
+  // recycled capture list raises it whoever was holding the clock: running out
+  // of match slots is a fact about how densely this document matches, not about
+  // who ran out of time.
+  virtual bool QueryTruncated() const = 0;
 
   // Whether the last paint stopped looking for injected regions before it ran
   // out of them, because the document put more of them in one call than a frame
-  // is willing to parse. Everything past that point is painted with the base
-  // grammar alone. Reported like TimedOut(): raised by a paint, and lowered by
+  // is willing to parse, or because the query that finds them ran out of match
+  // slots and dropped some. What was not found is painted with the base grammar
+  // alone. Reported like QueryTruncated(): raised by a paint, and lowered by
   // the next parse of a changed buffer.
   virtual bool InjectionsTruncated() const = 0;
 
@@ -105,12 +129,16 @@ struct Syntax {
   // scrolling over a <script> body reuses its tree instead of re-parsing it.
   virtual Index InjectionParses() const = 0;
 
-  // `budget_exhausted`, when given, says whether the match ran out of the frame
-  // budget partway and `out` is therefore short. Returning true with it raised
-  // is a real state -- half the captures over the asked-for range -- and a caller
-  // that cannot use a partial answer (the indent engine cannot: a missing
-  // ancestor is a missing indent level, not a missing highlight) has no other way
-  // to tell that from a range that genuinely had nothing more in it.
+  // `budget_exhausted`, when given, says whether the match stopped partway and
+  // `out` is therefore short -- because time ran out, or because the cursor ran
+  // out of capture lists and recycled one still in use. Returning true with it
+  // raised is a real state -- half the captures over the asked-for range -- and
+  // a caller that cannot use a partial answer (the indent engine cannot: a
+  // missing ancestor is a missing indent level, not a missing highlight) has no
+  // other way to tell that from a range that genuinely had nothing more in it.
+  // The two causes share one flag because they leave the caller in one state;
+  // which of them it was is only ever an answer about the document, and
+  // QueryTruncated is where that is kept.
   //
   // `keep_zero_width` keeps captures whose node spans no bytes. Off by default
   // because for everything that selects or paints text -- text objects,
@@ -138,8 +166,8 @@ struct Syntax {
   // *shorten* the run, so it cannot be used to hold a frame open, and it applies
   // to this call and no other: the next Captures or Paint starts a frame budget
   // of its own as before. A cut run is reported through `budget_exhausted` as
-  // any other is, and does *not* raise TimedOut(): the caller running out of
-  // time says nothing about the document.
+  // any other is, and does *not* raise QueryTruncated(): the caller running out
+  // of time says nothing about the document.
   virtual bool Captures(const PieceTable& table, std::span<const std::string_view> query_files,
                         Interval range, std::vector<Capture>& out, std::string& error,
                         bool* budget_exhausted = nullptr, bool keep_zero_width = false,

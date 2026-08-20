@@ -210,6 +210,12 @@ InjectedSpan MapSpanThrough(const InjectedSpan& span, const Edit& edit) {
 // kilobytes of cells -- so a normal frame never meets either limit, and what
 // does meet them is a whole-file paint of something enormous, where stopping is
 // the right answer and saying so is the missing half of it.
+//
+// The two are charged differently, because they bound different things. The
+// count bounds the *list* one frame builds, and a region takes a slot in it
+// whatever its language turns out to be. The bytes bound the text handed to
+// another parser, so only a region with a grammar to hand it to pays them: a
+// ```mermaid fence is free. See CollectInjections.
 constexpr Index kMaxInjectedBytes = 1 << 20;
 constexpr int kMaxInjectedRegions = 8192;
 
@@ -266,6 +272,13 @@ class TreeSitterSyntax final : public Syntax {
     parser_ = ts_parser_new();
     ts_parser_set_language(parser_, LanguageOf(*compiled_));
     cursor_ = ts_query_cursor_new();
+    // Set once, because this cursor is shared by every paint of every layer and
+    // by the injection scan. Left at tree-sitter's UINT32_MAX default it keeps a
+    // capture list for every partial match the document starts, which is an
+    // allocation the file decides the size of on the one path that runs inside
+    // DrawPane -- see kMaxQueryMatchStates. With it set, a run past the cap
+    // recycles instead, and every drain below reads back whether it had to.
+    ts_query_cursor_set_match_limit(cursor_, kMaxQueryMatchStates);
     base_ids_ = InternNames(*compiled_);
   }
 
@@ -287,6 +300,7 @@ class TreeSitterSyntax final : public Syntax {
   // why callers resolve styles from this rather than caching a length.
   std::span<const std::string> CaptureNames() const override { return names_; }
   bool TimedOut() const override { return timed_out_; }
+  bool QueryTruncated() const override { return query_truncated_; }
   bool InjectionsTruncated() const override { return injections_truncated_; }
   Index InjectionParses() const override { return injection_parses_; }
 
@@ -312,6 +326,11 @@ class TreeSitterSyntax final : public Syntax {
         range.empty() ? doc_len : std::clamp<Index>(range.back() + 1, scan_from, doc_len);
 
     TSQueryCursor* cursor = ts_query_cursor_new();
+    ts_query_cursor_set_match_limit(cursor, kMaxQueryMatchStates);
+    // Both ends fit a uint32 because there is a tree above: Sync refuses a
+    // buffer tree-sitter cannot address at all, so a document with a tree is one
+    // whose every offset survives the cast. Clamped to `doc_len` just above, so
+    // the same holds for a range the caller made up.
     ts_query_cursor_set_byte_range(cursor, static_cast<uint32_t>(scan_from),
                                    static_cast<uint32_t>(scan_to));
     StartQueryBudget(deadline);
@@ -347,19 +366,19 @@ class TreeSitterSyntax final : public Syntax {
                               parent_from, structure && EndsInInventedToken(capture.node)});
       }
     }
+    // Both ways this run can come back short. A recycled capture list is a
+    // dropped match, and a dropped match is a capture the indent engine never
+    // sees and reads as a scope that is not there -- a silently wrong column
+    // rather than a decline. `budget_exhausted` is what turns either into one,
+    // so they are one answer to the caller; the difference between them is a
+    // fact about the document, and that is what QueryTruncated keeps. Read
+    // before the delete: the flag belongs to the cursor.
+    const bool dropped = ts_query_cursor_did_exceed_match_limit(cursor);
     ts_query_cursor_delete(cursor);
-    // The deadline, and *only* the deadline: this cursor has no match limit set,
-    // so the one other way a tree-sitter query run comes back incomplete cannot
-    // happen here. Whoever adds ts_query_cursor_set_match_limit to the cursor
-    // above -- kMaxQueryMatchStates in query.h, as overview.cpp, textobject.cpp
-    // and symbols.cpp set it, each reading the flag back afterwards -- has to
-    // fold ts_query_cursor_did_exceed_match_limit into `expired` here as well.
-    // A dropped match is a capture the indent engine never sees and reads
-    // as a scope that is not there, which is a silently wrong column rather than
-    // a decline; `budget_exhausted` is what turns an incomplete run into one.
-    const bool expired = query_deadline_.expired;
+    if (dropped) query_dropped_matches_ = true;
+    const bool cut = query_deadline_.expired || dropped;
     NoteQueryBudget();
-    if (budget_exhausted != nullptr) *budget_exhausted = expired;
+    if (budget_exhausted != nullptr) *budget_exhausted = cut;
     return true;
   }
 
@@ -427,10 +446,33 @@ class TreeSitterSyntax final : public Syntax {
     // a region *is* survives the edit that moved it, and that half lives in
     // `injected_spans_`, which AdvanceSpans above has already carried forward.
     region_trees_.clear();
-    // Lowered here and raised only in CollectInjections, exactly as `timed_out_`
-    // is: giving up on part of a document is a fact about the revision that was
-    // painted, and it holds until the buffer changes.
+    // Lowered here and raised only by a paint, exactly as `timed_out_` is
+    // lowered only by a parse: giving up on part of a document is a fact about
+    // the revision that was painted, and it holds until the buffer changes.
     injections_truncated_ = false;
+    query_truncated_ = false;
+
+    // Every byte offset tree-sitter deals in is a uint32 -- the input callback
+    // it reads through, every node's start and end, every cursor range -- so a
+    // buffer past 4 GiB cannot be addressed, and parsing one would quietly
+    // produce a tree over an arbitrary prefix with captures landing at wrapped
+    // offsets. Refused at the one place a tree comes from, which is what makes
+    // every static_cast<uint32_t> downstream of a tree safe by construction:
+    // nothing here runs without one. It takes the same path a parse that ran out
+    // of budget takes, because it is the same answer -- this file is more than
+    // the engine will read -- and like that one it is held against the revision,
+    // so an edit that shortens the buffer is tried afresh.
+    std::uint32_t doc_end = 0;
+    if (!TreeSitterByteRange(static_cast<std::size_t>(DocLength(table)), doc_end)) {
+      if (tree_ != nullptr) {
+        ts_tree_delete(tree_);
+        tree_ = nullptr;
+      }
+      revision_ = table.revision;
+      timed_out_ = true;
+      painted_revision_ = -1;
+      return;
+    }
 
     const bool replayable = (tree_ != nullptr) && (revision_ >= table.journal_base);
     if (replayable) {
@@ -523,20 +565,30 @@ class TreeSitterSyntax final : public Syntax {
     const auto frame = std::chrono::steady_clock::now() + kQueryBudget;
     query_budget_borrowed_ = (caller != nullptr) && (*caller < frame);
     query_deadline_ = Deadline{query_budget_borrowed_ ? *caller : frame, nullptr, false, 0};
+    query_dropped_matches_ = false;
   }
 
   // Closes it, and tells the truth about it. Only ever raises the flag: what
   // lowers it is the next parse in Sync, exactly as for a parse that gave up.
-  // A query that ran out is a fact about this revision, and it holds until the
-  // buffer changes.
+  // A query that came back short is a fact about this revision, and it holds
+  // until the buffer changes.
   //
-  // Which is exactly why a run the *caller's* deadline cut does not raise it:
-  // that run stopped because whoever asked had spent its own time, not because
-  // this document is more than a frame can match, and the same query on the same
-  // revision with a budget of its own would finish. The caller is told through
-  // `budget_exhausted`, which is its answer to give.
+  // `query_truncated_` and not `timed_out_`. The two used to be the same flag,
+  // which meant one cut paint left every later reader of TimedOut() -- Captures'
+  // own "parse gave up -- file too large", and Sync's refusal to try a buffer
+  // again -- being told the parse failed on a document that had parsed fine.
+  // What the parse did belongs to the parse.
+  //
+  // A run the *caller's* deadline cut raises nothing: it stopped because whoever
+  // asked had spent its own time, not because this document is more than a frame
+  // can match, and the same query on the same revision with a budget of its own
+  // would finish. The caller is told through `budget_exhausted`, which is its
+  // answer to give. A run that recycled a capture list is the other way round --
+  // no clock decided it -- so it is raised whoever the deadline belonged to.
   void NoteQueryBudget() {
-    if (query_deadline_.expired && !query_budget_borrowed_) timed_out_ = true;
+    if ((query_deadline_.expired && !query_budget_borrowed_) || query_dropped_matches_) {
+      query_truncated_ = true;
+    }
   }
 
   // `query_options_` is a member and not a local because the cursor keeps a
@@ -565,6 +617,10 @@ class TreeSitterSyntax final : public Syntax {
     const Index hi = std::max<Index>(0, end - origin);
     if (hi <= lo) return;
 
+    // Both fit a uint32: there is a tree here, and Sync makes no tree for a
+    // buffer whose length tree-sitter cannot address, so every offset within the
+    // document that produced it survives the cast. `end` is the viewport's, and
+    // both callers Sync the same table immediately before painting it.
     ts_query_cursor_set_byte_range(cursor_, static_cast<uint32_t>(lo), static_cast<uint32_t>(hi));
     ExecUnderBudget(cursor_, QueryOf(query), root);
 
@@ -579,6 +635,12 @@ class TreeSitterSyntax final : public Syntax {
                               match.pattern_index, ids[capture.index]});
       }
     }
+    // Read here rather than once per Paint: the cursor is shared and each exec
+    // clears the flag, so a layer that dropped matches would be forgotten by the
+    // next layer's run. Accumulated into the budget this paint opened -- a
+    // highlight missing because its match was recycled is missing for the same
+    // reason as one the deadline cut, and the same word covers both.
+    if (ts_query_cursor_did_exceed_match_limit(cursor_)) query_dropped_matches_ = true;
 
     // Later and narrower wins, which is what puts a keyword over the string
     // that contains it. Stable across layers too: the base is painted first and
@@ -799,7 +861,8 @@ class TreeSitterSyntax final : public Syntax {
   // window's regions are the whole truth about this window and whatever was
   // known of it before is replaced -- which is what retires the span of a
   // <script> the user has since turned into a <div>. When it does not (the
-  // region budget cut the collection short), the two are unioned instead:
+  // region budget cut the collection short, or its cursor recycled a match away
+  // before the collection ever saw it), the two are unioned instead:
   // dropping a region the collection never got to would be the expensive
   // mistake. Outside the window nothing is touched either way, which is what
   // lets scrolling accumulate the document rather than forget it.
@@ -883,8 +946,39 @@ class TreeSitterSyntax final : public Syntax {
       // Never itself: a language whose injection query names its own grammar
       // would re-parse the same bytes forever.
       if (found.language.empty() || (found.language == language_)) continue;
-      injected_bytes += (found.to - found.from);
+      // ```mermaid is a perfectly plausible grammar name with no grammar behind
+      // it. The paint loop discovers that below, by which point the region has
+      // been charged for a parse that never happens -- so a chapter of diagrams
+      // spends the byte budget, the real ```rust fence under it comes back
+      // plain, and `injections_truncated_` blames a frame that did no work.
+      // Asking here is a hash lookup after the first miss, which LayerFor caches
+      // as firmly as a hit; and at the kMaxLayers cap it answers nullptr for an
+      // unseen name just as flatly, which is the answer the paint loop is about
+      // to get from that same full table. The two cannot end up disagreeing
+      // about which regions were worth charging for.
+      //
+      // Kept in `out` with its language cleared rather than dropped, because
+      // this list is also what RecordInjectedSpans reads. A fence's bytes belong
+      // to whatever the fence says they belong to whether or not koi can colour
+      // them, and InInjectedRegion is what keeps the host's indent query out of
+      // them; dropping the region would quietly hand markdown authority over the
+      // inside of a ```mermaid block, and html the inside of a script body whose
+      // type it has no grammar for.
+      if (LayerFor(found.language) == nullptr) {
+        found.language.clear();
+      } else {
+        injected_bytes += (found.to - found.from);
+      }
       out.push_back(std::move(found));
+    }
+    // A recycled capture list here is a region the collection was never handed,
+    // so this window's list is not the whole truth about the window -- which is
+    // exactly what `injections_truncated_` says, and what stops RecordInjectedSpans
+    // retiring the spans of regions that are still there. The break above is the
+    // other way to fall short of the same thing.
+    if (ts_query_cursor_did_exceed_match_limit(cursor_)) {
+      query_dropped_matches_ = true;
+      injections_truncated_ = true;
     }
   }
 
@@ -912,6 +1006,13 @@ class TreeSitterSyntax final : public Syntax {
       // not been parsed yet would spend up to kInjectionBudget on a tree
       // nothing is left to paint with.
       if (query_deadline_.expired) break;
+
+      // Cleared by the collection, which already looked for a grammar and found
+      // none. The region is in this list only so that its extent reached
+      // RecordInjectedSpans above. LayerFor would refuse the empty name too, but
+      // it would refuse it by interning it: a permanent entry under "" holding
+      // one of the kMaxLayers slots for something that was never a language.
+      if (region.language.empty()) continue;
 
       const Index from = std::max(start, region.from);
       const Index to = std::min(end, region.to);
@@ -980,12 +1081,17 @@ class TreeSitterSyntax final : public Syntax {
   TSTree* tree_{nullptr};
   Index revision_{-1};
   bool timed_out_{false};
+  bool query_truncated_{false};
   // Live only between StartQueryBudget() and NoteQueryBudget(); the calls do
   // not nest, and Captures' own cursor is gone before either returns.
   Deadline query_deadline_{};
   // Whether the deadline in force is a caller's rather than this frame's, which
   // is what decides who a run that stopped short belongs to. See NoteQueryBudget.
   bool query_budget_borrowed_{false};
+  // Whether any cursor run under the budget now open had to recycle a capture
+  // list. A member and not a local because a paint runs one cursor several times
+  // and tree-sitter clears the flag on every exec; see PaintTree.
+  bool query_dropped_matches_{false};
   TSQueryCursorOptions query_options_{};
   int full_parse_failures_{0};
   std::vector<Span> spans_;

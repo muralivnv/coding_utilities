@@ -125,8 +125,16 @@ void MergeSpans(std::vector<MatchSpan>& spans);
 // Substitutes into scratch_buffer, growing it if the result does not fit, and
 // returns a view of the result. The view points into scratch_buffer unless no
 // match was found, in which case it is content itself.
+//
+// A match-time failure -- the match limit, the depth limit, a JIT stack
+// overflow -- leaves the line unsubstituted and, when `error` is non-null,
+// writes the PCRE2 message into it, so a returned `content` with a non-empty
+// `error` is the only way to tell a line nothing matched in from a line that
+// could not be tested. `error` is untouched otherwise. Everything else still
+// throws: a replacement text pcre2 will not accept is wrong for every line, not
+// for this one.
 std::string_view Substitute(const Pcre2Substitution& substitution, std::string_view content,
-                            std::string& scratch_buffer);
+                            std::string& scratch_buffer, std::string* error = nullptr);
 }  // namespace gai
 
 #endif  // REGEX_H_

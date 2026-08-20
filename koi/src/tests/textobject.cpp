@@ -246,6 +246,59 @@ void TextObjectLookupsAreBoundedAndSayWhenTheyFallShort() {
     EXPECT_TRUE((error == kMatchLine) || (error == kBudgetLine));
   });
 
+  TEST_CASE("textobjects: the Syntax-backed path admits a short query too");
+
+  // Everything above is the standalone path, which is the one a lookup with no
+  // buffer behind it takes. A buffer open in the editor has a Syntax on it, and
+  // then the lookup runs through Captures over the tree that is already there --
+  // which is the path every `mi`, `ma` and `]f` in a real session takes, and the
+  // one that asked for no report and got none. A query the frame budget cut in
+  // half came back as a shorter list of objects and not a word about it, so the
+  // jump landed on the nearest of the objects that survived the cut: silently
+  // the wrong one, where the standalone path's answer is the right one with a
+  // complaint over it.
+  const std::string kShortLine =
+      "the text-object query came back short -- some objects are missing";
+
+  // Dialled the way the symbol scan's own match-limit case is dialled: many
+  // patterns over few identifiers, which fills the pool inside the first call
+  // rather than after a second of matching, so what the run hits is the cap and
+  // not the clock.
+  queries.Write("textobjects.scm", PilingUpQuery(128, "function.inside", "function.around"));
+  const std::string dense = WideCalls(24, 8, true);
+  const std::filesystem::path dense_file = scratch.Write("dense.cpp", dense);
+
+  OnAThreadOfItsOwn([&] {
+    PieceTable table = MakeTable(dense);
+    std::string syntax_error;
+    const auto syntax = OpenSyntax(dense_file, syntax_error);
+    EXPECT_TRUE(syntax != nullptr);
+    if (syntax == nullptr) return;
+
+    std::vector<ObjectRange> out;
+    std::string error;
+    EXPECT_TRUE(TextObjectRanges(table, dense_file, "function",
+                                 std::array<std::string_view, 1>{"around"}, out, error,
+                                 syntax.get()));
+    EXPECT_EQ(error, kShortLine);
+  });
+
+  // And as far as the status line, through the keystroke itself. `]f` rather
+  // than `maf`: a select asks about the bytes under the carets and a jump asks
+  // about the whole document, and it is the second that meets the bound.
+  OnAThreadOfItsOwn([&] {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ed.doc.file = dense_file;
+    ResetToOriginal(ed.doc.table, dense);
+    AttachSyntax(ed);
+    EXPECT_TRUE(ed.doc.syntax != nullptr);
+    ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
+    RunCommands(ed, {"goto_next_function"});
+    EXPECT_EQ(ed.status.text(), kShortLine);
+    EXPECT_TRUE(ed.status.level() == StatusLevel::kWarning);
+  });
+
   // -- a node with no width in it -------------------------------------------
   //
   // Auto-indentation asks Syntax::Captures to keep captures whose node spans no

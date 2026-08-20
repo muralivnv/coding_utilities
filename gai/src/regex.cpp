@@ -179,6 +179,24 @@ void DescribeError(int retcode, std::string* error) {
   }
 }
 
+// Which of pcre2_substitute's failures belong to the subject rather than to the
+// replacement text. A limit was reached by this line and the next line may well
+// be fine, so it is a match-time error like any other -- reported, and the line
+// left alone. A replacement pcre2 will not parse, or a capture that does not
+// exist, is wrong for every line the scan will ever see, so it stays fatal.
+bool IsMatchTimeError(int retcode) {
+  switch (retcode) {
+    case PCRE2_ERROR_MATCHLIMIT:
+    case PCRE2_ERROR_DEPTHLIMIT:
+    case PCRE2_ERROR_HEAPLIMIT:
+    case PCRE2_ERROR_JIT_STACKLIMIT:
+    case PCRE2_ERROR_RECURSELOOP:
+      return true;
+    default:
+      return false;
+  }
+}
+
 }  // namespace
 
 bool Find(const Pcre2Regex& search_pattern, std::string_view content, std::string* error) {
@@ -262,7 +280,7 @@ void MergeSpans(std::vector<MatchSpan>& spans) {
 }
 
 std::string_view Substitute(const Pcre2Substitution& substitution, std::string_view content,
-                            std::string& scratch_buffer) {
+                            std::string& scratch_buffer, std::string* error) {
   if (!substitution.re.p) {
     return content;
   }
@@ -277,8 +295,16 @@ std::string_view Substitute(const Pcre2Substitution& substitution, std::string_v
   // Two attempts at most: the first sizes the buffer, the second cannot overflow.
   for (int attempt = 0; attempt < 2; ++attempt) {
     PCRE2_SIZE out_length = scratch_buffer.size();
+    // The match context is the same one every Find runs under, and it is the
+    // load-bearing argument here: a substitution matches per line exactly as a
+    // filter does, and without a context pcre2 falls back to its ten-million
+    // step default -- the per-line grind the Find side was already capped for.
+    // The match data stays null on purpose: pcre2_substitute creates one sized
+    // from the pattern when it is not given one, and a Pcre2Substitution has
+    // nowhere to keep it.
     int rc = pcre2_substitute(
-        substitution.re.p, reinterpret_cast<PCRE2_SPTR>(content.data()), content.size(), 0, options, nullptr, nullptr,
+        substitution.re.p, reinterpret_cast<PCRE2_SPTR>(content.data()), content.size(), 0, options, nullptr,
+        thread_local_match_context.match_context,
         reinterpret_cast<PCRE2_SPTR>(substitution.substitute_pattern.data()), substitution.substitute_pattern.size(),
         reinterpret_cast<PCRE2_UCHAR*>(scratch_buffer.data()), &out_length);
     // no substitution performed
@@ -290,6 +316,16 @@ std::string_view Substitute(const Pcre2Substitution& substitution, std::string_v
     if (rc == PCRE2_ERROR_NOMEMORY && attempt == 0) {
       scratch_buffer.resize(out_length);
       continue;
+    }
+
+    if (IsMatchTimeError(rc)) {
+      // pcre2 abandons the whole call on a match-time failure, so there is no
+      // half-substituted line to hand back and no way to know which of a global
+      // substitution's matches were reached. The line goes out as it arrived --
+      // the same fail-open a filter that cannot finish takes -- and `error` is
+      // the only thing that says it was never really substituted.
+      DescribeError(rc, error);
+      return content;
     }
 
     std::string msg(256, '\0');

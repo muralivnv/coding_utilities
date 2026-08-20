@@ -28,6 +28,17 @@ std::string RunSub(const gai::Pcre2Substitution& sub, std::string_view input) {
   return std::string{result};
 }
 
+// The same, but keeping what Substitute reported: a match-time failure is a
+// returned line plus a message, and only the message tells the two apart.
+std::string SubError(const gai::Pcre2Substitution& sub, std::string_view input, std::string* line = nullptr) {
+  static std::string scratch(512, ' ');
+  std::string error;
+  std::string_view result = gai::Substitute(sub, input, scratch, &error);
+  if (line != nullptr)
+    *line = std::string{result};
+  return error;
+}
+
 // Collects every line the mmap reader yields. Views point into `content`, which the
 // caller owns, so copying to std::string is only for convenient comparison.
 std::vector<std::string> ReadAllMapped(std::string_view content, bool read0 = false) {
@@ -100,6 +111,7 @@ struct ScanRequest {
   std::string content;
   std::vector<std::string_view> filters{};
   std::vector<std::string_view> excludes{};
+  std::vector<std::string_view> replacements{};
   std::string_view range{};
   bool color{false};
   bool jit{false};
@@ -110,7 +122,7 @@ ScanResult RunScan(const ScanRequest& request) {
   ScanResult out;
   const std::vector<Pcre2Regex> filters = ParseFilters(request.filters, request.jit, false);
   const std::vector<Pcre2Regex> excludes = ParseFilters(request.excludes, request.jit, false);
-  const std::vector<Pcre2Substitution> replacements;
+  const std::vector<Pcre2Substitution> replacements = ParseSubstitutions(request.replacements, request.jit, false);
   std::optional<Range> range = ParseRange(request.range, request.jit, false);
 
   MatchDiagnostics diagnostics([&out](std::string_view text) { out.diagnostics.emplace_back(text); });
@@ -397,6 +409,58 @@ static void TestSubstitute() {
     std::string scratch(4096, ' ');
     auto sub = Pcre2Substitution(Compile("a{10000}", false, false), "b");
     EXPECT_EQ(Substitute(sub, std::string(10000, 'a'), scratch), "b");
+  }
+
+  TEST_CASE("a catastrophic replacement pattern is stopped by the match limit, on both engines");
+  {
+    // Substituting matches per line exactly as filtering does, so the same
+    // twenty x's that tell the Find side's budgets apart tell these apart:
+    // over a hundred thousand steps and far short of ten million. With the
+    // thread's match context the call is a reported error; with pcre2's own
+    // default it grinds through the ten million and reports a silent no-match.
+    // Nothing is timed -- which budget applies is the observable.
+    for (const bool jit : {false, true}) {
+      auto sub = Pcre2Substitution(Compile(kCatastrophic, jit, false), "Y");
+      std::string line;
+      const std::string error = SubError(sub, kBlowsTheLimit, &line);
+      EXPECT_TRUE(error.find("match limit") != std::string::npos);
+      // Fail-open: pcre2 abandons the whole call, so the line is handed back
+      // as it arrived rather than half-substituted.
+      EXPECT_EQ(line, kBlowsTheLimit);
+    }
+  }
+
+  TEST_CASE("a match-time failure is reported, not thrown");
+  {
+    // (*LIMIT_MATCH=1) is the deterministic route to the same error, and the
+    // one that does not depend on the context's own cap: pcre2 honours a
+    // pattern's limit whenever it is the lower of the two.
+    const std::string subject = std::string(8, 'a') + "b";
+    for (const bool jit : {false, true}) {
+      auto sub = Pcre2Substitution(Compile("(*LIMIT_MATCH=1)a*ab", jit, false), "X");
+      EXPECT_NO_THROW(RunSub(sub, subject));
+      EXPECT_EQ(RunSub(sub, subject), subject);
+      EXPECT_FALSE(SubError(sub, subject).empty());
+    }
+  }
+
+  TEST_CASE("error is left untouched on a substitution and on a clean no-match");
+  {
+    auto sub = Pcre2Substitution(Compile("world", false, false), "Earth");
+    std::string line;
+    EXPECT_EQ(SubError(sub, "hello world", &line), std::string{});
+    EXPECT_EQ(line, "hello Earth");
+    EXPECT_EQ(SubError(sub, "no match", &line), std::string{});
+    EXPECT_EQ(line, "no match");
+  }
+
+  TEST_CASE("a replacement pcre2 will not accept is still fatal, error sink or not");
+  {
+    // The line-by-line fail-open is for failures this subject caused. A
+    // replacement naming a group that does not exist fails on every line there
+    // will ever be, so it stays an exception rather than a per-line report.
+    auto sub = Pcre2Substitution(Compile("a", false, false), "$9");
+    EXPECT_THROWS(SubError(sub, "a"));
   }
 }
 
@@ -984,6 +1048,46 @@ static void TestScanReportsMatchTimeErrors() {
     }
   }
 
+  TEST_CASE("a replacement that fails prints the line unsubstituted instead of aborting the scan");
+  for (const bool jit : {false, true}) {
+    ScanRequest request;
+    request.content = "xx\n" + kBlowsTheLimit + "\nxx\n";
+    request.replacements = {"@(x+x+)+$@Y@"};
+    request.jit = jit;
+    const ScanResult result = RunScan(request);
+
+    // Every line is still printed and the lines the replacement could finish
+    // are still replaced: the failure used to be an exception that ended the
+    // process where it stood, with whatever had been written already flushed
+    // and nothing on stderr to say the rest was never scanned.
+    EXPECT_EQ(result.lines.size(), 3u);
+    EXPECT_TRUE(result.lines.size() == 3u && result.lines[0] == "Y");
+    EXPECT_TRUE(result.lines.size() == 3u && result.lines[1] == kBlowsTheLimit);
+    EXPECT_TRUE(result.lines.size() == 3u && result.lines[2] == "Y");
+    EXPECT_TRUE(result.any_error);
+    EXPECT_EQ(result.occurrences, 1u);
+    EXPECT_EQ(result.diagnostics.size(), 1u);
+    if (!result.diagnostics.empty()) {
+      const std::string& said = result.diagnostics.front();
+      EXPECT_TRUE(Mentions(said, "--replace"));
+      EXPECT_TRUE(Mentions(said, kCatastrophic));
+      EXPECT_TRUE(Mentions(said, "match limit"));
+      EXPECT_TRUE(Mentions(said, "(standard input):2"));
+      EXPECT_TRUE(Mentions(said, "replacement not made"));
+    }
+  }
+
+  TEST_CASE("a later replacement still runs on a line an earlier one could not finish");
+  {
+    ScanRequest request;
+    request.content = kBlowsTheLimit + "\n";
+    request.replacements = {"@(x+x+)+$@Y@", "@z@!@"};
+    const ScanResult result = RunScan(request);
+    EXPECT_EQ(result.lines.size(), 1u);
+    EXPECT_TRUE(!result.lines.empty() && result.lines.front() == std::string(20, 'x') + "!");
+    EXPECT_EQ(result.diagnostics.size(), 1u);
+  }
+
   TEST_CASE("a highlight that fails still prints the line, and says the paint is partial");
   for (const bool jit : {false, true}) {
     ScanRequest request;
@@ -1078,6 +1182,34 @@ static void TestCliExitStatus() {
     const CliResult run = RunCli("-f 'bad['", "hello\n");
     EXPECT_EQ(run.status, 1);
     EXPECT_EQ(run.out.find("hello\n"), std::string::npos);
+  }
+
+  TEST_CASE("a replacement that fails at match time is exit 2, not a fatal 1 mid-scan");
+  {
+    // The old cost of this run was pcre2's ten million steps on every line and
+    // then, on a long enough one, an exception: exit 1, the lines up to it
+    // already flushed, and no way to tell that from a run that finished. Now
+    // the whole file is scanned, the line the replacement could not finish is
+    // printed as it arrived, and the status plus the one stderr line say which
+    // line that was and what it cost.
+    const std::string input = "xx\n" + kBlowsTheLimit + "\nxx\n";
+    const CliResult run = RunCli("-r '@(x+x+)+$@Y@'", input);
+    EXPECT_EQ(run.status, 2);
+    EXPECT_EQ(run.out, "Y\n" + kBlowsTheLimit + "\nY\n");
+    EXPECT_EQ(CountLines(run.err), 1u);
+    EXPECT_TRUE(Mentions(run.err, "--replace"));
+    EXPECT_TRUE(Mentions(run.err, "match limit"));
+    EXPECT_TRUE(Mentions(run.err, "gai: (standard input):2:"));
+    EXPECT_TRUE(Mentions(run.err, "replacement not made"));
+  }
+
+  TEST_CASE("a replacement text pcre2 rejects is still exit 1");
+  {
+    // Not a limit and not this line's fault -- `$9` names a group the pattern
+    // does not have, and every remaining line would fail the same way, so it
+    // stays fatal rather than becoming a per-line report.
+    const CliResult run = RunCli("-r '@(a)@$9@'", "a\n");
+    EXPECT_EQ(run.status, 1);
   }
 
   TEST_CASE("the failing pattern is named per stage: an exclude reports as an exclude");

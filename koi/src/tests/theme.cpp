@@ -13,11 +13,15 @@ void Themes() {
   Color color;
   EXPECT_TRUE(ParseColor("#ff8665", color));
   EXPECT_EQ(color.rgb, 0xFF8665u);
+  EXPECT_EQ(unsigned{color.alpha}, 0xFFu);
   EXPECT_TRUE(ParseColor("#474B43A4", color));
   EXPECT_EQ(color.rgb, 0x474B43u);
+  EXPECT_EQ(unsigned{color.alpha}, 0xA4u);
   EXPECT_TRUE(ParseColor("light-yellow", color));
+  EXPECT_EQ(unsigned{color.alpha}, 0xFFu);
   EXPECT_TRUE(!ParseColor("#abc", color));
   EXPECT_TRUE(!ParseColor("chartreuse", color));
+  EXPECT_TRUE(!ParseColor("#474B43AG", color));
 
   Theme theme;
   std::string error;
@@ -239,6 +243,164 @@ void ThemesFallBackToTheBuiltinForScopesTheyNeverNamed() {
     std::string error;
     EXPECT_TRUE(LoadTheme("ronin", ronin, error));
     EXPECT_TRUE(!Paints(ronin.Get("ui.virtual.wrap")));
+  }
+}
+
+void ThemeAlphaIsCompositedAtLoad() {
+  const FakeThemeDir themes;
+  if (!themes.Ready()) {
+    EXPECT_TRUE(themes.Ready());
+    return;
+  }
+  const auto load = [](std::string_view name) {
+    Theme theme;
+    std::string error;
+    EXPECT_TRUE(LoadTheme(name, theme, error));
+    EXPECT_TRUE(error.empty());
+    return theme;
+  };
+  // Nothing a loaded theme hands out may still be waiting to be composited:
+  // the renderer writes `rgb` into a cell and never looks at the alpha.
+  const auto all_opaque = [](const Theme& theme) {
+    for (const auto& [scope, style] : theme.scopes) {
+      if ((style.fg.alpha != 0xFF) || (style.bg.alpha != 0xFF)) return false;
+    }
+    return true;
+  };
+
+  TEST_CASE("theme: an #rrggbbaa colour is composited over the background, not stripped");
+  {
+    themes.Write("audit-alpha", R"THEME(
+"ui.background"      = { bg = "#101010" }
+"ui.selection"       = { bg = "#80c0e080" }
+"ui.text.focus"      = { fg = "#ffffff40", bg = "#202020" }
+"ui.help"            = { fg = "#ffffff40" }
+"ui.popup"           = { bg = "#ffffff00" }
+"ui.window"          = { fg = "#abcdefff" }
+"ui.menu"            = { fg = "#123456" }
+"ui.menu.scroll"     = { bg = "ghost" }
+
+[palette]
+ghost = "#ffffff80"
+)THEME");
+    const Theme theme = load("audit-alpha");
+
+    // 0x80 over 0x10 at a=128 is (0x80*128 + 0x10*127 + 127)/255 = 72; the
+    // other two channels the same way give 0x68 and 0x78.
+    EXPECT_EQ(theme.Get("ui.selection").bg.rgb, 0x486878u);
+    // A foreground goes over the background of its own scope, which is what is
+    // painted under the glyph: (0xFF*64 + 0x20*191 + 127)/255 = 0x58 a channel,
+    // where over `ui.background` it would have come out 0x4C.
+    EXPECT_EQ(theme.Get("ui.text.focus").fg.rgb, 0x585858u);
+    EXPECT_EQ(theme.Get("ui.text.focus").bg.rgb, 0x202020u);
+    // The same foreground on a scope with no background of its own falls back
+    // to the theme's: (0xFF*64 + 0x10*191 + 127)/255 = 0x4C.
+    EXPECT_EQ(theme.Get("ui.help").fg.rgb, 0x4C4C4Cu);
+    // The ends of the range: fully transparent is the background exactly,
+    // fully opaque is untouched, and so is a six-digit colour.
+    EXPECT_EQ(theme.Get("ui.popup").bg.rgb, 0x101010u);
+    EXPECT_EQ(theme.Get("ui.window").fg.rgb, 0xABCDEFu);
+    EXPECT_EQ(theme.Get("ui.menu").fg.rgb, 0x123456u);
+    // A palette entry carries its alpha to wherever it is used:
+    // (0xFF*128 + 0x10*127 + 127)/255 = 0x88.
+    EXPECT_EQ(theme.Get("ui.menu.scroll").bg.rgb, 0x888888u);
+    EXPECT_EQ(theme.Get("ui.background").bg.rgb, 0x101010u);
+    EXPECT_TRUE(all_opaque(theme));
+  }
+
+  TEST_CASE("theme: the background composited against is the one the theme ends up with");
+  {
+    // Which is known only after the inherits chain has run: the parent's
+    // background for a child that keeps it, the child's for one that does not.
+    themes.Write("audit-alpha-parent", R"THEME(
+"ui.background"  = { bg = "#101010" }
+"ui.text"        = { fg = "#bfbfbf" }
+)THEME");
+    themes.Write("audit-alpha-heir", R"THEME(
+inherits = "audit-alpha-parent"
+"ui.selection"   = { bg = "#80c0e080" }
+)THEME");
+    themes.Write("audit-alpha-repaint", R"THEME(
+inherits = "audit-alpha-parent"
+"ui.background"  = { bg = "#202020" }
+"ui.selection"   = { bg = "#80c0e080" }
+)THEME");
+
+    const Theme heir = load("audit-alpha-heir");
+    EXPECT_EQ(heir.Get("ui.background").bg.rgb, 0x101010u);
+    EXPECT_EQ(heir.Get("ui.selection").bg.rgb, 0x486878u);
+
+    // Over 0x20 instead: (0x80*128 + 0x20*127 + 127)/255 = 0x50, then 0x70,
+    // then 0x80. Compositing before the child was read would have given the
+    // parent's answer.
+    const Theme repaint = load("audit-alpha-repaint");
+    EXPECT_EQ(repaint.Get("ui.background").bg.rgb, 0x202020u);
+    EXPECT_EQ(repaint.Get("ui.selection").bg.rgb, 0x507080u);
+  }
+
+  TEST_CASE("theme: an alpha with nothing known underneath is dropped, not guessed at");
+  {
+    // `ui.background` is the bottom of the stack and the terminal's own colour
+    // is under it, so there is nothing to composite against -- for the
+    // background itself, or for anything else in a theme that leaves the
+    // background unpainted.
+    themes.Write("audit-alpha-floor", R"THEME(
+"ui.background"  = { bg = "#40506080" }
+"ui.selection"   = { bg = "#ffffff80" }
+)THEME");
+    const Theme floor = load("audit-alpha-floor");
+    EXPECT_EQ(floor.Get("ui.background").bg.rgb, 0x405060u);
+    // And that colour, as authored, is what the rest is composited over:
+    // (0xFF*128 + 0x40*127 + 127)/255 = 0xA0, then 0xA8, then 0xB0.
+    EXPECT_EQ(floor.Get("ui.selection").bg.rgb, 0xA0A8B0u);
+    EXPECT_TRUE(all_opaque(floor));
+
+    themes.Write("audit-alpha-bare", R"THEME(
+"ui.background"  = { fg = "#bfbfbf" }
+"ui.selection"   = { bg = "#474B43A4" }
+)THEME");
+    const Theme bare = load("audit-alpha-bare");
+    EXPECT_TRUE(!bare.Get("ui.background").bg.set);
+    EXPECT_EQ(bare.Get("ui.selection").bg.rgb, 0x474B43u);
+    EXPECT_TRUE(all_opaque(bare));
+  }
+
+  TEST_CASE("theme: ronin's translucent selection reaches the screen as the blend it asks for");
+  {
+    // #474B43A4 over ronin's own background, #252524:
+    // (0x47*164 + 0x25*91 + 127)/255 = 0x3B, then 0x3D, then 0x38.
+    constexpr std::uint32_t kBlend = 0x3B3D38u;
+    const Theme ronin = load("ronin");
+    EXPECT_EQ(ronin.Get("ui.background").bg.rgb, 0x252524u);
+    EXPECT_EQ(ronin.Get("ui.selection").bg.rgb, kBlend);
+    EXPECT_EQ(ronin.Get("ui.selection.primary").bg.rgb, kBlend);
+    EXPECT_EQ(ronin.Get("ui.menu.scroll").bg.rgb, kBlend);
+    EXPECT_EQ(ronin.Get("ui.menu.scroll").fg.rgb, 0xBFBFBFu);
+    EXPECT_TRUE(all_opaque(ronin));
+    EXPECT_TRUE(all_opaque(load("calm")));
+
+    // On the screen, not just in the map: the cells under a selection carry
+    // the blend, and none of them the alpha-stripped colour.
+    Editor ed;
+    ed.theme = ronin;
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Replace(ed.doc.table, {Selection{0, 5, -1}});
+    constexpr int kWidth = 40;
+    constexpr int kHeight = 6;
+    FitFocusedViewport(ed, kWidth, kHeight);
+    Surface frame;
+    RenderTo(ed, frame, kWidth, kHeight);
+
+    int blended = 0;
+    int stripped = 0;
+    for (int x = 0; x < kWidth; ++x) {
+      const Attr bg = frame.At(x, 0).bg;
+      if (bg == static_cast<Attr>(kBlend)) ++blended;
+      if (bg == static_cast<Attr>(0x474B43u)) ++stripped;
+    }
+    EXPECT_TRUE(blended > 0);
+    EXPECT_EQ(stripped, 0);
+    EXPECT_EQ(EditorInvariants(ed), std::string{});
   }
 }
 

@@ -1456,8 +1456,6 @@ void FindCharAndScroll() {
       same_selections(counted, walked);
     }
 
-    // Several cursors on separate lines, none of which ever share a byte: the
-    // counted move is the walk, cursor for cursor.
     const auto seed_columns = [&](Editor& e, std::initializer_list<std::pair<Index, Index>> at) {
       seed(e, 0, 0);
       std::vector<Selection> ranges;
@@ -1467,19 +1465,33 @@ void FindCharAndScroll() {
       }
       e.doc.selections.Replace(e.doc.table, std::move(ranges));
     };
+    const auto cursor_at = [](const Editor& e, std::size_t i) {
+      return CursorOf(e.doc.table, e.doc.selections.Ranges()[i]);
+    };
+    const auto line_of = [&](const Editor& e, std::size_t i) {
+      return LineAt(e.doc.table, cursor_at(e, i));
+    };
+    const auto column_of = [&](const Editor& e, std::size_t i) {
+      return ColumnForByte(e.doc.table, cursor_at(e, i), e.doc.tab_width);
+    };
 
+    // Several cursors on separate lines, all of them above the band the scroll
+    // opened up: each one is measured against the band on its own account, so
+    // they gather on its first line at the columns they came from. Keeping
+    // their spacing instead -- which is what shifting the whole set by the
+    // primary's correction did -- means keeping two of them off-screen.
     Editor many;
-    seed_columns(many, {{0, 5}, {4, 5}, {9, 5}});
-    Editor many_walked;
-    seed_columns(many_walked, {{0, 5}, {4, 5}, {9, 5}});
+    seed_columns(many, {{0, 1}, {4, 5}, {9, 9}});
     many.pending_count = 120;
     RunCommands(many, {"scroll_down"});
-    const Index moved =
-        LineAt(many.doc.table, Cur(many)) - LineAt(many_walked.doc.table, Cur(many_walked));
-    EXPECT_TRUE(moved > 1);
-    for (Index i = 0; i < moved; ++i) RunCommands(many_walked, {"move_line_down"});
-    same_selections(many, many_walked);
+    EXPECT_EQ(many.doc.view.top_line, Index{120});
     EXPECT_EQ(many.doc.selections.Size(), std::size_t{3});
+    for (std::size_t i = 0; i < many.doc.selections.Size(); ++i) {
+      EXPECT_EQ(line_of(many, i), Index{123});
+    }
+    EXPECT_EQ(column_of(many, 0), Index{1});
+    EXPECT_EQ(column_of(many, 1), Index{5});
+    EXPECT_EQ(column_of(many, 2), Index{9});
 
     // Cursors that only *transiently* collide are the one deliberate
     // difference. Three columns of one line, scrolled across lines too short
@@ -1500,6 +1512,140 @@ void FindCharAndScroll() {
     split_j.pending_count = 123;
     RunCommands(split_j, {"move_line_down"});
     same_selections(split, split_j);
+
+    // A cursor left behind above the viewport is pulled into the band even
+    // when the primary needs no correction at all. Measuring the whole set by
+    // the primary left it up there for as long as the primary stayed happy.
+    //
+    // The stray one is a real selection, and moving it costs it its extent --
+    // an unextended `j` does exactly that, and the scroll is not the place to
+    // invent a second rule.
+    Editor stray;
+    seed_columns(stray, {{5, 5}, {130, 5}});
+    {
+      std::vector<Selection> ranges = stray.doc.selections.Ranges();
+      const Index line5 = LineStart(stray.doc.table, 5);
+      ranges[0] = Selection{line5 + 2, line5 + 8, -1};
+      stray.doc.selections.Replace(stray.doc.table, std::move(ranges));
+    }
+    stray.doc.selections.SetPrimary(1);
+    stray.doc.view.top_line = 120;
+    RunCommands(stray, {"scroll_down"});
+    EXPECT_EQ(stray.doc.view.top_line, Index{121});
+    EXPECT_EQ(stray.doc.selections.Size(), std::size_t{2});
+    EXPECT_EQ(stray.doc.selections.PrimaryIndex(), std::size_t{1});
+    EXPECT_EQ(line_of(stray, 1), Index{130});
+    EXPECT_EQ(line_of(stray, 0), Index{124});
+    EXPECT_EQ(column_of(stray, 0), Index{7});
+    EXPECT_EQ(stray.doc.selections.Ranges()[0].To() - stray.doc.selections.Ranges()[0].From(),
+              Index{1});
+
+    // And a cursor already inside the band is not dragged by a delta computed
+    // for somebody else: the primary here has 8 lines to make up, which used
+    // to push its in-band neighbour out through the bottom of the window. The
+    // neighbour is a selection too, and keeps every byte of it: nothing had to
+    // move it, so nothing did.
+    Editor kept;
+    seed_columns(kept, {{0, 5}, {20, 5}});
+    {
+      std::vector<Selection> ranges = kept.doc.selections.Ranges();
+      const Index line20 = LineStart(kept.doc.table, 20);
+      ranges[1] = Selection{line20 + 2, line20 + 8, -1};
+      kept.doc.selections.Replace(kept.doc.table, std::move(ranges));
+    }
+    kept.doc.selections.SetPrimary(0);
+    kept.doc.view.top_line = 0;
+    const Selection in_band = kept.doc.selections.Ranges()[1];
+    kept.pending_count = 5;
+    RunCommands(kept, {"scroll_down"});
+    EXPECT_EQ(kept.doc.view.top_line, Index{5});
+    EXPECT_EQ(kept.doc.selections.Size(), std::size_t{2});
+    EXPECT_EQ(line_of(kept, 0), Index{8});
+    EXPECT_EQ(line_of(kept, 1), Index{20});
+    EXPECT_EQ(kept.doc.selections.Ranges()[1].anchor, in_band.anchor);
+    EXPECT_EQ(kept.doc.selections.Ranges()[1].head, in_band.head);
+
+    // Goal columns come through the clamp, per cursor and over different
+    // distances: both of these land on a band edge two columns wide, and both
+    // find their own column again on the next long line.
+    Editor short_edge;
+    seed_columns(short_edge, {{0, 9}, {4, 1}});
+    short_edge.pending_count = 119;
+    RunCommands(short_edge, {"scroll_down"});
+    EXPECT_EQ(short_edge.doc.selections.Size(), std::size_t{2});
+    EXPECT_EQ(line_of(short_edge, 0), Index{122});
+    EXPECT_EQ(line_of(short_edge, 1), Index{122});
+    EXPECT_EQ(column_of(short_edge, 0), Index{1});
+    EXPECT_EQ(column_of(short_edge, 1), Index{2});
+    EXPECT_EQ(short_edge.doc.selections.Ranges()[0].goal_column, Index{1});
+    EXPECT_EQ(short_edge.doc.selections.Ranges()[1].goal_column, Index{9});
+    RunCommands(short_edge, {"move_line_down"});
+    EXPECT_EQ(column_of(short_edge, 0), Index{1});
+    EXPECT_EQ(column_of(short_edge, 1), Index{9});
+
+    // The set shrinks for one reason only: two cursors on the same grapheme
+    // are one cursor. Same column, three lines, one band edge to share.
+    Editor stack;
+    seed_columns(stack, {{0, 5}, {4, 5}, {9, 5}});
+    stack.pending_count = 120;
+    RunCommands(stack, {"scroll_down"});
+    EXPECT_EQ(stack.doc.selections.Size(), std::size_t{1});
+    EXPECT_EQ(line_of(stack, 0), Index{123});
+    EXPECT_EQ(column_of(stack, 0), Index{5});
+
+    // The count is not capped to the viewport, so the landing has to cost the
+    // same whether it is one line away or five thousand, on a file big enough
+    // that walking it a line at a time would show.
+    std::string huge;
+    for (int i = 0; i < 20000; ++i) huge += (((i % 7) == 3) ? "ab\n" : "abcdefghij\n");
+    Editor far;
+    ResetToOriginal(far.doc.table, huge);
+    far.doc.view.rows = 20;
+    far.doc.view.columns = 40;
+    far.doc.view.scrolloff = 3;
+    std::vector<Selection> spread;
+    for (const Index line : {Index{0}, Index{4}, Index{9}}) {
+      const Index pos = LineStart(far.doc.table, line) + 5;
+      spread.push_back(MinWidth1(far.doc.table, Selection{pos, pos, -1}));
+    }
+    far.doc.selections.Replace(far.doc.table, std::move(spread));
+    far.pending_count = 5000;
+    const auto t_scroll = std::chrono::steady_clock::now();
+    RunCommands(far, {"scroll_down"});
+    EXPECT_TRUE((std::chrono::steady_clock::now() - t_scroll) < std::chrono::seconds{1});
+    EXPECT_EQ(far.doc.view.top_line, Index{5000});
+    EXPECT_EQ(far.doc.selections.Size(), std::size_t{1});
+    EXPECT_EQ(line_of(far, 0), Index{5003});
+    EXPECT_EQ(column_of(far, 0), Index{5});
+  }
+
+  {
+    // Scrolling in insert mode is an unextended motion like any other: the
+    // block cursors the clamp leaves behind collapse back to carets before the
+    // binding ends, for every cursor it moved and not just the primary.
+    Editor ins;
+    std::string lines;
+    for (int i = 0; i < 200; ++i) lines += "abcdefghij\n";
+    ResetToOriginal(ins.doc.table, lines);
+    ins.doc.view.rows = 20;
+    ins.doc.view.columns = 40;
+    ins.doc.view.scrolloff = 3;
+    std::vector<Selection> carets;
+    for (const auto& [line, column] : {std::pair<Index, Index>{0, 3}, {4, 7}}) {
+      const Index pos = LineStart(ins.doc.table, line) + column;
+      carets.push_back(Selection{pos, pos, -1});
+    }
+    ins.doc.selections.Replace(ins.doc.table, std::move(carets));
+    ins.mode = Mode::kInsert;
+    ins.collapse_insert_caret = false;
+    ins.pending_count = 40;
+    RunCommands(ins, {"scroll_down"});
+    EXPECT_TRUE(ins.mode == Mode::kInsert);
+    EXPECT_EQ(ins.doc.selections.Size(), std::size_t{2});
+    for (const Selection& s : ins.doc.selections.Ranges()) {
+      EXPECT_TRUE(s.IsEmpty());
+      EXPECT_EQ(LineAt(ins.doc.table, s.head), Index{43});
+    }
   }
 
   {
