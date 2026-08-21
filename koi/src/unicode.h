@@ -47,7 +47,7 @@ bool IsWellFormedUtf8(std::string_view s);
 //
 // koi validates that text is well-formed UTF-8 and never that it is printable,
 // and 0x1B is a perfectly well-formed scalar. Everything that reaches a
-// terminal -- a cell, an --render-mode line, a sidebar row -- has to come
+// terminal -- a cell, an --render-mode line, a status span -- has to come
 // through one of these two, or a file gets to drive the terminal: set its
 // title, clear and redraw the screen, conceal text so what is read is not what
 // is there, or write the clipboard through OSC 52.

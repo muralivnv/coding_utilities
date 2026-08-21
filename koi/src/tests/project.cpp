@@ -157,7 +157,7 @@ void ProjectPaths() {
 
   EXPECT_TRUE(ProjectDbPath() != JumpDbPath());
   EXPECT_EQ(LastPickerStatePath().parent_path(), ProjectDbPath().parent_path());
-  EXPECT_EQ(SidebarPanePath().parent_path(), ProjectDbPath().parent_path());
+  EXPECT_EQ(KeyLogDbPath().parent_path(), ProjectDbPath().parent_path());
 
   const std::string slash = ProjectDirName("/w/a/b");
   const std::string dash = ProjectDirName("/w/a-b");
@@ -1080,7 +1080,7 @@ void DeepProjectPathsStillGetAStateDirectory() {
 
   // Deep enough that the flattened path alone would blow the 255-byte cap on
   // one directory entry -- which used to fail create_directories with
-  // ENAMETOOLONG and take the database, jump list, key log, sidebar pane and
+  // ENAMETOOLONG and take the database, jump list, key log and
   // picker state down with it, leaving only a status warning that scrolled away.
   std::filesystem::path deep = scratch.dir;
   for (int i = 0; i < 15; ++i) deep /= "abcdefghijklmnopqrst";
@@ -1188,7 +1188,7 @@ void ProjectRootFindsARepositoryRootedAtHome() {
 }
 
 // Everything the editor keeps beside the database -- the picker's last
-// selection, the key log, the sidebar pane -- is derived from the state
+// selection, the key log -- is derived from the state
 // directory, and the state directory was derived from scratch on every one of
 // those calls: canonicalising the project path is a stat per component, and the
 // digest, the flatten and the legacy probe all followed it. Opening and closing
@@ -1222,7 +1222,7 @@ void ProjectStatePathsAreDerivedOncePerRoot() {
   EXPECT_EQ(ProjectDbPath(), db_alpha);
   EXPECT_EQ(LastPickerStatePath().parent_path(), db_alpha.parent_path());
   EXPECT_EQ(KeyLogDbPath().parent_path(), db_alpha.parent_path());
-  EXPECT_EQ(SidebarPanePath().parent_path(), db_alpha.parent_path());
+  EXPECT_EQ(KeyLogDbPath().parent_path(), db_alpha.parent_path());
 
   // Moving the root invalidates it. A memo that did not would hand the second
   // project the first one's database -- its pins, its visits, its positions.
@@ -1255,9 +1255,8 @@ void ProjectStatePathsAreDerivedOncePerRoot() {
 // '%P\n'`) keys them against koi's current directory, and koi never chdirs. Run
 // from the root the two agree and nothing looked wrong. Run one directory down
 // they disagree on every path, and since every read resolves a stored path
-// against the root, the whole symbols table became invisible: a blank Symbols
-// section in the sidebar, "nothing at symbol N" from every jump, and a current
-// file that could never reach the ranked head.
+// against the root, the whole symbols table became invisible: "nothing at symbol
+// N" from every jump, and a current file that could never reach the ranked head.
 void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
   const Scratch scratch{"koi-project-key"};
   const std::filesystem::path root = scratch.dir / "proj";
@@ -1824,27 +1823,6 @@ void VisitReadsAreBoundedAndTheTableIsPruned() {
     if (five.size() == 5u) EXPECT_EQ(five.front().path, std::string{"r1001.cpp"});
   }
 
-  TEST_CASE("project store: the most recent file is the newest visit still on disk");
-  {
-    const std::filesystem::path db = scratch.dir / "newest.db";
-    std::string error{"unset"};
-    const std::shared_ptr<ProjectStore> store = ProjectStore::Open(db, error);
-    EXPECT_TRUE(store != nullptr);
-    if (store == nullptr) return;
-
-    EXPECT_EQ(MostRecentFile(*store), std::string{});
-
-    constexpr int kFiles = 60;
-    for (int i = 0; i < kFiles; ++i) store->RecordVisit(make(2000 + i), 1 + i, 0);
-    EXPECT_EQ(MostRecentFile(*store), std::string{"r2059.cpp"});
-
-    // Deleted, so the newest row on record is not the answer: the read skips
-    // it and keeps going rather than reporting a file that is not there.
-    std::error_code gone;
-    std::filesystem::remove(root / "r2059.cpp", gone);
-    EXPECT_EQ(MostRecentFile(*store), std::string{"r2058.cpp"});
-  }
-
   TEST_CASE("project store: the visit table is pruned at open, newest kept");
   {
     const std::filesystem::path db = scratch.dir / "prune.db";
@@ -1934,9 +1912,9 @@ void VisitReadsAreBoundedAndTheTableIsPruned() {
   }
 }
 
-// The same story one table over. `symbols` is what the sidebar's Symbols
-// section and the symbol picker read, and both read all of it however little
-// they were going to use: HotSymbols applied its limit in the C++ loop, so
+// The same story one table over. `symbols` is what the hot-symbol jump and the
+// symbol picker read, and both read all of it however little they were going to
+// use: HotSymbols applied its limit in the C++ loop, so
 // SQLite ran every row through a sorter before the first Step() could answer,
 // and RankSymbols pulled the whole table into a map to look up the few hundred
 // rows it had been handed. Nothing pruned it either -- and it grows per file

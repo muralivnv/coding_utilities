@@ -36,7 +36,6 @@
 #include "navigate.h"
 #include "project.h"
 #include "render.h"
-#include "sidebar.h"
 #include "keymap.h"
 #include "printx.hpp"
 #include "search.h"
@@ -645,7 +644,6 @@ Usage: koi [file[:line[:col]]]
 
   no file      a new, unnamed buffer -- :w <path> to name it
   piped stdin  becomes an unnamed buffer; keys still come from the terminal
-  --sidebar    draw this project's pins and symbols instead of editing
 
 Non-interactive modes. Each writes to stdout, edits nothing, and never opens a
 terminal, so they compose in a pipeline and can back a picker's preview window.
@@ -697,7 +695,6 @@ terminal, so they compose in a pipeline and can back a picker's preview window.
   if (args.Has("--render-mode")) return koi::RunRenderMode(argc, argv);
   if (args.Has("--symbol-mode")) return koi::RunSymbolMode(argc, argv);
   if (args.Has("--overview")) return koi::RunOverviewMode(argc, argv);
-  if (args.Has("--sidebar")) return koi::RunSidebar();
 
   const char* file = nullptr;
   for (int i = 1; i < argc; ++i) {

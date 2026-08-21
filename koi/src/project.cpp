@@ -48,13 +48,12 @@ constexpr int kVisitScanFloor = 256;
 // The newest visits kept in `files` at open. Nothing else ever deleted from
 // this table -- every file ever opened stayed in it forever, and every read
 // scanned and stat()ed all of it -- so an editor left running against a big
-// repository grew a permanent tax on the sidebar.
+// repository grew a permanent tax on the file picker.
 //
-// 5000 is far past what anything here distinguishes: the sidebar reads one row,
-// and a picker ranking that reaches 5000 visited files is ordering rows the user
-// last touched 5000 other files ago. It is deliberately
-// generous, because the cost of keeping a row is one row and the cost of
-// dropping one that mattered is a lost cursor position.
+// 5000 is far past what anything here distinguishes: a picker ranking that
+// reaches 5000 visited files is ordering rows the user last touched 5000 other
+// files ago. It is deliberately generous, because the cost of keeping a row is
+// one row and the cost of dropping one that mattered is a lost cursor position.
 #define KOI_MAX_FILE_ROWS "5000"
 
 // One statement, and exact: "everything but the newest N by last visit". The
@@ -72,7 +71,7 @@ constexpr const char* kPruneFiles =
 //
 // Four times the file cap because a row here is a quarter of the story a file
 // row is -- a jump target inside a file rather than the file -- and because
-// nothing distinguishes anything near it: the sidebar shows seven symbols, and a
+// nothing distinguishes anything near it: a hot-symbol jump reaches seven, and a
 // ranking that reaches the 20000th least recently visited symbol is ordering
 // rows against history the user cannot remember making.
 #define KOI_MAX_SYMBOL_ROWS "20000"
@@ -188,7 +187,7 @@ std::int64_t ScanLimit(int want) {
 // one directory down, `symbols.file` and `co_visits.to_file` held "project.cpp"
 // while `files.path` held "koi/src/project.cpp" -- and since every read resolves
 // a stored path against the root (StillThere), every symbol row failed to exist
-// and the Symbols section of the sidebar was blank forever.
+// and every hot-symbol jump found nothing, forever.
 //
 // Fixing it at the call sites would mean fixing it again at the next one, so
 // the invariant lives here instead: nothing reaches a table without passing
@@ -838,8 +837,7 @@ void AdoptLegacyProjectDir(const fs::path& legacy, const fs::path& dir) {
 // result, then a flatten, then two path concatenations -- all to produce one
 // string that depends on nothing but the root and $HOME. Every call did the
 // whole of it, and the callers are not rare: LastPickerStatePath on each picker
-// open *and* close, the keylog path, the sidebar pane path, and ProjectDbPath
-// itself.
+// open *and* close, the keylog path, and ProjectDbPath itself.
 //
 // AdoptLegacyProjectDir stays on every call because its answer *can* change: it
 // is gated on "my state directory does not exist yet", and in the steady state
@@ -850,9 +848,8 @@ void AdoptLegacyProjectDir(const fs::path& legacy, const fs::path& dir) {
 //
 // Plain statics, no mutex: this runs on koi's one UI thread. The scan pool is
 // handed everything it needs by value before a worker starts (see ScanInputs),
-// `koi --sidebar` is its own process, and nothing else here is threaded. A
-// guard would be free of contention and still be a claim about the code that
-// is not true.
+// and nothing else here is threaded. A guard would be free of contention and
+// still be a claim about the code that is not true.
 fs::path ProjectDir() {
   const fs::path home = DataHome();
   const fs::path project = ProjectRoot();
@@ -885,8 +882,7 @@ std::string ProjectDirName(const fs::path& project) {
   // NAME_MAX (255) bytes no matter how much PATH_MAX budget remains. A project
   // deep enough to flatten past that made create_directories fail ENAMETOOLONG,
   // and since every state file hangs off this one directory, that was the
-  // database, jump list, key log, sidebar pane, and picker state all gone at
-  // once. Keep the tail -- it is the distinctive part -- and let the digest,
+  // database, jump list, key log and picker state all gone at once. Keep the tail -- it is the distinctive part -- and let the digest,
   // which is always of the full canonical path, carry the uniqueness.
   constexpr std::size_t kMaxLabel = 200;
   if (label.size() > kMaxLabel) {
@@ -1023,16 +1019,9 @@ fs::path BesideDatabase(const char* name) {
 
 }
 
-std::string MostRecentFile(ProjectStore& store) {
-  const std::vector<FileVisit> recent = store.RecentFiles(1);
-  return recent.empty() ? std::string{} : recent.front().path;
-}
-
 fs::path LastPickerStatePath() { return BesideDatabase("koi-last-picker.txt"); }
 
 fs::path KeyLogDbPath() { return BesideDatabase("keylog.db"); }
-
-fs::path SidebarPanePath() { return BesideDatabase("sidebar.pane"); }
 
 std::shared_ptr<ProjectStore> ProjectStore::Open(const fs::path& path, std::string& error) {
   error.clear();

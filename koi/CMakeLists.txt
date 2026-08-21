@@ -22,7 +22,6 @@ set(KOI_LIB_SOURCES
     src/keylog.cpp
     src/project.cpp
     src/navigate.cpp
-    src/sidebar.cpp
     src/error.cpp)
 
 add_library(koi_lib STATIC ${KOI_LIB_SOURCES})
@@ -67,7 +66,6 @@ set(KOI_TEST_SOURCES
     src/tests/search.cpp
     src/tests/selection.cpp
     src/tests/shell.cpp
-    src/tests/sidebar.cpp
     src/tests/sqlite.cpp
     src/tests/symbols.cpp
     src/tests/syntax.cpp

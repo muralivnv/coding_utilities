@@ -731,7 +731,6 @@ b = "buffer_picker"
 "?" = "search_excerpts"
 s = ["buffer_symbol_picker", "align_view_center"]
 S = ["symbol_picker", "align_view_center"]
-P = "toggle_sidebar"
 "1" = ":jump-pin 1"
 "2" = ":jump-pin 2"
 "3" = ":jump-pin 3"

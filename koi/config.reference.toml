@@ -254,7 +254,7 @@ tabpad = "·"
 #   extend_prev_long_word_end           move_line_down                      symbol_picker
 #   extend_prev_long_word_start         move_line_up                        till_prev_char
 #   extend_prev_word_end                move_next_long_word_end             toggle_comments
-#   extend_prev_word_start              move_next_long_word_start           toggle_sidebar
+#   extend_prev_word_start              move_next_long_word_start
 #   extend_till_char                    move_next_word_end                  toggle_soft_wrap
 #   extend_till_prev_char               move_next_word_start                transpose_view
 #   extend_to_file_end                  move_prev_long_word_end             trim_selections

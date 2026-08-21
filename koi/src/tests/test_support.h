@@ -48,7 +48,6 @@
 #include "shell.h"
 #include "sqlite.h"
 #include "thread_pool.h"
-#include "sidebar.h"
 #include "test_harness.h"
 #include "unicode.h"
 

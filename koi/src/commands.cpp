@@ -2058,7 +2058,6 @@ constexpr std::array kCommands = std::to_array<CommandDef>({
     {"symbol_picker", KOI_CMD({ SymbolPicker(ed); }), "every definition in the project"},
     {"till_prev_char", KOI_CMD({ ArmFindChar(ed, PendingChar::kTillPrev, false); }), "move back to after the previous occurrence"},
     {"toggle_comments", KOI_CMD({ ToggleComments(ed); }), "comment or uncomment the selected lines"},
-    {"toggle_sidebar", KOI_CMD({ ToggleSidebar(ed); }), "open or close the sidebar pane"},
     {"toggle_soft_wrap", KOI_CMD({
        ed.settings.soft_wrap = !ed.settings.soft_wrap;
        if (ed.settings.soft_wrap) ed.doc.view.left_column = 0;

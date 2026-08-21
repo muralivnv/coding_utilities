@@ -18,6 +18,7 @@ Closed rounds, for orientation:
 - v5 (partitioned_navigation): the feature was DELETED (`be8b309`) in favor
   of leap — every v5 finding is moot.
 - v6 (leap): all 12 findings FIXED (`7e1a422`, `75d0eca`).
+- L-19 (sidebar tab alignment): moot — the sidebar was DELETED.
 - Note: severities below are orchestrator triage from the round-8 sweep,
   not adversarially audit-verified; a future round may promote or refute.
 
@@ -36,7 +37,6 @@ ranking; the rest keep round-8 triage confidence.
 | 10 | L-16 | gai | `Colorize` re-runs the filters `Process` already ran when `--color` is on — per-line double match cost. |
 | 11 | L-1 | undo/notes | `EditThroughCursors` notes cursors before `Apply`, so a *refused* transaction leaves the note for the next edit — narrow window, refusals are rare. |
 | 13 | L-13 | symbols | `LookUpSymbol` with every staged row refused (all paths carry tabs) opens the picker on empty input with no message. Tab-bearing paths only. |
-| 14 | L-19 | sidebar | Tab alignment measures from column 0 while rows draw after a 4-column prefix — a tab-bearing name can misalign (never overflows; the round-7 #34 fix bounds width). |
 | 15 | L-5 | sqlite | `keylog.cpp Flush()` discards `BEGIN IMMEDIATE`'s result — on failure every event insert auto-commits and the trailing COMMIT fails silently. Append-only, nothing lost. |
 | 16 | L-6 | sqlite | `project.cpp RecordEdit` = `BumpFile` + `MovePinIn`, two transactions — a gap counts the visit without moving the pin's line. Cosmetic. |
 | 17 | L-9 | gai | gai's fatal exception text goes to stdout, oddly beside the newer stderr diagnostics; changing it changes observable behavior, hence deferred. |

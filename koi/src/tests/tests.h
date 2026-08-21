@@ -198,12 +198,6 @@ void ExtendingFromAnInsertCaretDoesNotAnnexTheGraphemeInFront();
 // shell.cpp -- shell quoting, expansion and the commands that run one
 void ShellIntegration();
 
-// sidebar.cpp -- the sidebar's rows, filtering and truncation
-void SidebarEmphasisSurvivesTheFilter();
-void TruncateNeverExceedsTheWidth();
-void SidebarRowsFitTheirPane();
-void SidebarRendering();
-
 // sqlite.cpp -- the sqlite wrapper's statement handling
 void StmtSurvivesAFailedPrepare();
 

@@ -14,8 +14,6 @@ namespace koi {
 
 inline constexpr int kPinSlots = 4;
 inline constexpr int kHotSymbolSlots = 7;
-inline constexpr std::string_view kPinLabels = "1234";
-inline constexpr std::string_view kSymbolLabels = "ijklaeo";
 
 struct FileVisit {
   std::string path;
@@ -56,8 +54,8 @@ struct ProjectStore {
 
   // The `want` most recently visited files, newest first. `want <= 0` asks for
   // every row -- which is what this used to do unconditionally, and what made a
-  // once-per-second sidebar refresh a full table scan plus one stat() per row
-  // to draw five lines. A caller that shows n rows asks for n.
+  // read of the newest handful a full table scan plus one stat() per row. A
+  // caller that shows n rows asks for n.
   //
   // A row whose file is no longer on disk is skipped, so the answer can be
   // shorter than `want` even when the table is longer.
@@ -88,10 +86,6 @@ struct ProjectStore {
 
   virtual int FileCount() = 0;
 };
-
-// The file visited most recently, or empty when nothing on record is still on
-// disk. The sidebar asks so it can pick out the pin for the file being edited.
-std::string MostRecentFile(ProjectStore& store);
 
 inline constexpr int kDefaultHotFileLimit = 200;
 
@@ -133,8 +127,6 @@ std::string ProjectDirName(const std::filesystem::path& project);
 std::filesystem::path LastPickerStatePath();
 
 std::filesystem::path KeyLogDbPath();
-
-std::filesystem::path SidebarPanePath();
 
 }
 

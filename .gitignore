@@ -3,3 +3,4 @@ build
 .ronin
 sample.txt
 sample.big.txt
+build-asan

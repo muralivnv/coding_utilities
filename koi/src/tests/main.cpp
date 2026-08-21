@@ -98,10 +98,6 @@ void RunUnicodeTests(Rng& rng) {
   ScanWorkersFollowTheSetting();
   ShippedConfigsLoad();
   ProjectState();
-  SidebarRendering();
-  SidebarEmphasisSurvivesTheFilter();
-  TruncateNeverExceedsTheWidth();
-  SidebarRowsFitTheirPane();
   ProjectPaths();
   Themes();
   EditDescriptors(rng);

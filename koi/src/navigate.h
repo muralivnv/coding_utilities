@@ -75,7 +75,6 @@ void DropUnreachableEpochs(Document& doc);
 
 void LastPicker(Editor& ed);
 
-void ToggleSidebar(Editor& ed);
 
 void SetPinHere(Editor& ed, int slot);
 void ClearPinSlot(Editor& ed, int slot);

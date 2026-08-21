@@ -123,18 +123,6 @@ std::generator<std::string_view> CapturedLines(Editor& ed, std::string command) 
   }
 }
 
-std::vector<std::string> CaptureLines(Editor& ed, std::string command) {
-  std::vector<std::string> out;
-  for (const std::string_view line : CapturedLines(ed, std::move(command))) out.emplace_back(line);
-  return out;
-}
-
-std::string SelfExe() {
-  std::error_code ec;
-  const fs::path self = fs::read_symlink("/proc/self/exe", ec);
-  return ec ? std::string{} : ShellQuote(self.string());
-}
-
 bool HasScreen(Editor& ed) {
   if (ed.suspend_terminal != nullptr) return true;
   ed.status.Warn("no terminal to hand to a picker");
@@ -3213,52 +3201,6 @@ void LastPicker(Editor& ed) {
   } else {
     ed.status.Warn("no picker called " + name);
   }
-}
-
-void ToggleSidebar(Editor& ed) {
-  const std::string self = SelfExe();
-  if (self.empty()) {
-    ed.status.Fail("cannot find koi to run the sidebar");
-    return;
-  }
-  const std::string command = self + " --sidebar";
-
-  const char* pane = std::getenv("TMUX_PANE");
-  if ((pane == nullptr) || (*pane == '\0')) {
-    ed.status.Warn("no tmux -- the sidebar is a pane");
-    return;
-  }
-  const fs::path record = SidebarPanePath();
-
-  std::error_code ec;
-  if (fs::exists(record, ec)) {
-    std::ifstream in{record, std::ios::binary};
-    std::string cached;
-    std::getline(in, cached);
-    in.close();
-    fs::remove(record, ec);
-
-    const std::vector<std::string> alive = CaptureLines(ed, "tmux list-panes -a -F '#{pane_id}'");
-    if (!cached.empty() && (std::ranges::find(alive, cached) != alive.end())) {
-      RunShellCommand(ed, "tmux kill-pane -t " + ShellQuote(cached), ShellMode::kDiscard);
-      ed.status.clear();
-      return;
-    }
-  }
-
-  const std::vector<std::string> opened =
-      CaptureLines(ed, "tmux split-window -h -l 42 -P -F '#{pane_id}' -t " + ShellQuote(pane) +
-                           " " + ShellQuote("exec " + command));
-  if (opened.empty()) {
-    ed.status.Fail("could not open the sidebar");
-    return;
-  }
-  std::error_code dir_ec;
-  fs::create_directories(record.parent_path(), dir_ec);
-  std::ofstream out{record, std::ios::binary | std::ios::trunc};
-  if (out) out << opened.front();
-  RunShellCommand(ed, "tmux select-pane -t " + ShellQuote(pane), ShellMode::kDiscard);
-  ed.status.clear();
 }
 
 void SetPinHere(Editor& ed, int slot) {
