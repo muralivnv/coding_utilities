@@ -27,7 +27,6 @@ constexpr std::string_view kReset = "\033[0m";
 constexpr std::string_view kBold = "\033[1m";
 constexpr std::string_view kDim = "\033[2m";
 constexpr std::string_view kYellow = "\033[33m";
-constexpr std::string_view kCyan = "\033[36m";
 constexpr std::string_view kMagenta = "\033[35m";
 
 constexpr int kMaxLineDigits = 5;
@@ -99,15 +98,6 @@ std::vector<Row> PinRows(const std::vector<Pin>& pins, std::string_view current,
       continue;
     }
     rows.push_back(NameAndLine(pin.path, pin.line, width, pin.path == current));
-  }
-  return rows;
-}
-
-std::vector<Row> TrailRows(const std::vector<FileVisit>& trail, int columns) {
-  const int width = std::max(4, columns - 5 - kMaxLineDigits);
-  std::vector<Row> rows;
-  for (size_t i = 0; (i < trail.size()) && (i < static_cast<size_t>(kTrailSlots)); ++i) {
-    rows.push_back(NameAndLine(trail[i].path, trail[i].line, width, false));
   }
   return rows;
 }
@@ -191,14 +181,12 @@ std::string TruncateToWidth(std::string_view text, int width) {
 std::vector<std::string> SidebarLines(ProjectStore& store, int columns) {
   columns = std::max(20, columns);
   const std::vector<Pin> pins = store.Pins();
-  // TrailRows draws at most kTrailSlots of them, and this runs on every refresh
-  // -- once a second when there is no inotify to wait on.
-  const Trail trail = TrailOf(store, kTrailSlots);
+  // One row, not the whole visit table: this runs on every refresh -- once a
+  // second when there is no inotify to wait on.
+  const std::string current = MostRecentFile(store);
 
   std::vector<std::string> lines;
-  RenderSection("Pins", kPinLabels, PinRows(pins, trail.current, columns), columns, kYellow, lines);
-  lines.emplace_back();
-  RenderSection("Trail", kTrailLabels, TrailRows(trail.entries, columns), columns, kCyan, lines);
+  RenderSection("Pins", kPinLabels, PinRows(pins, current, columns), columns, kYellow, lines);
   lines.emplace_back();
   RenderSection("Symbols", kSymbolLabels, SymbolRowsFor(store.HotSymbols(kHotSymbolSlots), columns),
                 columns, kMagenta, lines);

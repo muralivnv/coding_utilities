@@ -201,9 +201,9 @@ tabpad = "·"
 #     set-multicursor-paste
 #     set-excerpt-context  increment-excerpt-context  decrement-excerpt-context
 #     from  from-watched  from-with-msg  from-watched-with-msg  from-cancel  watch  unwatch
-#     pins-excerpt  trail  messages
+#     pins-excerpt  messages
 #     sh/run-shell-command  pipe  pipe-to  insert-output  append-output
-#     pick  pin  clear-pin  jump-pin  jump-trail  jump-symbol
+#     pick  pin  clear-pin  jump-pin  jump-symbol
 #
 # Static commands:
 #   add_newline_above                   flip_selections                     open_below

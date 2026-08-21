@@ -660,8 +660,7 @@ std::string BuildExcerpts(const std::vector<ExcerptRef>& refs, std::string_view 
     if (fresh) by_path.emplace_back(one.path, std::vector<Mark>{});
     by_path[at->second].second.push_back(Mark{std::max<Index>(1, one.line), one.col, &one.msg});
   }
-  const bool ordered_by_refs =
-      (out.kind == ExcerptView::Kind::kPins) || (out.kind == ExcerptView::Kind::kTrail);
+  const bool ordered_by_refs = (out.kind == ExcerptView::Kind::kPins);
   const bool anchors_are_the_point = ordered_by_refs;
   out.anchor_index.clear();
   if (!ordered_by_refs) {
@@ -1577,18 +1576,6 @@ std::vector<ExcerptRef> PinRefs(Editor& ed) {
   return refs;
 }
 
-std::vector<ExcerptRef> TrailRefs(Editor& ed) {
-  std::vector<ExcerptRef> refs;
-  if (!ed.project) return refs;
-  constexpr int kMostRecent = 20;
-  const Trail trail = TrailOf(*ed.project, kMostRecent);
-  const fs::path root = ProjectRoot();
-  for (const FileVisit& visit : trail.entries) {
-    refs.push_back(ExcerptRef{ResolveStorePath(root, visit.path), std::max<Index>(1, visit.line)});
-  }
-  return refs;
-}
-
 std::string ExcerptTitle(ExcerptView::Kind kind, std::size_t count, std::string_view word) {
   using Kind = ExcerptView::Kind;
   const bool plural = (count != 1);
@@ -1612,9 +1599,6 @@ std::string ExcerptTitle(ExcerptView::Kind kind, std::size_t count, std::string_
       break;
     case Kind::kPins:
       title += plural ? " pins" : " pin";
-      break;
-    case Kind::kTrail:
-      title += plural ? " recent locations" : " recent location";
       break;
   }
   return title;
@@ -1672,7 +1656,6 @@ ComposedView ComposeExcerptView(Editor& ed, ExcerptView::Kind kind, std::vector<
     case Kind::kSearch: name = "search: " + std::string{word}; break;
     case Kind::kCommand: name = FromViewName(word, watched); break;
     case Kind::kPins: name = "pins"; break;
-    case Kind::kTrail: name = "trail"; break;
   }
   return ComposedView{std::move(text), std::move(built), std::move(title), std::move(name)};
 }
@@ -2492,9 +2475,6 @@ bool RebuildExcerptView(Editor& ed) {
       case ExcerptView::Kind::kPins:
         refs = PinRefs(ed);
         break;
-      case ExcerptView::Kind::kTrail:
-        refs = TrailRefs(ed);
-        break;
     }
     if (refs.empty() && !may_be_empty) {
       ed.status.Warn("no longer any match for " +
@@ -2936,17 +2916,6 @@ void PinExcerpts(Editor& ed) {
   BuildAndOpen(ed, ExcerptView::Kind::kPins, std::move(refs), "", 0);
 }
 
-void TrailExcerpts(Editor& ed) {
-  std::vector<ExcerptRef> refs = TrailRefs(ed);
-  if (refs.empty()) {
-    ed.status.Warn(ed.project ? "nothing on the trail yet" : "no project database");
-    return;
-  }
-  RecordJump(ed);
-  RecordVisitHere(ed);
-  BuildAndOpen(ed, ExcerptView::Kind::kTrail, std::move(refs), "", 0);
-}
-
 void MessagesView(Editor& ed) {
   std::vector<StatusRecord> entries = ed.status.log();
   if (!ed.status.empty() &&
@@ -3026,11 +2995,8 @@ void RefreshLiveExcerptViews(Editor& ed) {
     if (!BufferOnScreen(ed, i)) continue;
 
     const ExcerptView::Kind kind = doc.excerpts.kind;
-    const bool from_project =
-        (kind == ExcerptView::Kind::kPins) || (kind == ExcerptView::Kind::kTrail);
-    if (from_project) {
-      std::vector<ExcerptRef> fresh =
-          (kind == ExcerptView::Kind::kPins) ? PinRefs(ed) : TrailRefs(ed);
+    if (kind == ExcerptView::Kind::kPins) {
+      std::vector<ExcerptRef> fresh = PinRefs(ed);
       doc.excerpts.rebuild_on_focus = false;
       if (SameRefs(fresh, doc.excerpts.refs)) {
         doc.excerpts.refs_stale = false;
@@ -3357,22 +3323,6 @@ void JumpToPin(Editor& ed, int slot) {
   OpenPin(ed, pins[static_cast<size_t>(slot - 1)], "pin " + std::to_string(slot));
 }
 
-void JumpToTrail(Editor& ed, int index) {
-  if (!RequireProject(ed)) return;
-  // :jump-trail takes any number, not just the five labelled slots, so the
-  // trail is read exactly as deep as this index reaches. The clamp is what
-  // keeps a typed-in INT_MAX from overflowing the +1; nothing that deep can
-  // exist anyway, since the visit table is pruned at open.
-  constexpr int kDeepest = 1 << 20;
-  const Trail trail = TrailOf(*ed.project, std::min(std::max(index, 0), kDeepest) + 1);
-  if ((index < 0) || (index >= static_cast<int>(trail.entries.size()))) {
-    ed.status.Warn("nothing at trail " + std::to_string(index));
-    return;
-  }
-  const FileVisit& visit = trail.entries[static_cast<size_t>(index)];
-  OpenAt(ed, ResolveStorePath(visit.path), visit.line, visit.column);
-}
-
 void JumpToHotSymbol(Editor& ed, int index) {
   if (!RequireProject(ed)) return;
   const std::vector<SymbolVisit> hot = ed.project->HotSymbols(kHotSymbolSlots);
@@ -3399,11 +3349,13 @@ void RecordHere(Editor& ed, bool edited) {
   const Index line = LineAt(ed.doc.table, cursor);
   const Index column = cursor - LineStart(ed.doc.table, line) + 1;
   if (edited) {
+    // RecordEdit moves a pin in behind our back, so an open pins view is out of
+    // date the moment this returns.
     ed.project->RecordEdit(path, line + 1, column);
+    MarkLiveViewsStale(ed, ExcerptView::Kind::kPins);
   } else {
     ed.project->RecordVisit(path, line + 1, column);
   }
-  MarkLiveViewsStale(ed, ExcerptView::Kind::kTrail);
 }
 
 }

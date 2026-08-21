@@ -151,7 +151,7 @@ struct FileStamp {
 };
 
 struct ExcerptView {
-  enum class Kind : std::uint8_t { kReferences, kDefinitions, kSearch, kCommand, kPins, kTrail };
+  enum class Kind : std::uint8_t { kReferences, kDefinitions, kSearch, kCommand, kPins };
   Kind kind{Kind::kReferences};
   std::string word;
   bool watched{false};

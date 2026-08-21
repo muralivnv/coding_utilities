@@ -8,7 +8,7 @@
 namespace koi {
 
 void ProjectState() {
-  TEST_CASE("project: frecency, pins and the trail");
+  TEST_CASE("project: frecency, pins and recent files");
 
   const Scratch scratch{"koi-project-test"};
   const std::string a = scratch.Write("a.cpp", "int a;\n").string();
@@ -1016,7 +1016,7 @@ void LegacyProjectStateIsSeededNotStolen() {
   EXPECT_EQ(marker_of(dir_slash), std::string{"legacy"});
   EXPECT_EQ(marker_of(dir_slash / "nested"), std::string{"deep"});
   // ...without taking it. A move gave one colliding project the other's pins,
-  // trail and last positions and left the owner with an empty database it could
+  // visits and last positions and left the owner with an empty database it could
   // never recover, because the legacy directory was gone.
   EXPECT_TRUE(std::filesystem::is_directory(legacy));
   EXPECT_EQ(marker_of(legacy), std::string{"legacy"});
@@ -1127,7 +1127,7 @@ void DeepProjectPathsStillGetAStateDirectory() {
 // $HOME for a marker, so from anywhere below it the repository was invisible and
 // the cwd fallback made every directory its own project with its own state
 // database; from $HOME itself the same fallback happened to return $HOME. One
-// repository, a different root per depth, and pins, trail and last positions
+// repository, a different root per depth, and pins, visits and last positions
 // scattered across a database per directory.
 void ProjectRootFindsARepositoryRootedAtHome() {
   TEST_CASE("project: a repository rooted at $HOME is one project, not one per directory");
@@ -1225,7 +1225,7 @@ void ProjectStatePathsAreDerivedOncePerRoot() {
   EXPECT_EQ(SidebarPanePath().parent_path(), db_alpha.parent_path());
 
   // Moving the root invalidates it. A memo that did not would hand the second
-  // project the first one's database -- its pins, its trail, its positions.
+  // project the first one's database -- its pins, its visits, its positions.
   SetProjectRoot(beta);
   const std::filesystem::path db_beta = ProjectDbPath();
   EXPECT_TRUE(db_beta != db_alpha);
@@ -1544,8 +1544,8 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
 // The other half of the keying rule: what comes back out.
 //
 // Every path in the database is keyed against the project root, and everything
-// that opens one -- a trail jump, a pin jump, the excerpt refs a pins or trail
-// view is built from, the hot files a scan reads first -- resolves it against
+// that opens one -- a pin jump, the excerpt refs a pins view is built from, the
+// hot files a scan reads first -- resolves it against
 // the current directory. Started at the root the two spellings are the same
 // string and nothing was ever wrong. Started one directory down, "sub/file.cpp"
 // read back from inside sub/ names "sub/sub/file.cpp", and since a path that is
@@ -1628,18 +1628,6 @@ void StorePathsResolveAgainstTheRootFromBelowIt() {
            std::filesystem::weakly_canonical(want, where);
   };
 
-  TEST_CASE("navigation: a trail jump opens the file the trail names");
-  {
-    // Recorded the way the editor records them: paths valid from here.
-    store->RecordVisit("other.cpp", 2, 3);
-    store->RecordVisit("file.cpp", 1, 1);
-    // The newest visit is the trail's `current`, so entry 0 is the one before.
-    Editor ed = editor();
-    JumpToTrail(ed, 0);
-    EXPECT_TRUE(opened(ed, sub / "other.cpp"));
-    EXPECT_EQ(AssembleDocContents(ed.doc.table), std::string{"int Other() { return 1; }\n"});
-  }
-
   TEST_CASE("navigation: a pin jump opens the file the pin names");
   {
     store->SetPin(1, "file.cpp", 1, 1);
@@ -1679,26 +1667,11 @@ void StorePathsResolveAgainstTheRootFromBelowIt() {
     }
   }
 
-  TEST_CASE("navigation: a trail view reads the files the trail names");
-  {
-    store->RecordVisit("other.cpp", 2, 1);
-    // Newest, so it is the trail's `current` -- and pinned besides, which the
-    // trail drops rather than show a file in two places at once.
-    store->RecordVisit("file.cpp", 1, 1);
-    Editor ed = editor();
-    TrailExcerpts(ed);
-    EXPECT_TRUE(IsExcerptView(ed.doc));
-    EXPECT_TRUE(AssembleDocContents(ed.doc.table).find("int Other() { return 1; }") !=
-                std::string::npos);
-  }
-
   TEST_CASE("navigation: a file outside the project is keyed absolute and still opens");
   {
-    store->RecordVisit(outside.string(), 1, 1);
-    // Newest, so `outside` is entry 0 -- file.cpp is pinned and dropped.
-    store->RecordVisit("other.cpp", 1, 1);
+    store->SetPin(2, outside.string(), 1, 1);
     Editor ed = editor();
-    JumpToTrail(ed, 0);
+    JumpToPin(ed, 2);
     EXPECT_TRUE(opened(ed, outside));
     EXPECT_EQ(AssembleDocContents(ed.doc.table), std::string{"int Away() { return 2; }\n"});
   }
@@ -1851,47 +1824,25 @@ void VisitReadsAreBoundedAndTheTableIsPruned() {
     if (five.size() == 5u) EXPECT_EQ(five.front().path, std::string{"r1001.cpp"});
   }
 
-  TEST_CASE("project store: the trail reads only as deep as it is asked to");
+  TEST_CASE("project store: the most recent file is the newest visit still on disk");
   {
-    const std::filesystem::path db = scratch.dir / "trail.db";
+    const std::filesystem::path db = scratch.dir / "newest.db";
     std::string error{"unset"};
     const std::shared_ptr<ProjectStore> store = ProjectStore::Open(db, error);
     EXPECT_TRUE(store != nullptr);
     if (store == nullptr) return;
 
+    EXPECT_EQ(MostRecentFile(*store), std::string{});
+
     constexpr int kFiles = 60;
     for (int i = 0; i < kFiles; ++i) store->RecordVisit(make(2000 + i), 1 + i, 0);
+    EXPECT_EQ(MostRecentFile(*store), std::string{"r2059.cpp"});
 
-    // Unbounded: the whole history behind the current file, which is what
-    // TrailOf gave every caller before it took a count.
-    const Trail everything = TrailOf(*store, 0);
-    EXPECT_EQ(everything.current, std::string{"r2059.cpp"});
-    EXPECT_EQ(everything.entries.size(), static_cast<size_t>(kFiles - 1));
-
-    for (const int want : {1, kTrailSlots, 20, kFiles, kFiles + 10}) {
-      const Trail some = TrailOf(*store, want);
-      EXPECT_EQ(some.current, everything.current);
-      EXPECT_EQ(some.entries.size(),
-                static_cast<size_t>(std::min<int>(want, kFiles - 1)));
-      EXPECT_EQ(paths_of(some.entries), paths_of(everything.entries, want));
-    }
-
-    // Pinned files are dropped from the trail, and the count is of what is
-    // left -- so a full four pins over the head of the list must not shorten a
-    // five-entry trail. That is what the query's headroom is for.
-    for (int slot = 1; slot <= kPinSlots; ++slot) {
-      store->SetPin(slot, (root / (name_of(2058 - slot + 1) + ".cpp")).string(), 1, 0);
-    }
-    const Trail pinned = TrailOf(*store, kTrailSlots);
-    EXPECT_EQ(pinned.current, std::string{"r2059.cpp"});
-    EXPECT_EQ(pinned.entries.size(), static_cast<size_t>(kTrailSlots));
-    if (pinned.entries.size() == static_cast<size_t>(kTrailSlots)) {
-      EXPECT_EQ(pinned.entries.front().path, std::string{"r2054.cpp"});
-      EXPECT_EQ(pinned.entries.back().path, std::string{"r2050.cpp"});
-    }
-    for (const FileVisit& entry : pinned.entries) {
-      for (const Pin& pin : store->Pins()) EXPECT_TRUE(entry.path != pin.path);
-    }
+    // Deleted, so the newest row on record is not the answer: the read skips
+    // it and keeps going rather than reporting a file that is not there.
+    std::error_code gone;
+    std::filesystem::remove(root / "r2059.cpp", gone);
+    EXPECT_EQ(MostRecentFile(*store), std::string{"r2058.cpp"});
   }
 
   TEST_CASE("project store: the visit table is pruned at open, newest kept");
@@ -1927,7 +1878,7 @@ void VisitReadsAreBoundedAndTheTableIsPruned() {
       }
       // Nothing prunes while the session is running: a session cannot outgrow
       // the cap by more than a session, and a mid-session delete would be a
-      // trail entry vanishing under the user.
+      // remembered position vanishing under the user.
       EXPECT_EQ(store->FileCount(), kRows);
     }
     EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM files;"), std::int64_t{kRows});

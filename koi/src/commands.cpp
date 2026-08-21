@@ -4205,8 +4205,6 @@ constexpr std::array kTypable = std::to_array<TypableDef>({
      [](Editor& ed, std::string_view) { UnwatchView(ed); }},
     {"pins-excerpt", "", "every pinned position, as excerpts in one view",
      [](Editor& ed, std::string_view) { PinExcerpts(ed); }},
-    {"trail", "", "recent locations, as excerpts in one view",
-     [](Editor& ed, std::string_view) { TrailExcerpts(ed); }},
     {"messages", "", "recent status messages, as a view",
      [](Editor& ed, std::string_view) { MessagesView(ed); }},
     {"pin", "<1-4>", "pin this position to a slot",
@@ -4220,10 +4218,6 @@ constexpr std::array kTypable = std::to_array<TypableDef>({
     {"jump-pin", "<1-4>", "go to a pinned position",
      [](Editor& ed, std::string_view rest) {
        if (int v = 0; SlotOf(ed, "jump-pin", rest, v)) JumpToPin(ed, v);
-     }},
-    {"jump-trail", "<n>", "go to the nth most recent file",
-     [](Editor& ed, std::string_view rest) {
-       if (int v = 0; SlotOf(ed, "jump-trail", rest, v)) JumpToTrail(ed, v);
      }},
     {"jump-symbol", "<n>", "go to the nth most looked-up symbol",
      [](Editor& ed, std::string_view rest) {

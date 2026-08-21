@@ -2426,7 +2426,7 @@ void ExcerptViewSources() {
     EXPECT_TRUE(bare.status.find("no file:line") != std::string::npos);
   }
 
-  TEST_CASE(":pins-excerpt and :trail -- the project's places as views");
+  TEST_CASE(":pins-excerpt -- the project's pins as a view");
   {
     const fs::path fa = scratch.Write("pa.txt", "p1\np2\np3\np4\np5\n");
     const fs::path fb = scratch.Write("pb.txt", "q1\nq2\nq3\n");
@@ -2445,15 +2445,6 @@ void ExcerptViewSources() {
     EXPECT_TRUE(view(ed).starts_with("2 pins"));
     EXPECT_TRUE(view(ed).find("p2\np3\np4\n") != std::string::npos);
     EXPECT_TRUE(view(ed).find("q1\nq2\nq3\n") != std::string::npos);
-
-    const fs::path fc = scratch.Write("pc.txt", "r1\nr2\nr3\nr4\n");
-    const fs::path fd = scratch.Write("pd.txt", "s1\ns2\n");
-    ed.project->RecordVisit(fc.string(), 2, 1);
-    ed.project->RecordVisit(fd.string(), 1, 1);
-    RunTypableCommand(ed, "trail");
-    EXPECT_TRUE(IsExcerptView(ed.doc));
-    EXPECT_TRUE(ed.doc.view_name.find("trail") != std::string::npos);
-    EXPECT_TRUE(view(ed).find("r1\nr2\nr3\n") != std::string::npos);
 
     Editor homeless;
     homeless.theme = BuiltinTheme();
@@ -2554,43 +2545,11 @@ void ExcerptViewSources() {
     EXPECT_TRUE(view(ed).find("1 pin\n") != std::string::npos);
   }
 
-  TEST_CASE("trail view: newest first, and no more than twenty of them");
-  {
-    Editor ed;
-    ed.theme = BuiltinTheme();
-    ed.settings.excerpt_context = 0;
-    std::string db_error;
-    ed.project = ProjectStore::Open(scratch.dir / "order.db", db_error);
-    EXPECT_TRUE(ed.project != nullptr);
-    EXPECT_TRUE(OpenTarget(ed, home.string()));
-
-    std::vector<fs::path> made;
-    for (int i = 0; i < 25; ++i) {
-      made.push_back(scratch.Write("ord_" + std::to_string(i) + ".txt",
-                                   "o" + std::to_string(i) + "\n"));
-    }
-    for (int i = 24; i >= 0; --i) ed.project->RecordVisit(made[static_cast<std::size_t>(i)].string(), 1, 1);
-    RunTypableCommand(ed, "trail");
-    EXPECT_TRUE(IsExcerptView(ed.doc));
-
-    EXPECT_EQ(ed.doc.excerpts.blocks.size(), std::size_t{20});
-    const std::string text = view(ed);
-    const std::size_t first = text.find("ord_1.txt:");
-    const std::size_t second = text.find("ord_2.txt:");
-    const std::size_t third = text.find("ord_3.txt:");
-    EXPECT_TRUE(first != std::string::npos);
-    EXPECT_TRUE(second != std::string::npos);
-    EXPECT_TRUE(first < second);
-    EXPECT_TRUE(second < third);
-    EXPECT_TRUE(text.find("ord_24.txt:") == std::string::npos);
-  }
-
   TEST_CASE("view names never answer for files: a file called `pins` survives");
   {
     const fs::path previous = fs::current_path();
     fs::current_path(scratch.dir);
     const fs::path pins_file = scratch.Write("pins", "p1\np2\np3\n");
-    scratch.Write("trail", "t1\n");
     const auto edit = [](Editor& ed, std::size_t at, std::size_t take, std::string_view put) {
       if (take > 0) {
         std::ignore = Delete(static_cast<Index>(at), static_cast<Index>(at + take), ed.doc.table);
@@ -2646,13 +2605,6 @@ void ExcerptViewSources() {
     EXPECT_TRUE(ReadDocRange(BufferAt(ed, file_at).table,
                              {0, DocLength(BufferAt(ed, file_at).table)})
                     .starts_with("xp1"));
-
-    ed.project->RecordVisit(pins_file.string(), 1, 1);
-    RunTypableCommand(ed, "trail");
-    EXPECT_TRUE(IsExcerptView(ed.doc));
-    EXPECT_TRUE(OpenTarget(ed, "trail"));
-    EXPECT_FALSE(IsExcerptView(ed.doc));
-    EXPECT_EQ(view(ed), std::string{"t1\n"});
 
     fs::current_path(previous);
   }
@@ -2748,46 +2700,6 @@ void ExcerptViewSources() {
     EXPECT_TRUE(view(ed).find("sb2") == std::string::npos);
   }
 
-  TEST_CASE("live views: the trail follows the files you visit while it is on screen");
-  {
-    const fs::path fa = scratch.Write("tr_a.txt", "ta1\nta2\nta3\n");
-    const fs::path fb = scratch.Write("tr_b.txt", "tb1\ntb2\ntb3\n");
-    const fs::path fc = scratch.Write("tr_c.txt", "tc1\ntc2\ntc3\n");
-    Editor ed;
-    ed.theme = BuiltinTheme();
-    ed.settings.excerpt_context = 0;
-    std::string db_error;
-    ed.project = ProjectStore::Open(scratch.dir / "tr.db", db_error);
-    EXPECT_TRUE(ed.project != nullptr);
-    ed.project->RecordVisit(fa.string(), 2, 1);
-    ed.project->RecordVisit(fb.string(), 2, 1);
-
-    EXPECT_TRUE(OpenTarget(ed, fa.string()));
-    RunTypableCommand(ed, "trail");
-    const std::size_t trail_at = ed.active;
-    SplitWindow(ed, true);
-    EXPECT_TRUE(OpenTarget(ed, fc.string()));
-    EXPECT_TRUE(ed.active != trail_at);
-    const auto pane_text = [&ed, trail_at] {
-      return ReadDocRange(BufferAt(ed, trail_at).table,
-                          {0, DocLength(BufferAt(ed, trail_at).table)});
-    };
-
-    EXPECT_TRUE(pane_text().find("tr_c.txt") == std::string::npos);
-    EXPECT_TRUE(OpenTarget(ed, fb.string()));
-    RecordVisitHere(ed);
-    RefreshLiveExcerptViews(ed);
-    EXPECT_TRUE(pane_text().find("tr_c.txt") != std::string::npos);
-    EXPECT_EQ(ed.doc.file.filename().string(), std::string{"tr_b.txt"});
-    EXPECT_TRUE(ed.active != trail_at);
-    EXPECT_EQ(EditorInvariants(ed), std::string{});
-
-    SwitchToBuffer(ed, trail_at);
-    RecordVisitHere(ed);
-    RefreshLiveExcerptViews(ed);
-    EXPECT_TRUE(view(ed).find("trail:") == std::string::npos);
-  }
-
   TEST_CASE("live views: the same view in two panes, and the one that shrank is not blank");
   {
     Editor ed;
@@ -2830,7 +2742,7 @@ void ExcerptViewSources() {
     EXPECT_EQ(EditorInvariants(ed), std::string{});
   }
 
-  TEST_CASE("live views: refreshing on every visit stays bounded");
+  TEST_CASE("live views: refreshing on every change stays bounded");
   {
     const fs::path fa = scratch.Write("bd_a.txt", "ba1\nba2\nba3\n");
     const fs::path fb = scratch.Write("bd_b.txt", "bb1\nbb2\nbb3\n");
@@ -2841,27 +2753,28 @@ void ExcerptViewSources() {
     std::string db_error;
     ed.project = ProjectStore::Open(scratch.dir / "bound.db", db_error);
     EXPECT_TRUE(ed.project != nullptr);
-    ed.project->RecordVisit(fa.string(), 2, 1);
-    ed.project->RecordVisit(fb.string(), 2, 1);
     EXPECT_TRUE(OpenTarget(ed, fa.string()));
-    RunTypableCommand(ed, "trail");
-    const std::size_t trail_at = ed.active;
+    RunTypableCommand(ed, "pin 1");
+    RunTypableCommand(ed, "pins-excerpt");
+    const std::size_t pins_at = ed.active;
     SplitWindow(ed, true);
     EXPECT_TRUE(OpenTarget(ed, fc.string()));
 
     int rebuilt = 0;
-    Index last = BufferAt(ed, trail_at).table.revision;
+    Index last = BufferAt(ed, pins_at).table.revision;
     for (int i = 0; i < 120; ++i) {
       const fs::path& next = ((i % 3) == 0) ? fa : (((i % 3) == 1) ? fb : fc);
       std::ignore = OpenTarget(ed, next.string());
+      // Slot 2 is a different file every turn, so every turn the view is stale.
+      RunTypableCommand(ed, "pin 2");
       RefreshLiveExcerptViews(ed);
-      const Index now = BufferAt(ed, trail_at).table.revision;
+      const Index now = BufferAt(ed, pins_at).table.revision;
       if (now != last) ++rebuilt;
       last = now;
     }
     EXPECT_TRUE(rebuilt > 10);
 
-    const Document& held = BufferAt(ed, trail_at);
+    const Document& held = BufferAt(ed, pins_at);
     EXPECT_TRUE(HistoryBytes(held.table) <= held.table.history_budget_bytes);
     EXPECT_TRUE(held.excerpt_epochs.boundaries.size() <= 8);
     EXPECT_TRUE(held.excerpt_epochs.store.size() <= 9);

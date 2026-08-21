@@ -146,7 +146,7 @@ inline bool IsCorruptionCode(int rc) {
 // only records the name -- it never touches the header -- so a truncated write,
 // a file that is not a database, a directory that cannot be locked all arrive
 // here, and only here, as a "cannot read" answer. Treating that as success is
-// what produced a store that swallowed every pin and trail entry for a whole
+// what produced a store that swallowed every pin and every visit for a whole
 // session without a word.
 inline Schema CheckSchemaVersion(sqlite3* db, std::int64_t expected, std::string& error,
                                  std::int64_t* found = nullptr) {

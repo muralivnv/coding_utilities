@@ -513,8 +513,10 @@ void LiveViewsAndPanesFuzz(Rng& rng) {
         RunTypableCommand(ed, "pins-excerpt");
         break;
       case 3:
-        what = "trail";
-        RunTypableCommand(ed, "trail");
+        // Moves a pin behind the view's back, which is what leaves a live pins
+        // view stale for case 9 to rebuild.
+        what = "record-edit";
+        RecordEditHere(ed);
         break;
       case 4:
         what = "open";

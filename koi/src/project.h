@@ -13,10 +13,8 @@
 namespace koi {
 
 inline constexpr int kPinSlots = 4;
-inline constexpr int kTrailSlots = 5;
 inline constexpr int kHotSymbolSlots = 7;
 inline constexpr std::string_view kPinLabels = "1234";
-inline constexpr std::string_view kTrailLabels = "56789";
 inline constexpr std::string_view kSymbolLabels = "ijklaeo";
 
 struct FileVisit {
@@ -91,16 +89,9 @@ struct ProjectStore {
   virtual int FileCount() = 0;
 };
 
-struct Trail {
-  std::string current;
-  std::vector<FileVisit> entries;
-};
-
-// The most recent file, and up to `entries` files behind it. Pass what will be
-// displayed: the trail is read on every sidebar refresh, and the count is what
-// stops that from reading the whole visit history. `entries <= 0` means all of
-// it.
-Trail TrailOf(ProjectStore& store, int entries);
+// The file visited most recently, or empty when nothing on record is still on
+// disk. The sidebar asks so it can pick out the pin for the file being edited.
+std::string MostRecentFile(ProjectStore& store);
 
 inline constexpr int kDefaultHotFileLimit = 200;
 

@@ -44,7 +44,7 @@ void SidebarEmphasisSurvivesTheFilter() {
   store->RecordVisit(other, 7, 1);
   store->RecordVisit(here, 12, 1);
   store->SetPin(1, here, 12, 1);
-  EXPECT_EQ(TrailOf(*store, kTrailSlots).current, here);
+  EXPECT_EQ(MostRecentFile(*store), here);
 
   constexpr int kColumns = 40;
   const std::vector<std::string> lines = SidebarLines(*store, kColumns);
@@ -163,7 +163,7 @@ void SidebarRendering() {
 
   {
     const std::vector<std::string> lines = SidebarLines(*store, 42);
-    EXPECT_EQ(lines.size(), static_cast<size_t>(3 + kPinSlots + kTrailSlots + kHotSymbolSlots + 2));
+    EXPECT_EQ(lines.size(), static_cast<size_t>(2 + kPinSlots + kHotSymbolSlots + 1));
     EXPECT_TRUE(lines[0].find("Pins") != std::string::npos);
     for (size_t i = 1; i <= static_cast<size_t>(kPinSlots); ++i) {
       EXPECT_TRUE(lines[i].find("—") != std::string::npos);
@@ -187,18 +187,18 @@ void SidebarRendering() {
   EXPECT_TRUE(has("beta.cpp:12"));
   EXPECT_TRUE(!has(a));
 
-  const Trail trail = TrailOf(*store, kTrailSlots);
-  EXPECT_EQ(trail.current, c);
-  EXPECT_EQ(trail.entries.size(), 1u);
-  EXPECT_EQ(trail.entries.front().path, b);
+  EXPECT_EQ(MostRecentFile(*store), c);
+  // Only pins and symbols are drawn, so a visited-but-unpinned file appears
+  // nowhere.
   EXPECT_TRUE(!has("a_very_long_file_name_indeed.cpp"));
+  EXPECT_TRUE(!has("beta.cpp:20"));
 
   for (const std::string& line : SidebarLines(*store, 24)) {
     EXPECT_TRUE(line.find('\n') == std::string::npos);
   }
 
-  // Everything above pins a file that is not trail.current, so nothing above
-  // renders an emphasised row at all. Pin the current file too.
+  // Everything above pins a file that is not the most recent one, so nothing
+  // above renders an emphasised row at all. Pin the current file too.
   store->SetPin(2, c, 30, 1);
   const std::vector<std::string> emphasised = SidebarLines(*store, 42);
   const auto bold = [](const std::string& line) {

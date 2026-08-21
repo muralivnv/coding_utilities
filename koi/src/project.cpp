@@ -36,8 +36,8 @@ constexpr int kMaxCoVisitFiles = 32;
 // The over-fetch is for StillThere: a row whose file has been deleted or
 // renamed is dropped in C++, and the query has no way to know that, so it hands
 // back more than the caller asked for and the loop stops as soon as it has
-// enough. Four-to-one with a floor of 256 fills a twenty-entry trail in one
-// query even on a store where three quarters of the history is gone from disk.
+// enough. Four-to-one with a floor of 256 fills a twenty-row read in one query
+// even on a store where three quarters of the history is gone from disk.
 //
 // Over-fetching is very nearly free: the rows arrive in index order and the
 // ones past the cap are never turned into a FileVisit, never copied into a
@@ -50,9 +50,9 @@ constexpr int kVisitScanFloor = 256;
 // scanned and stat()ed all of it -- so an editor left running against a big
 // repository grew a permanent tax on the sidebar.
 //
-// 5000 is far past what anything here distinguishes: the trail shows five, the
-// excerpt view twenty, and a picker ranking that reaches 5000 visited files is
-// ordering rows the user last touched 5000 other files ago. It is deliberately
+// 5000 is far past what anything here distinguishes: the sidebar reads one row,
+// and a picker ranking that reaches 5000 visited files is ordering rows the user
+// last touched 5000 other files ago. It is deliberately
 // generous, because the cost of keeping a row is one row and the cost of
 // dropping one that mattered is a lost cursor position.
 #define KOI_MAX_FILE_ROWS "5000"
@@ -801,7 +801,7 @@ std::string ShortDigest(std::string_view text) {
 // digest directory does not exist yet and the legacy name is a directory",
 // which is true for *whichever* of two colliding projects opens first after the
 // upgrade -- so a move handed one project the other's entire database (pins,
-// trail, last positions) and left the rightful owner with nothing, silently and
+// visits, last positions) and left the rightful owner with nothing, silently and
 // permanently, since a move is one-shot.
 //
 // So copy, and never destroy the legacy claim. A colliding project seeds from
@@ -926,7 +926,7 @@ fs::path g_project_root;
 // Breaking on `at == stop` first meant $HOME/.git was the one marker the walk
 // could never see. Launched from anywhere below it the repository was invisible
 // and the fallback made each directory its own project, so the state -- pins,
-// trail, last positions, jump list -- fragmented into a new database per
+// visits, last positions, jump list -- fragmented into a new database per
 // directory the user happened to cd into; launched from $HOME itself the same
 // fallback returned $HOME. One repository, a different root depending on how
 // deep you were standing, and no way to notice except that nothing was ever
@@ -968,9 +968,9 @@ fs::path ProjectRoot() {
 // ProjectKey's contract is "a path given to the store is a path valid from the
 // current directory", and what it stores is that path expressed against the
 // root. Reading a row back therefore hands out a spelling that is valid from
-// the *root*, and every consumer that goes on to open or stat one -- the trail
-// jump, a pin jump, the excerpt refs a pins/trail view is built from, the hot
-// file list a symbol scan reads -- resolves it against the current directory
+// the *root*, and every consumer that goes on to open or stat one -- a pin jump,
+// the excerpt refs a pins view is built from, the hot file list a symbol scan
+// reads -- resolves it against the current directory
 // instead. Started at the root the two are the same string and nothing was
 // ever wrong; started one directory down, "src/main.cpp" read back from inside
 // src/ opened "src/src/main.cpp", which is nothing.
@@ -1023,27 +1023,9 @@ fs::path BesideDatabase(const char* name) {
 
 }
 
-Trail TrailOf(ProjectStore& store, int entries) {
-  Trail trail;
-  // Two things eat into the answer before the caller sees it: the newest row
-  // becomes `current` rather than an entry, and a pinned file is dropped
-  // instead of being shown in two places at once. Asking for that many extra
-  // rows means neither can starve a full trail.
-  const int want = (entries > 0) ? (entries + 1 + kPinSlots) : 0;
-  std::vector<FileVisit> recent = store.RecentFiles(want);
-  if (recent.empty()) return trail;
-  trail.current = recent.front().path;
-  recent.erase(recent.begin());
-
-  const std::vector<Pin> pins = store.Pins();
-  std::erase_if(recent, [&pins](const FileVisit& visit) {
-    return std::ranges::any_of(pins, [&visit](const Pin& pin) { return pin.path == visit.path; });
-  });
-  if ((entries > 0) && (std::ssize(recent) > entries)) {
-    recent.resize(static_cast<std::size_t>(entries));
-  }
-  trail.entries = std::move(recent);
-  return trail;
+std::string MostRecentFile(ProjectStore& store) {
+  const std::vector<FileVisit> recent = store.RecentFiles(1);
+  return recent.empty() ? std::string{} : recent.front().path;
 }
 
 fs::path LastPickerStatePath() { return BesideDatabase("koi-last-picker.txt"); }

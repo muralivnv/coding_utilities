@@ -39,7 +39,6 @@ void CommandExcerpts(Editor& ed, std::string_view command, bool watched = false,
                      bool with_msg = false);
 
 void PinExcerpts(Editor& ed);
-void TrailExcerpts(Editor& ed);
 void MessagesView(Editor& ed);
 void WatchView(Editor& ed);
 void UnwatchView(Editor& ed);
@@ -82,7 +81,6 @@ void SetPinHere(Editor& ed, int slot);
 void ClearPinSlot(Editor& ed, int slot);
 void JumpToPin(Editor& ed, int slot);
 
-void JumpToTrail(Editor& ed, int index);
 
 void JumpToHotSymbol(Editor& ed, int index);
 

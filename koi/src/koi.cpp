@@ -645,7 +645,7 @@ Usage: koi [file[:line[:col]]]
 
   no file      a new, unnamed buffer -- :w <path> to name it
   piped stdin  becomes an unnamed buffer; keys still come from the terminal
-  --sidebar    draw this project's pins, trail and symbols instead of editing
+  --sidebar    draw this project's pins and symbols instead of editing
 
 Non-interactive modes. Each writes to stdout, edits nothing, and never opens a
 terminal, so they compose in a pipeline and can back a picker's preview window.
