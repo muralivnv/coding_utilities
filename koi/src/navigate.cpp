@@ -49,6 +49,7 @@ constexpr std::string_view kTooey = R"bash(
     tooey --ansi --print-query --query %{user_query} \
     --preview-dir right --preview-size 55 \
     --query-process-command 'gai --no-color -f "(?i)"{{@QUERY@}}' \
+    --width 100 --height 50 --position centered \
     --preview-command '
       payload=$(printf %s {{@SELECTION@}} | sed "s/.*\t//")
       f=$payload; l=1

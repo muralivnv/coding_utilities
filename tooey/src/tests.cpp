@@ -494,6 +494,120 @@ static void TestLayout() {
     }
   }
 
+  TEST_CASE("--width and --height size the box, --position places it");
+  {
+    Config cfg;
+    cfg.width = 40;
+    cfg.height = 10;
+
+    // Centred both ways: (80-40)/2 and (24-10)/2.
+    cfg.position = "centered";
+    Layout l = CalculateLayout(cfg, 80, 24);
+    EXPECT_EQ(l.main.x, 20);
+    EXPECT_EQ(l.main.y, 7);
+    EXPECT_EQ(l.main.w, 40);
+    EXPECT_EQ(l.main.h, 10);
+
+    // top and bottom keep the horizontal centring and only move the box.
+    cfg.position = "top";
+    l = CalculateLayout(cfg, 80, 24);
+    EXPECT_EQ(l.main.x, 20);
+    EXPECT_EQ(l.main.y, 0);
+
+    cfg.position = "bottom";
+    l = CalculateLayout(cfg, 80, 24);
+    EXPECT_EQ(l.main.x, 20);
+    EXPECT_EQ(l.main.y, 14);
+  }
+
+  TEST_CASE("no position leaves the geometry it always had");
+  {
+    // A size with nowhere to put it is --height's inline strip, which termbox has
+    // already applied to the term_h we are handed: the box is the whole of it.
+    Config cfg;
+    cfg.width = 40;
+    cfg.height = 10;
+    const Layout l = CalculateLayout(cfg, 80, 24);
+    EXPECT_EQ(l.main.x, 0);
+    EXPECT_EQ(l.main.y, 0);
+    EXPECT_EQ(l.main.w, 80);
+    EXPECT_EQ(l.main.h, 24);
+    EXPECT_EQ(InlineRows(cfg), 10);
+  }
+
+  TEST_CASE("a positioned picker asks termbox for no inline rows");
+  {
+    Config cfg;
+    cfg.height = 10;
+    cfg.position = "centered";
+    EXPECT_EQ(InlineRows(cfg), 0);
+  }
+
+  TEST_CASE("the preview splits the box, not the terminal");
+  {
+    Config cfg;
+    cfg.preview_cmd = "cat";
+    cfg.preview_size = 50;
+    cfg.width = 40;
+    cfg.height = 10;
+    cfg.position = "centered";
+
+    cfg.preview_dir = "right";
+    Layout l = CalculateLayout(cfg, 80, 24);
+    EXPECT_EQ(l.main.x, 20);
+    EXPECT_EQ(l.main.w, 20);
+    EXPECT_EQ(l.preview.x, 40);
+    EXPECT_EQ(l.preview.w, 20);
+    EXPECT_EQ(l.preview.y, 7);
+    EXPECT_EQ(l.preview.h, 10);
+
+    cfg.preview_dir = "bottom";
+    l = CalculateLayout(cfg, 80, 24);
+    EXPECT_EQ(l.main.y, 7);
+    EXPECT_EQ(l.main.h, 5);
+    EXPECT_EQ(l.preview.y, 12);
+    EXPECT_EQ(l.preview.h, 5);
+    EXPECT_EQ(l.main.x, 20);
+    EXPECT_EQ(l.preview.x, 20);
+  }
+
+  TEST_CASE("a box larger than the terminal is clipped to it");
+  {
+    Config cfg;
+    cfg.width = 200;
+    cfg.height = 100;
+    cfg.position = "centered";
+    const Layout l = CalculateLayout(cfg, 80, 24);
+    EXPECT_EQ(l.main.x, 0);
+    EXPECT_EQ(l.main.y, 0);
+    EXPECT_EQ(l.main.w, 80);
+    EXPECT_EQ(l.main.h, 24);
+  }
+
+  TEST_CASE("a positioned box on a tiny terminal stays on screen");
+  {
+    Config cfg;
+    cfg.preview_cmd = "cat";
+    cfg.width = kMinBoxColumns;
+    cfg.height = kMinInlineRows;
+    for (std::string_view where : {"centered", "top", "bottom"}) {
+      cfg.position = where;
+      for (int w : {0, 1, 2, 3}) {
+        for (int h : {0, 1, 2, 3}) {
+          const Layout l = CalculateLayout(cfg, w, h);
+          EXPECT_TRUE(l.main.x >= 0);
+          EXPECT_TRUE(l.main.y >= 0);
+          EXPECT_TRUE(l.main.w >= 0);
+          EXPECT_TRUE(l.main.h >= 0);
+          EXPECT_TRUE((l.main.x + l.main.w) <= w);
+          EXPECT_TRUE((l.main.y + l.main.h) <= h);
+          EXPECT_TRUE(l.preview.w >= 0);
+          EXPECT_TRUE(l.preview.h >= 0);
+        }
+      }
+    }
+  }
+
   TEST_CASE("SplitTextRows");
   {
     EXPECT_TRUE(SplitTextRows("").empty());
@@ -682,6 +796,18 @@ static void TestLayout() {
   EXPECT_EQ(RowsFromPercent("-40", 24), 0);
   EXPECT_EQ(RowsFromPercent("40", 0), 0);
   EXPECT_EQ(RowsFromPercent("40", -1), 0);
+
+  TEST_CASE("ColumnsFromPercent");
+  // Same rule as RowsFromPercent over columns, with the wider floor.
+  EXPECT_EQ(ColumnsFromPercent("60", 200), 120);
+  EXPECT_EQ(ColumnsFromPercent("60%", 200), 120);
+  EXPECT_EQ(ColumnsFromPercent("500", 200), 200);
+  EXPECT_EQ(ColumnsFromPercent("1", 200), kMinBoxColumns);
+  EXPECT_EQ(ColumnsFromPercent("", 200), 0);
+  EXPECT_EQ(ColumnsFromPercent("abc", 200), 0);
+  EXPECT_EQ(ColumnsFromPercent("0", 200), 0);
+  EXPECT_EQ(ColumnsFromPercent("-60", 200), 0);
+  EXPECT_EQ(ColumnsFromPercent("60", 0), 0);
 }
 
 // ============================================================================

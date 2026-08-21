@@ -711,7 +711,7 @@ static ExecuteActionCommandResult ExecuteActionCommand(const Action& act, const 
   if (act.is_interactive) {
     Termbox::Shutdown();
     cmd_result = common::RunCmdInteractive(cmd);
-    if (!Termbox::Init(cfg.height)) {
+    if (!Termbox::Init(tooey::InlineRows(cfg))) {
       ExecuteActionCommandResult result;
       State exit_st = user_state;
       exit_st.finalize_exit = true;
@@ -1176,20 +1176,38 @@ static State RunWindowAction(StateAction& state, const State& user_state, const 
 // MAIN HELPERS & MAIN
 // ============================================================================
 
-// Asks the terminal how tall it is and hands the percentage arithmetic to
-// tooey::RowsFromPercent. Resolved here rather than at init because the terminal
-// cannot change size in between, and /dev/tty is opened explicitly because stdout
-// is frequently a pipe.
-static int InlineRowsFromPercent(std::string_view raw) {
-  int term_rows = 0;
+// How big the terminal is, zeroed when it cannot be said -- which both callers
+// below hand on as "unknown". /dev/tty is opened explicitly because stdout is
+// frequently a pipe.
+static struct winsize TtyWinsize() {
+  struct winsize ws{};
   const int fd = open("/dev/tty", O_RDONLY | O_CLOEXEC);
   if (fd >= 0) {
-    struct winsize ws{};
-    if (ioctl(fd, TIOCGWINSZ, &ws) == 0)
-      term_rows = ws.ws_row;
+    if (ioctl(fd, TIOCGWINSZ, &ws) != 0)
+      ws = winsize{};
     close(fd);
   }
-  return tooey::RowsFromPercent(raw, term_rows);
+  return ws;
+}
+
+// The percentage arithmetic goes to tooey::RowsFromPercent and
+// tooey::ColumnsFromPercent. Resolved here rather than at init because the
+// terminal cannot change size in between.
+static int InlineRowsFromPercent(std::string_view raw) {
+  return tooey::RowsFromPercent(raw, TtyWinsize().ws_row);
+}
+
+static int BoxColumnsFromPercent(std::string_view raw) {
+  return tooey::ColumnsFromPercent(raw, TtyWinsize().ws_col);
+}
+
+// The three placements there are. An unrecognised one leaves the picker where it
+// has always been rather than guessing at what was meant, the same way an
+// unrecognised --preview-dir keeps the pane it knows how to draw.
+static std::string_view ValidPosition(std::string_view raw) {
+  if ((raw == "centered") || (raw == "top") || (raw == "bottom"))
+    return raw;
+  return {};
 }
 
 static tooey::Config ParseConfig(const common::Args& cli) {
@@ -1222,6 +1240,12 @@ static tooey::Config ParseConfig(const common::Args& cli) {
   if (auto v = cli.Value({"--height"})) {
     cfg.height = InlineRowsFromPercent(*v);
   }
+
+  if (auto v = cli.Value({"--width"})) {
+    cfg.width = BoxColumnsFromPercent(*v);
+  }
+
+  cfg.position = ValidPosition(cli.Value({"--position"}).value_or(""));
 
   return cfg;
 }
@@ -1359,7 +1383,16 @@ Options:
       --height                           Percentage of the terminal height to draw in, instead of
                                          taking over the screen. Opens under the cursor and leaves
                                          everything above it visible. '40' and '40%' are the same;
-                                         values are clamped to 1..100.
+                                         values are clamped to 1..100. With --position this is the
+                                         height of the box instead, and nothing is left visible.
+      --width                            Percentage of the terminal width, same spelling. Only
+                                         --position reads it; without one the picker is as wide as
+                                         the terminal.
+      --position                         Draw as a box rather than across the screen: centered, top
+                                         or bottom, naming the vertical edge it sits against. All
+                                         three centre it horizontally, so on a wide screen the list
+                                         lands where the eye already is. --width and --height size
+                                         it; whatever they leave over is blank.
       --read0                            Split input items on NUL instead of newline
       --ansi                             To display input ansi codes or not
       --action                           Declare an action, see Actions below. Repeatable.
@@ -1449,7 +1482,7 @@ Exit status: 0 an item was selected, 1 nothing was selected, 130 cancelled.
   const State initial_state = InitializeState(cli, cfg, state_is, state_qp);
 
   // --select-1 can settle everything without ever showing the UI.
-  if (!initial_state.finalize_exit && !Termbox::Init(cfg.height))
+  if (!initial_state.finalize_exit && !Termbox::Init(tooey::InlineRows(cfg)))
     return EXIT_FAILURE;
 
   const State final_state = RunAppLoop(initial_state, cfg, state_is, state_qp, state_action);

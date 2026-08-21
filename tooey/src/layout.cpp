@@ -6,28 +6,59 @@
 
 namespace tooey {
 
+namespace {
+
+// The rectangle the picker draws in. With no position that is the whole terminal,
+// which is what every caller got before there was a box and what --height's inline
+// mode still hands us -- there tb_width()/tb_height() already report the strip, so
+// the box is the strip and nothing here changes.
+//
+// With one, --width and --height size it and the position names the vertical edge.
+// All three centre it horizontally: a picker off to one side is the eye travel the
+// box exists to remove, so there is no reason to offer a left or a right. A size
+// larger than the terminal is clipped to it rather than refused, which is also how
+// a percentage under the floor lands on a terminal too small to hold the floor.
+//
+// ParseConfig only lets the three names through, so the last branch is "centered"
+// and there is no unrecognised value to fall back for.
+Rect BoxOf(const Config& cfg, int term_w, int term_h) {
+  const int full_w = std::max(0, term_w);
+  const int full_h = std::max(0, term_h);
+  if (cfg.position.empty())
+    return Rect{0, 0, full_w, full_h};
+
+  const int w = (cfg.width > 0) ? std::min(cfg.width, full_w) : full_w;
+  const int h = (cfg.height > 0) ? std::min(cfg.height, full_h) : full_h;
+  const int y = (cfg.position == "top") ? 0 : (cfg.position == "bottom") ? (full_h - h) : (full_h - h) / 2;
+  return Rect{(full_w - w) / 2, y, w, h};
+}
+
+}  // namespace
+
 Layout CalculateLayout(const Config& cfg, int term_w, int term_h, bool force_preview) {
+  const Rect box = BoxOf(cfg, term_w, term_h);
+
   if (cfg.preview_cmd.empty() && !force_preview) {
-    return {Rect{0, 0, term_w, term_h}, Rect{0, 0, 0, 0}, false};
+    return {box, Rect{0, 0, 0, 0}, false};
   }
 
   int p_size = (cfg.preview_size <= 0 || cfg.preview_size >= 100) ? kDefaultPreviewSize : cfg.preview_size;
 
   if (cfg.preview_dir == "left") {
-    int pw = (term_w * p_size) / 100;
-    return {Rect{pw, 0, term_w - pw, term_h}, Rect{0, 0, pw, term_h}, true};
+    int pw = (box.w * p_size) / 100;
+    return {Rect{box.x + pw, box.y, box.w - pw, box.h}, Rect{box.x, box.y, pw, box.h}, true};
 
   } else if (cfg.preview_dir == "top") {
-    int ph = (term_h * p_size) / 100;
-    return {Rect{0, ph, term_w, term_h - ph}, Rect{0, 0, term_w, ph}, true};
+    int ph = (box.h * p_size) / 100;
+    return {Rect{box.x, box.y + ph, box.w, box.h - ph}, Rect{box.x, box.y, box.w, ph}, true};
 
   } else if (cfg.preview_dir == "bottom") {
-    int ph = (term_h * p_size) / 100;
-    return {Rect{0, 0, term_w, term_h - ph}, Rect{0, term_h - ph, term_w, ph}, true};
+    int ph = (box.h * p_size) / 100;
+    return {Rect{box.x, box.y, box.w, box.h - ph}, Rect{box.x, box.y + box.h - ph, box.w, ph}, true};
   }
 
-  int pw = (term_w * p_size) / 100;
-  return {Rect{0, 0, term_w - pw, term_h}, Rect{term_w - pw, 0, pw, term_h}, true};
+  int pw = (box.w * p_size) / 100;
+  return {Rect{box.x, box.y, box.w - pw, box.h}, Rect{box.x + box.w - pw, box.y, pw, box.h}, true};
 }
 
 ListStrips SplitListPane(const Rect& main, int header_rows, int footer_rows) {
@@ -94,16 +125,28 @@ size_t GetMaxPreviewScroll(const Layout& layout, const Config& cfg, size_t total
   return total_lines > static_cast<size_t>(view_h) ? total_lines - static_cast<size_t>(view_h) : 0;
 }
 
-int RowsFromPercent(std::string_view raw, int term_rows) {
+namespace {
+
+int FromPercent(std::string_view raw, int total, int floor) {
   const auto pct = ParseInt(raw);
   if (!pct || *pct <= 0)
     return 0;
   const int percent = std::min(*pct, 100);
 
-  if (term_rows <= 0)
-    return 0;  // size unknown, so stay fullscreen rather than guess a row count
+  if (total <= 0)
+    return 0;  // size unknown, so stay fullscreen rather than guess a count
 
-  return std::max(term_rows * percent / 100, kMinInlineRows);
+  return std::max(total * percent / 100, floor);
+}
+
+}  // namespace
+
+int RowsFromPercent(std::string_view raw, int term_rows) {
+  return FromPercent(raw, term_rows, kMinInlineRows);
+}
+
+int ColumnsFromPercent(std::string_view raw, int term_cols) {
+  return FromPercent(raw, term_cols, kMinBoxColumns);
 }
 
 std::vector<Action> ParseActions(const std::vector<std::string_view>& actions) {

@@ -9,6 +9,10 @@ namespace tooey {
 
 inline constexpr int kDefaultPreviewSize{50};
 inline constexpr int kMinInlineRows{3};
+// A box narrower than this has no room for the gutter, the selection marker and
+// anything of the item itself, so --width stops here however small a percentage
+// asks for.
+inline constexpr int kMinBoxColumns{20};
 
 struct Action {
   std::string_view name{};
@@ -33,7 +37,12 @@ struct Config {
   bool ansi{false};
   int debounce_ms{150};
   int initial_pos{0};  // 1-based row to open on; 0 keeps the top
-  int height{0};       // inline rows, resolved from --height's percentage; 0 = fullscreen
+  // Rows from --height's percentage. With no position these are the inline rows
+  // termbox draws in at the bottom of the terminal; with one they are the height
+  // of the box. 0 is the full terminal either way.
+  int height{0};
+  int width{0};                 // columns from --width's percentage; 0 is the full width
+  std::string_view position{};  // "centered", "top" or "bottom"; empty draws as it always did
 };
 
 struct Rect {
@@ -50,11 +59,21 @@ struct Layout {
   bool has_preview{false};
 };
 
-// Splits term_w x term_h between the list and the preview according to
+// Splits the picker's box between the list and the preview according to
 // cfg.preview_dir and cfg.preview_size. With no preview command the list gets
 // everything, unless force_preview asks for the split anyway (the action window
 // previews its command without one being configured).
+//
+// The box is the whole of term_w x term_h unless cfg.position asks for one, in
+// which case cfg.width and cfg.height size it and the position names the edge it
+// hugs. Both rectangles are in terminal coordinates whichever it is, so drawing
+// and hit-testing need to know nothing about the box.
 Layout CalculateLayout(const Config& cfg, int term_w, int term_h, bool force_preview = false);
+
+// Rows to hand termbox's inline mode. A positioned picker asks for none: inline
+// mode shrinks the viewport against the bottom of the terminal, and a box that is
+// to sit anywhere else needs the whole of it to be placed in.
+inline int InlineRows(const Config& cfg) { return cfg.position.empty() ? cfg.height : 0; }
 
 // The three horizontal strips the list pane is cut into below the readout. A strip
 // with h == 0 is absent and draws nothing, so callers need no separate flag.
@@ -96,6 +115,10 @@ size_t GetMaxPreviewScroll(const Layout& layout, const Config& cfg, size_t total
 // unknown, rather than guessing a row count. A trailing '%' is accepted and ignored,
 // so both `--height 40` and `--height 40%` work.
 int RowsFromPercent(std::string_view raw, int term_rows);
+
+// The same rule over the terminal's columns, for --width. The floor is the wider
+// kMinBoxColumns: three columns is a usable strip of rows but not a usable box.
+int ColumnsFromPercent(std::string_view raw, int term_cols);
 
 // Parses --action specs of the form [alt-<c>:]<name>=<command>, where `==` instead
 // of `=` marks the command as one that replaces tooey rather than running under it.
