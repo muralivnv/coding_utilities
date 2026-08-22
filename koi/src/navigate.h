@@ -80,6 +80,8 @@ void SetPinHere(Editor& ed, int slot);
 void ClearPinSlot(Editor& ed, int slot);
 void JumpToPin(Editor& ed, int slot);
 
+void GoToLastEdit(Editor& ed);
+
 
 void JumpToHotSymbol(Editor& ed, int index);
 

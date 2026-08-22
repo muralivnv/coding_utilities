@@ -73,6 +73,14 @@ struct Revision {
   Index last_child{-1};  // the redo branch
   Index serial{0};
   std::uint64_t stamp_ms{0};
+  // Which edit this was, counting every edit in the process. `stamp_ms` cannot
+  // answer that: it is milliseconds, and anything that edits two documents in
+  // one pass -- a replace across buffers, a reload, a format on save -- writes
+  // both inside the same one. Ordering steps from different documents by the
+  // clock would then come down to which buffer the loop reached first, which is
+  // stable, arbitrary, and wrong. `serial` cannot answer it either: it counts
+  // within one table and says nothing about another's.
+  std::uint64_t stamp_seq{0};
 };
 
 // The two read caches, in a base of their own so copying or moving a table

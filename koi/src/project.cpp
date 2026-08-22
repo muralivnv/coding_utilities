@@ -109,12 +109,15 @@ constexpr const char* kPruneSymbols =
 // v1: paths were stored in whatever spelling the writer happened to have.
 // v2: every path is a ProjectKey -- relative to the project root, or absolute
 //     when the file lies outside it.
+// v3: a pin is a file, not a position in one. `pins` is gone; `file_pins` holds
+//     the slot and the path, and the position comes from `files`.
 //
-// A v2 database is refused by a v1 koi, and that is the intent rather than an
-// accident to route around: a v1 build would go on writing cwd-relative paths
-// into tables the v2 build has just made consistent, and the two would fight
-// over every row. Refusing is the only answer that does not corrupt meaning.
-constexpr std::int64_t kSchemaVersion = 2;
+// An upgraded database is refused by every older koi, and that is the intent
+// rather than an accident to route around: a v1 build would go on writing
+// cwd-relative paths into tables v2 has just made consistent, and a v2 build
+// would go on writing positions into a table v3 has removed. Refusing is the
+// only answer that does not corrupt meaning.
+constexpr std::int64_t kSchemaVersion = 3;
 
 constexpr const char* kSchema =
     "CREATE TABLE IF NOT EXISTS files ("
@@ -136,11 +139,13 @@ constexpr const char* kSchema =
     "  to_file   TEXT    NOT NULL,"
     "  count     INTEGER NOT NULL DEFAULT 0,"
     "  PRIMARY KEY (from_file, to_file));"
-    "CREATE TABLE IF NOT EXISTS pins ("
+    // No line and no column. v2 pinned a position, and a position in a table
+    // nothing updates is wrong the moment anything is inserted above it -- the
+    // pin still names line 3503 after the function that was there moved. A pin
+    // names the file; where you were in it comes from `files` at read time.
+    "CREATE TABLE IF NOT EXISTS file_pins ("
     "  slot INTEGER PRIMARY KEY,"
-    "  file TEXT    NOT NULL,"
-    "  line INTEGER NOT NULL DEFAULT 1,"
-    "  col  INTEGER NOT NULL DEFAULT 0);"
+    "  file TEXT    NOT NULL);"
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
     // The order every recency read wants, so "the newest 20 files" reads 20
     // index entries instead of sorting the whole table. DESC so the scan runs
@@ -260,11 +265,7 @@ struct SqliteProject final : ProjectStore {
   }
 
   void RecordEdit(std::string_view path, Index line, Index column) override {
-    // Both take the caller's spelling, and each keys it once. Handing the key
-    // from one to the other would be the same thing; handing a key back into a
-    // keying function would not (see ProjectKey).
     BumpFile(path, line, column, true);
-    MovePinIn(path, line, column);
   }
 
   void RecordSymbolVisit(std::string_view symbol, std::string_view raw_file, Index line) override {
@@ -535,9 +536,16 @@ struct SqliteProject final : ProjectStore {
     return head;
   }
 
+  // The join is the whole feature: `file_pins` holds the file, `files` holds
+  // where that file was last left, and a pin is the two together. LEFT, so a
+  // file pinned before it was ever visited still comes back -- at line 1, which
+  // is where opening it would land anyway.
   std::vector<Pin> Pins() override {
     std::vector<Pin> out(static_cast<size_t>(kPinSlots));
-    Stmt stmt{db, "SELECT slot, file, line, col FROM pins WHERE slot BETWEEN 1 AND ?1;"};
+    Stmt stmt{db,
+              "SELECT p.slot, p.file, COALESCE(f.last_line, 1), COALESCE(f.last_col, 0)"
+              " FROM file_pins p LEFT JOIN files f ON f.path = p.file"
+              " WHERE p.slot BETWEEN 1 AND ?1;"};
     if (!stmt) return out;
     stmt.Int(1, kPinSlots);
     while (stmt.Step()) {
@@ -551,10 +559,10 @@ struct SqliteProject final : ProjectStore {
     return out;
   }
 
-  // Pinning a place is one change to the pin table, not two, so it is one
+  // Pinning a file is one change to the pin table, not two, so it is one
   // transaction.
   //
-  // The two statements below are a pair: the DELETE takes the file+line out of
+  // The two statements below are a pair: the DELETE takes the file out of
   // whatever slot it was in, and the INSERT puts it in the slot the user asked
   // for. Run as two implicit transactions -- which is what every unwrapped
   // statement is -- each commits on its own, and the gap between them is a
@@ -572,7 +580,7 @@ struct SqliteProject final : ProjectStore {
   // stay exactly as they were, which is the one outcome worth having when the
   // write cannot be made atomically. Anything that fails after it rolls back,
   // and every path here ends with the transaction closed.
-  void SetPin(int slot, std::string_view raw_file, Index line, Index column) override {
+  void SetPin(int slot, std::string_view raw_file) override {
     const std::string file = ProjectKey(raw_file);
     if ((slot < 1) || (slot > kPinSlots) || file.empty()) return;
     if (!ExecSql(db, "BEGIN IMMEDIATE;")) return;
@@ -581,16 +589,13 @@ struct SqliteProject final : ProjectStore {
     // Scoped so both statements are finalised before the COMMIT below, and so
     // neither outlives the transaction it belongs to.
     {
-      Stmt drop{db, "DELETE FROM pins WHERE file = ?1 AND line = ?2 AND slot <> ?3;"};
-      Stmt put{db, "INSERT OR REPLACE INTO pins(slot, file, line, col) VALUES(?1,?2,?3,?4);"};
+      Stmt drop{db, "DELETE FROM file_pins WHERE file = ?1 AND slot <> ?2;"};
+      Stmt put{db, "INSERT OR REPLACE INTO file_pins(slot, file) VALUES(?1,?2);"};
       if (drop && put) {
         drop.Text(1, file);
-        drop.Int(2, std::max<Index>(1, line));
-        drop.Int(3, slot);
+        drop.Int(2, slot);
         put.Int(1, slot);
         put.Text(2, file);
-        put.Int(3, std::max<Index>(1, line));
-        put.Int(4, std::max<Index>(0, column));
         // Both, in order, and both have to have run: a DELETE that failed is a
         // duplicate pin left behind, and an INSERT that failed with the DELETE
         // committed is the lost pin this transaction exists to prevent.
@@ -601,7 +606,7 @@ struct SqliteProject final : ProjectStore {
   }
 
   void ClearPin(int slot) override {
-    Stmt stmt{db, "DELETE FROM pins WHERE slot = ?1;"};
+    Stmt stmt{db, "DELETE FROM file_pins WHERE slot = ?1;"};
     if (!stmt) return;
     stmt.Int(1, slot);
     stmt.Run();
@@ -611,20 +616,6 @@ struct SqliteProject final : ProjectStore {
     Stmt stmt{db, "SELECT COUNT(*) FROM files;"};
     if (!stmt || !stmt.Step()) return 0;
     return static_cast<int>(stmt.Integer(0));
-  }
-
-  void MovePinIn(std::string_view raw, Index line, Index column) {
-    const std::string path = ProjectKey(raw);
-    if (path.empty()) return;
-    Stmt stmt{db,
-              "UPDATE pins SET line = ?1, col = ?2"
-              " WHERE file = ?3 AND (line <> ?1 OR col <> ?2)"
-              " AND (SELECT COUNT(*) FROM pins WHERE file = ?3) = 1;"};
-    if (!stmt) return;
-    stmt.Int(1, std::max<Index>(1, line));
-    stmt.Int(2, std::max<Index>(0, column));
-    stmt.Text(3, path);
-    stmt.Run();
   }
 };
 
@@ -759,6 +750,61 @@ bool MigratePathsToProjectKeys(sqlite3* db, std::string& error) {
     }
   }
 
+  if (!ExecSql(db, "COMMIT;", &why)) return fail(std::move(why));
+  return true;
+}
+
+// v2 pinned file+line+col, v3 pins the file. The line and column are dropped
+// rather than carried anywhere: they were a raw line number that no edit ever
+// adjusted, so the ones worth keeping are indistinguishable from the ones that
+// had rotted, and where the file was last left is a better answer than either.
+//
+// Two v2 pins in the same file collapse into one v3 pin -- the lower slot wins,
+// which is what the ORDER BY is for -- and the higher slot is left empty rather
+// than backfilled. Deciding what the user meant to put there is not this
+// function's business.
+//
+// A database with no `pins` table is not an error: that is every database
+// created by this build, and every one that has already run this migration. The
+// prepare fails, there is nothing to read, and the DROP below is a no-op.
+bool MigratePinsToFilePins(sqlite3* db, std::string& error) {
+  std::string why;
+  if (!ExecSql(db, "BEGIN IMMEDIATE;", &why)) {
+    error = "cannot migrate project database: " + why;
+    return false;
+  }
+  const auto fail = [db, &error](std::string what) {
+    ExecSql(db, "ROLLBACK;");
+    error = "cannot migrate project database: " + std::move(what);
+    return false;
+  };
+
+  std::vector<std::pair<std::int64_t, std::string>> pins;
+  {
+    Stmt read{db, "SELECT slot, file FROM pins ORDER BY slot;"};
+    if (read) {
+      std::unordered_set<std::string> seen;
+      while (read.Step()) {
+        std::string file = read.Column(1);
+        if (file.empty() || !seen.insert(file).second) continue;
+        pins.emplace_back(read.Integer(0), std::move(file));
+      }
+    }
+  }
+
+  {
+    Stmt write{db, "INSERT OR REPLACE INTO file_pins(slot, file) VALUES(?1,?2);"};
+    if (!write && !pins.empty()) return fail("cannot write file_pins");
+    for (const auto& [slot, file] : pins) {
+      if ((slot < 1) || (slot > kPinSlots)) continue;
+      write.Reset();
+      write.Int(1, slot);
+      write.Text(2, file);
+      if (!write.Run()) return fail("cannot write file_pins");
+    }
+  }
+
+  if (!ExecSql(db, "DROP TABLE IF EXISTS pins;", &why)) return fail(std::move(why));
   if (!ExecSql(db, "COMMIT;", &why)) return fail(std::move(why));
   return true;
 }
@@ -1048,19 +1094,27 @@ std::shared_ptr<ProjectStore> ProjectStore::Open(const fs::path& path, std::stri
     return nullptr;
   }
   // v1 stored two spellings of the same path: root-relative from the editor,
-  // cwd-relative from the file filter. v2 stores one. The rewrite runs once,
-  // gated on the stamp below, and only after the DDL -- a database that was
-  // empty a moment ago has the tables the migration reads.
+  // cwd-relative from the file filter. v2 stores one. v3 replaced pinned
+  // positions with pinned files. Both rewrites run once, gated on the stamp
+  // below, and only after the DDL -- a database that was empty a moment ago has
+  // the tables the migrations read.
   //
-  // `files` and `pins` are not touched. Both were only ever written from the
-  // editor's own root-relative spelling, so they are already what v2 wants;
-  // rows in `files` naming a path that no longer exists are a separate
-  // question, and the readers already skip them.
+  // The v1 rewrite leaves `files` and the pins alone. Both were only ever
+  // written from the editor's own root-relative spelling, so they are already
+  // what v2 wants; rows in `files` naming a path that no longer exists are a
+  // separate question, and the readers already skip them.
   //
-  // A migration that fails leaves the stamp at v1 on purpose: the next open
-  // tries again. Stamping v2 over half-rewritten rows would mean never trying
+  // A migration that fails leaves the stamp where it was on purpose: the next
+  // open tries again. Stamping over half-rewritten rows would mean never trying
   // again.
-  if ((found < kSchemaVersion) && !MigratePathsToProjectKeys(store->db, error)) return nullptr;
+  //
+  // Each step is gated on the version it upgrades *from*, not on
+  // kSchemaVersion. Gating both on the latest would re-run the v1 path-rekeying
+  // against a v2 database, which keys already-keyed paths a second time
+  // (ProjectKey is not idempotent below the root) and would quietly corrupt
+  // every row it touched.
+  if ((found < 2) && !MigratePathsToProjectKeys(store->db, error)) return nullptr;
+  if ((found < 3) && !MigratePinsToFilePins(store->db, error)) return nullptr;
   if (!StampSchemaVersion(store->db, kSchemaVersion, error)) return nullptr;
   // The only thing that ever bounded `files` and `symbols` was how much the
   // user had done, and that only goes up. Once per open, not per write: a

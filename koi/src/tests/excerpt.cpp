@@ -2437,8 +2437,13 @@ void ExcerptViewSources() {
     std::string db_error;
     ed.project = ProjectStore::Open(scratch.dir / "state.db", db_error);
     EXPECT_TRUE(ed.project != nullptr);
-    ed.project->SetPin(1, fa.string(), 3, 1);
-    ed.project->SetPin(2, fb.string(), 2, 1);
+    // A pin is a file, and the line it excerpts around is where that file was
+    // last left -- so the visit is what puts the excerpt on p3 and q2, not the
+    // pin.
+    ed.project->RecordVisit(fa.string(), 3, 1);
+    ed.project->RecordVisit(fb.string(), 2, 1);
+    ed.project->SetPin(1, fa.string());
+    ed.project->SetPin(2, fb.string());
 
     RunTypableCommand(ed, "pins-excerpt");
     EXPECT_TRUE(IsExcerptView(ed.doc));
@@ -2464,8 +2469,10 @@ void ExcerptViewSources() {
     std::string db_error;
     ed.project = ProjectStore::Open(scratch.dir / "slots.db", db_error);
     EXPECT_TRUE(ed.project != nullptr);
-    ed.project->SetPin(1, fa.string(), 2, 1);
-    ed.project->SetPin(3, fb.string(), 3, 1);
+    ed.project->RecordVisit(fa.string(), 2, 1);
+    ed.project->RecordVisit(fb.string(), 3, 1);
+    ed.project->SetPin(1, fa.string());
+    ed.project->SetPin(3, fb.string());
 
     RunTypableCommand(ed, "pins-excerpt");
     EXPECT_TRUE(IsExcerptView(ed.doc));
@@ -2545,6 +2552,44 @@ void ExcerptViewSources() {
     EXPECT_TRUE(view(ed).find("1 pin\n") != std::string::npos);
   }
 
+  TEST_CASE("pins view: it follows where you are, with nothing re-pinned");
+  {
+    const fs::path fa = scratch.Write("walk_a.txt", NumberedLines(20));
+    const fs::path fb = scratch.Write("walk_b.txt", NumberedLines(20));
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ed.settings.excerpt_context = 0;
+    std::string db_error;
+    ed.project = ProjectStore::Open(scratch.dir / "walk.db", db_error);
+    EXPECT_TRUE(ed.project != nullptr);
+
+    EXPECT_TRUE(OpenTarget(ed, fa.string() + ":3"));
+    RunTypableCommand(ed, "pin 1");
+    RunTypableCommand(ed, "pins-excerpt");
+    const std::size_t pins_at = ed.active;
+    EXPECT_TRUE(body(view(ed)).find("line-3\n") != std::string::npos);
+
+    // Move well away in the pinned file, and pin nothing. Leaving it is what
+    // the store hears about; the view is stale from that moment.
+    SwitchToBuffer(ed, FindFileBuffer(ed, fa));
+    RunCommands(ed, {"move_line_down", "move_line_down", "move_line_down", "move_line_down"});
+    EXPECT_TRUE(OpenTarget(ed, fb.string()));
+    SwitchToBuffer(ed, pins_at);
+    MaybeRefreshExcerptView(ed);
+    EXPECT_TRUE(body(view(ed)).find("line-7\n") != std::string::npos);
+    EXPECT_TRUE(body(view(ed)).find("line-3\n") == std::string::npos);
+    EXPECT_EQ(EditorInvariants(ed), std::string{});
+
+    // And with no visit in between: focusing the view asks again rather than
+    // waiting to be told.
+    SwitchToBuffer(ed, FindFileBuffer(ed, fa));
+    RunCommands(ed, {"move_line_down", "move_line_down"});
+    SwitchToBuffer(ed, pins_at);
+    MaybeRefreshExcerptView(ed);
+    EXPECT_TRUE(body(view(ed)).find("line-9\n") != std::string::npos);
+    EXPECT_TRUE(view(ed).find("1 pin\n") != std::string::npos);
+  }
+
   TEST_CASE("view names never answer for files: a file called `pins` survives");
   {
     const fs::path previous = fs::current_path();
@@ -2569,9 +2614,9 @@ void ExcerptViewSources() {
     ed.project = ProjectStore::Open(scratch.dir / "collide.db", db_error);
     EXPECT_TRUE(ed.project != nullptr);
 
-    EXPECT_TRUE(OpenTarget(ed, "pins"));
+    EXPECT_TRUE(OpenTarget(ed, "pins:2"));
     const std::size_t file_at = ed.active;
-    ed.project->SetPin(1, pins_file.string(), 2, 1);
+    ed.project->SetPin(1, pins_file.string());
 
     RunTypableCommand(ed, "pins-excerpt");
     EXPECT_TRUE(IsExcerptView(ed.doc));
@@ -2628,8 +2673,8 @@ void ExcerptViewSources() {
     std::string db_error;
     ed.project = ProjectStore::Open(scratch.dir / "lit.db", db_error);
     EXPECT_TRUE(ed.project != nullptr);
-    EXPECT_TRUE(OpenTarget(ed, f.string()));
-    ed.project->SetPin(1, f.string(), 3, 1);
+    EXPECT_TRUE(OpenTarget(ed, f.string() + ":3"));
+    ed.project->SetPin(1, f.string());
     RunTypableCommand(ed, "pins-excerpt");
     EXPECT_TRUE(std::ranges::find(ed.doc.excerpts.anchor_index, std::string{"TARGET"}) !=
                 ed.doc.excerpts.anchor_index.end());
@@ -2713,9 +2758,11 @@ void ExcerptViewSources() {
       files.push_back(scratch.Write("tp" + std::to_string(i) + ".txt",
                                     "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n"));
     }
-    EXPECT_TRUE(OpenTarget(ed, files[0].string()));
+    EXPECT_TRUE(OpenTarget(ed, files[0].string() + ":4"));
     for (int i = 0; i < 4; ++i) {
-      ed.project->SetPin(i + 1, files[static_cast<std::size_t>(i)].string(), 4, 1);
+      const std::string path = files[static_cast<std::size_t>(i)].string();
+      ed.project->RecordVisit(path, 4, 1);
+      ed.project->SetPin(i + 1, path);
     }
     RunTypableCommand(ed, "pins-excerpt");
     const std::size_t pins_at = ed.active;

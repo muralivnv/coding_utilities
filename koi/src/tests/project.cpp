@@ -92,37 +92,50 @@ void ProjectState() {
   const std::vector<FileVisit> recent = store->RecentFiles(0);
   EXPECT_EQ(recent.size(), 2u);
 
-  store->SetPin(1, a, 10, 3);
-  store->SetPin(2, b, 20, 5);
+  // A pin names a file. The line and column come back from `files`, which is
+  // why these are the positions the visits above recorded -- SetPin was never
+  // told a position and has none to store.
+  store->SetPin(1, a);
+  store->SetPin(2, b);
   std::vector<Pin> pins = store->Pins();
   EXPECT_EQ(pins.size(), static_cast<size_t>(kPinSlots));
   EXPECT_EQ(pins[0].path, a);
+  EXPECT_EQ(pins[0].line, 10);
+  EXPECT_EQ(pins[0].column, 3);
   EXPECT_EQ(pins[1].line, 20);
   EXPECT_TRUE(pins[3].path.empty());
 
-  store->SetPin(3, a, 10, 3);
+  // Pinning a file that is already pinned moves it rather than spending two
+  // slots on one file.
+  store->SetPin(3, a);
   pins = store->Pins();
   EXPECT_TRUE(pins[0].path.empty());
   EXPECT_EQ(pins[2].path, a);
-  store->SetPin(4, a, 99, 1);
-  pins = store->Pins();
-  EXPECT_EQ(pins[2].path, a);
-  EXPECT_EQ(pins[3].line, 99);
 
-  store->RecordEdit(a, 55, 1);
-  pins = store->Pins();
-  EXPECT_EQ(pins[2].line, 10);
-
-  store->ClearPin(4);
+  // The whole difference from a pinned position: nothing was re-pinned, and the
+  // pin moved anyway -- for an edit and for a plain visit alike. A second pin
+  // in the same file used to freeze both; there can no longer be one.
   store->RecordEdit(a, 55, 2);
   pins = store->Pins();
   EXPECT_EQ(pins[2].line, 55);
   EXPECT_EQ(pins[2].column, 2);
+  store->RecordVisit(a, 7, 1);
+  EXPECT_EQ(store->Pins()[2].line, 7);
+
+  // Pinned before it was ever visited: line 1, which is where opening it would
+  // land anyway.
+  store->SetPin(4, "unvisited.cpp");
+  pins = store->Pins();
+  EXPECT_EQ(pins[3].line, 1);
+  EXPECT_EQ(pins[3].column, 0);
+  store->ClearPin(4);
+  EXPECT_TRUE(store->Pins()[3].path.empty());
 
   store->ClearPin(2);
   EXPECT_TRUE(store->Pins()[1].path.empty());
-  store->SetPin(9, a, 1, 1);
+  store->SetPin(9, a);
   EXPECT_EQ(store->Pins().size(), static_cast<size_t>(kPinSlots));
+  EXPECT_EQ(store->Pins()[2].path, a);
 
   store->RecordSymbolVisit("Widget", a, 12);
   store->RecordSymbolVisit("Widget", a, 12);
@@ -283,7 +296,7 @@ void ProjectStoreRobustness() {
     EXPECT_TRUE(has_often);
 
     TEST_CASE("project store: pins are set, read back and cleared");
-    store->SetPin(1, "pinned.cpp", 5, 2);
+    store->SetPin(1, "pinned.cpp");
     bool found = false;
     for (const Pin& p : store->Pins()) {
       if (p.path.find("pinned.cpp") != std::string::npos) found = true;
@@ -305,8 +318,8 @@ void ProjectStoreRobustness() {
                        std::numeric_limits<Index>::max());
     store->RecordSymbolVisit("", "", 0);
     store->RecordCoVisit("a", "a");
-    store->SetPin(-1, "x", 1, 1);
-    store->SetPin(999999, "x", 1, 1);
+    store->SetPin(-1, "x");
+    store->SetPin(999999, "x");
     std::ignore = store->HotFiles(-1, "");
     std::ignore = store->HotSymbols(-1);
     std::ignore = store->HotSymbols(1000000);
@@ -402,7 +415,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
 
     // And what stands in its place is a real, stamped, writable database.
     EXPECT_TRUE(std::filesystem::exists(junk));
-    EXPECT_EQ(user_version(junk), std::int64_t{2});
+    EXPECT_EQ(user_version(junk), std::int64_t{3});
     if (store != nullptr) {
       // Pinned by its full path, read back by its key: the store keys every
       // path it is handed against the project root (schema v2), so a file
@@ -410,7 +423,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       // bare "after-recycle.cpp" would name a file beside the *test binary*,
       // not one in this project, and the store would rightly keep the absolute
       // path that spelling means.
-      store->SetPin(1, (scratch.dir / "after-recycle.cpp").string(), 5, 2);
+      store->SetPin(1, (scratch.dir / "after-recycle.cpp").string());
       const std::vector<Pin> pins = store->Pins();
       EXPECT_TRUE(!pins.empty());
       if (!pins.empty()) EXPECT_EQ(pins.front().path, std::string{"after-recycle.cpp"});
@@ -436,7 +449,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       std::string error;
       const std::shared_ptr<ProjectStore> seed = ProjectStore::Open(ro, error);
       EXPECT_TRUE(seed != nullptr);
-      if (seed != nullptr) seed->SetPin(1, (scratch.dir / "seeded.cpp").string(), 3, 1);
+      if (seed != nullptr) seed->SetPin(1, (scratch.dir / "seeded.cpp").string());
     }
     const std::filesystem::path junk_ro = scratch.dir / "readonly-junk.db";
     const std::string junk_ro_bytes(8192, 'Q');
@@ -485,7 +498,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       EXPECT_TRUE(!error.empty());
       EXPECT_TRUE(std::filesystem::exists(junk_ro));
       EXPECT_TRUE(bytes_of(beside(junk_ro, ".corrupt")) == junk_ro_bytes);
-      EXPECT_EQ(user_version(junk_ro), std::int64_t{2});
+      EXPECT_EQ(user_version(junk_ro), std::int64_t{3});
 
       // SQLite gives the write-ahead log and its index the mode of the database
       // they belong to, so the read-only open left 0400 siblings behind; a
@@ -523,7 +536,8 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
     EXPECT_TRUE(error.empty());
     if (store == nullptr) return;
 
-    store->SetPin(2, (scratch.dir / "pinned.cpp").string(), 7, 4);
+    store->RecordVisit((scratch.dir / "pinned.cpp").string(), 7, 4);
+    store->SetPin(2, (scratch.dir / "pinned.cpp").string());
     const std::vector<Pin> pins = store->Pins();
     EXPECT_TRUE(pins.size() >= 2);
     if (pins.size() >= 2) {
@@ -533,7 +547,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
     }
     // Stamped only after the tables exist: a database claiming v2 with nothing
     // in it would be refused by no one and work for no one.
-    EXPECT_EQ(user_version(fresh), std::int64_t{2});
+    EXPECT_EQ(user_version(fresh), std::int64_t{3});
   }
 
   TEST_CASE("project store: reopening a healthy database still works");
@@ -546,16 +560,16 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       const std::vector<Pin> pins = again->Pins();
       EXPECT_TRUE(pins.size() >= 2);
       if (pins.size() >= 2) EXPECT_EQ(pins[1].path, std::string{"pinned.cpp"});
-      again->SetPin(3, (scratch.dir / "later.cpp").string(), 1, 0);
+      again->SetPin(3, (scratch.dir / "later.cpp").string());
       EXPECT_EQ(again->Pins()[2].path, std::string{"later.cpp"});
     }
-    EXPECT_EQ(user_version(fresh), std::int64_t{2});
+    EXPECT_EQ(user_version(fresh), std::int64_t{3});
   }
 
   TEST_CASE("project store: a pin is one transaction, and no path leaves one open");
   {
-    // SetPin is a DELETE (take this file+line out of whatever slot holds it)
-    // and an INSERT (put it in the slot asked for), and the two are one change.
+    // SetPin is a DELETE (take this file out of whatever slot holds it) and an
+    // INSERT (put it in the slot asked for), and the two are one change.
     // Nothing here can crash the process between them to prove the atomicity
     // directly -- that needs fault injection inside SQLite -- so what is checked
     // is everything the transaction is observable through from outside: the
@@ -585,10 +599,10 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
         return stmt.Step() ? stmt.Integer(0) : std::int64_t{-1};
       };
       const auto rows_for = [&ask](const std::string& file) {
-        return ask("SELECT COUNT(*) FROM pins WHERE file = ?1;", file);
+        return ask("SELECT COUNT(*) FROM file_pins WHERE file = ?1;", file);
       };
       const auto slot_of = [&ask](const std::string& file) {
-        return ask("SELECT COALESCE(MIN(slot), 0) FROM pins WHERE file = ?1;", file);
+        return ask("SELECT COALESCE(MIN(slot), 0) FROM file_pins WHERE file = ?1;", file);
       };
       // Takes the write lock, and gives it straight back. False means somebody
       // else is holding it, and the only other connection to this database is
@@ -600,20 +614,19 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       };
 
       const std::string file = (scratch.dir / "kept.cpp").string();
-      store->SetPin(1, file, 10, 3);
+      store->SetPin(1, file);
       const std::string key = store->Pins()[0].path;
       EXPECT_EQ(key, std::string{"kept.cpp"});
       EXPECT_EQ(rows_for(key), std::int64_t{1});
       EXPECT_EQ(slot_of(key), std::int64_t{1});
       EXPECT_TRUE(lock_is_free());
 
-      // The dedup half: the same file and line pinned into another slot moves
-      // the pin, and the move is one row before and one row after. A window
-      // between the DELETE and the INSERT is a moment when it is zero rows.
-      store->SetPin(4, file, 10, 7);
+      // The dedup half: the same file pinned into another slot moves the pin,
+      // and the move is one row before and one row after. A window between the
+      // DELETE and the INSERT is a moment when it is zero rows.
+      store->SetPin(4, file);
       EXPECT_TRUE(store->Pins()[0].path.empty());
       EXPECT_EQ(store->Pins()[3].path, key);
-      EXPECT_EQ(store->Pins()[3].column, Index{7});
       EXPECT_EQ(rows_for(key), std::int64_t{1});
       EXPECT_EQ(slot_of(key), std::int64_t{4});
       EXPECT_TRUE(lock_is_free());
@@ -623,10 +636,10 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       // transaction has already begun by then, so this is the rollback -- and
       // if the rollback were missing, the store would sit on the write lock for
       // the rest of the session and `lock_is_free` below would say so.
-      EXPECT_TRUE(ExecSql(other, "ALTER TABLE pins RENAME TO pins_hidden;"));
-      store->SetPin(2, (scratch.dir / "never-pinned.cpp").string(), 1, 1);
+      EXPECT_TRUE(ExecSql(other, "ALTER TABLE file_pins RENAME TO pins_hidden;"));
+      store->SetPin(2, (scratch.dir / "never-pinned.cpp").string());
       EXPECT_TRUE(lock_is_free());
-      EXPECT_TRUE(ExecSql(other, "ALTER TABLE pins_hidden RENAME TO pins;"));
+      EXPECT_TRUE(ExecSql(other, "ALTER TABLE pins_hidden RENAME TO file_pins;"));
 
       // Nothing the failed call touched: the table is exactly as it was, and
       // the store is still usable.
@@ -634,7 +647,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       EXPECT_EQ(slot_of(key), std::int64_t{4});
       EXPECT_EQ(store->Pins()[3].path, key);
       EXPECT_TRUE(store->Pins()[1].path.empty());
-      store->SetPin(2, (scratch.dir / "after.cpp").string(), 2, 0);
+      store->SetPin(2, (scratch.dir / "after.cpp").string());
       EXPECT_EQ(store->Pins()[1].path, std::string{"after.cpp"});
       EXPECT_TRUE(lock_is_free());
 
@@ -751,7 +764,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       EXPECT_EQ(scalar("SELECT COUNT(*) FROM pragma_table_info('files');"), std::int64_t{2});
       // Nothing this build knows how to create was created.
       EXPECT_EQ(scalar("SELECT COUNT(*) FROM sqlite_master WHERE name IN"
-                       " ('symbols', 'co_visits', 'pins', 'meta', 'files_by_ts');"),
+                       " ('symbols', 'co_visits', 'file_pins', 'meta', 'files_by_ts');"),
                 std::int64_t{0});
       sqlite3_close(db);
     }
@@ -763,13 +776,13 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
     const std::shared_ptr<ProjectStore> store = ProjectStore::Open(current, ok_error);
     EXPECT_TRUE(store != nullptr);
     EXPECT_TRUE(ok_error.empty());
-    EXPECT_EQ(user_version(current), std::int64_t{2});
+    EXPECT_EQ(user_version(current), std::int64_t{3});
     {
       sqlite3* db = nullptr;
       EXPECT_EQ(sqlite3_open(current.c_str(), &db), SQLITE_OK);
       {
         Stmt stmt{db, "SELECT COUNT(*) FROM sqlite_master WHERE name IN"
-                      " ('files', 'symbols', 'co_visits', 'pins', 'meta', 'files_by_ts');"};
+                      " ('files', 'symbols', 'co_visits', 'file_pins', 'meta', 'files_by_ts');"};
         EXPECT_TRUE(stmt && stmt.Step());
         EXPECT_EQ(stmt ? stmt.Integer(0) : std::int64_t{-1}, std::int64_t{6});
       }
@@ -806,7 +819,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       std::string seed_error;
       const std::shared_ptr<ProjectStore> seed = ProjectStore::Open(locked, seed_error);
       EXPECT_TRUE(seed != nullptr);
-      if (seed != nullptr) seed->SetPin(1, (scratch.dir / "locked-away.cpp").string(), 9, 2);
+      if (seed != nullptr) seed->SetPin(1, (scratch.dir / "locked-away.cpp").string());
     }
     // WAL readers do not block, so drop to a rollback journal first; then an
     // exclusive transaction shuts everyone else out, which is exactly what a
@@ -862,7 +875,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       std::string seed_error;
       const std::shared_ptr<ProjectStore> seed = ProjectStore::Open(sidecar, seed_error);
       EXPECT_TRUE(seed != nullptr);
-      if (seed != nullptr) seed->SetPin(1, (scratch.dir / "sidecar.cpp").string(), 4, 1);
+      if (seed != nullptr) seed->SetPin(1, (scratch.dir / "sidecar.cpp").string());
     }
     // Closing the last connection checkpoints the log back into the database
     // and removes it, so the pin above is in the main file before we start.
@@ -1115,7 +1128,7 @@ void DeepProjectPathsStillGetAStateDirectory() {
     EXPECT_TRUE(store != nullptr);
     EXPECT_TRUE(error.empty());
     if (store != nullptr) {
-      store->SetPin(1, (deep / "deep.cpp").string(), 7, 2);
+      store->SetPin(1, (deep / "deep.cpp").string());
       EXPECT_EQ(store->Pins()[0].path, std::string{"deep.cpp"});
     }
   }
@@ -1385,6 +1398,73 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
     EXPECT_EQ(rows.back().path, std::string{"other.cpp"});
   }
 
+  TEST_CASE("project store: a v2 database gives up its pinned positions, keeps its files");
+  {
+    // The upgrade every existing database actually takes, and the one the v1
+    // test above cannot stand in for: the path rewrite must NOT run again here
+    // (re-keying an already-keyed path damages it), while the pin conversion
+    // must. Gating both steps on kSchemaVersion instead of on the version each
+    // one upgrades *from* is exactly how that goes wrong.
+    const std::filesystem::path v2 = scratch.dir / "v2.db";
+    {
+      sqlite3* raw = nullptr;
+      EXPECT_EQ(sqlite3_open(v2.c_str(), &raw), SQLITE_OK);
+      EXPECT_TRUE(ExecSql(
+          raw,
+          "CREATE TABLE files (path TEXT PRIMARY KEY, visits INTEGER NOT NULL DEFAULT 0,"
+          " edits INTEGER NOT NULL DEFAULT 0, last_ts REAL NOT NULL DEFAULT 0,"
+          " last_line INTEGER NOT NULL DEFAULT 1, last_col INTEGER NOT NULL DEFAULT 0);"
+          "CREATE TABLE symbols (file TEXT NOT NULL, symbol TEXT NOT NULL,"
+          " visits INTEGER NOT NULL DEFAULT 0, last_ts REAL NOT NULL DEFAULT 0,"
+          " line INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (file, symbol));"
+          "CREATE TABLE co_visits (from_file TEXT NOT NULL, to_file TEXT NOT NULL,"
+          " count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (from_file, to_file));"
+          "CREATE TABLE pins (slot INTEGER PRIMARY KEY, file TEXT NOT NULL,"
+          " line INTEGER NOT NULL DEFAULT 1, col INTEGER NOT NULL DEFAULT 0);"
+          "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+          // Two pins in one file, 61 lines apart, and a third elsewhere: the
+          // shape a real v2 database was found in.
+          "INSERT INTO pins VALUES(1, 'sub/file.cpp', 3503, 1);"
+          "INSERT INTO pins VALUES(3, 'sub/file.cpp', 3442, 1);"
+          "INSERT INTO pins VALUES(4, 'sub/other.cpp', 12, 0);"
+          "INSERT INTO files VALUES('sub/file.cpp', 4, 1, 500.0, 90, 6);"
+          "INSERT INTO symbols VALUES('sub/file.cpp', 'Sym', 2, 100.0, 7);"
+          "INSERT INTO co_visits VALUES('sub/file.cpp', 'sub/other.cpp', 5);"
+          "PRAGMA user_version = 2;"));
+      sqlite3_close(raw);
+    }
+
+    std::string error{"unset"};
+    const std::shared_ptr<ProjectStore> store = ProjectStore::Open(v2, error);
+    EXPECT_TRUE(store != nullptr);
+    EXPECT_TRUE(error.empty());
+    if (store == nullptr) return;
+    EXPECT_EQ(scalar(v2, "PRAGMA user_version;"), std::int64_t{3});
+
+    // The two pins in one file collapse to the lower slot; the higher is left
+    // empty rather than backfilled with a guess.
+    const std::vector<Pin> pins = store->Pins();
+    EXPECT_EQ(pins[0].path, std::string{"sub/file.cpp"});
+    EXPECT_TRUE(pins[2].path.empty());
+    EXPECT_EQ(pins[3].path, std::string{"sub/other.cpp"});
+    // Neither 3503 nor 3442 survives: the position comes from `files` now, and
+    // for a file that was never visited there is none.
+    EXPECT_EQ(pins[0].line, Index{90});
+    EXPECT_EQ(pins[0].column, Index{6});
+    EXPECT_EQ(pins[3].line, Index{1});
+    EXPECT_EQ(scalar(v2, "SELECT COUNT(*) FROM sqlite_master"
+                         " WHERE type = 'table' AND name = 'pins';"),
+              std::int64_t{0});
+
+    // Untouched, which is the half a wrong gate would break: every one of these
+    // is already keyed, and a second rewrite would prefix them again.
+    EXPECT_EQ(text_of(v2, "SELECT path FROM files;"), std::string{"sub/file.cpp"});
+    EXPECT_EQ(text_of(v2, "SELECT file FROM symbols;"), std::string{"sub/file.cpp"});
+    EXPECT_EQ(text_of(v2, "SELECT from_file || ' -> ' || to_file FROM co_visits;"),
+              std::string{"sub/file.cpp -> sub/other.cpp"});
+    EXPECT_EQ(scalar(v2, "SELECT visits FROM files;"), std::int64_t{4});
+  }
+
   TEST_CASE("project store: a v1 database is rewritten into one spelling, once");
   {
     const std::filesystem::path legacy = scratch.dir / "legacy.db";
@@ -1463,7 +1543,7 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
     EXPECT_TRUE(error.empty());
     if (store == nullptr) return;
 
-    EXPECT_EQ(scalar(legacy, "PRAGMA user_version;"), std::int64_t{2});
+    EXPECT_EQ(scalar(legacy, "PRAGMA user_version;"), std::int64_t{3});
 
     EXPECT_EQ(scalar(legacy, "SELECT COUNT(*) FROM symbols;"), std::int64_t{2});
     EXPECT_EQ(scalar(legacy, "SELECT COUNT(*) FROM symbols WHERE symbol = 'Ghost';"),
@@ -1495,8 +1575,16 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
     EXPECT_EQ(text_of(legacy, "SELECT path FROM files;"), std::string{"sub/file.cpp"});
     EXPECT_EQ(scalar(legacy, "SELECT visits FROM files;"), std::int64_t{4});
     EXPECT_EQ(scalar(legacy, "SELECT last_line FROM files;"), std::int64_t{12});
-    EXPECT_EQ(text_of(legacy, "SELECT file FROM pins;"), std::string{"sub/other.cpp"});
-    EXPECT_EQ(scalar(legacy, "SELECT line FROM pins;"), std::int64_t{9});
+    // v3 keeps the file and drops the line: the slot survives, the position it
+    // named does not, and the position it reports now is the one `files` has --
+    // none, for this file, so line 1.
+    EXPECT_EQ(scalar(legacy, "SELECT COUNT(*) FROM sqlite_master"
+                             " WHERE type = 'table' AND name = 'pins';"),
+              std::int64_t{0});
+    EXPECT_EQ(text_of(legacy, "SELECT file FROM file_pins;"), std::string{"sub/other.cpp"});
+    EXPECT_EQ(scalar(legacy, "SELECT slot FROM file_pins;"), std::int64_t{1});
+    EXPECT_EQ(store->Pins()[0].path, std::string{"sub/other.cpp"});
+    EXPECT_EQ(store->Pins()[0].line, Index{1});
 
     TEST_CASE("project store: the rewrite is gated on the stamp, not repeated");
     {
@@ -1510,7 +1598,7 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
       const std::shared_ptr<ProjectStore> again = ProjectStore::Open(legacy, again_error);
       EXPECT_TRUE(again != nullptr);
       EXPECT_TRUE(again_error.empty());
-      EXPECT_EQ(scalar(legacy, "PRAGMA user_version;"), std::int64_t{2});
+      EXPECT_EQ(scalar(legacy, "PRAGMA user_version;"), std::int64_t{3});
       EXPECT_EQ(scalar(legacy, "SELECT COUNT(*) FROM symbols;"), std::int64_t{2});
       EXPECT_EQ(text_of(legacy, "SELECT file FROM symbols WHERE symbol = 'Sym';"),
                 std::string{"sub/file.cpp"});
@@ -1520,21 +1608,25 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
       if (again != nullptr) EXPECT_EQ(again->HotSymbols(10).size(), 2u);
     }
 
-    TEST_CASE("project store: a v2 database is refused by a build that knows only v1");
+    TEST_CASE("project store: an upgraded database is refused by every older build");
     {
       // Deliberate, and the only safe answer: a v1 build would go on writing
-      // cwd-relative paths into tables this one has just made consistent. There
-      // is no old binary to run here, so the gate is asked directly.
+      // cwd-relative paths into tables this one has just made consistent, and a
+      // v2 build would write positions into a pins table that no longer exists.
+      // There is no old binary to run here, so the gate is asked directly.
       sqlite3* reader = nullptr;
       EXPECT_EQ(sqlite3_open(legacy.c_str(), &reader), SQLITE_OK);
       std::string why{"unset"};
       std::int64_t found = -1;
       EXPECT_TRUE(CheckSchemaVersion(reader, 1, why, &found) == Schema::kTooNew);
-      EXPECT_EQ(found, std::int64_t{2});
+      EXPECT_EQ(found, std::int64_t{3});
       EXPECT_TRUE(!why.empty());
-      // And v2 itself reads it, which is the other half of the same statement.
       why = "unset";
-      EXPECT_TRUE(CheckSchemaVersion(reader, 2, why, &found) == Schema::kUsable);
+      EXPECT_TRUE(CheckSchemaVersion(reader, 2, why, &found) == Schema::kTooNew);
+      EXPECT_TRUE(!why.empty());
+      // And v3 itself reads it, which is the other half of the same statement.
+      why = "unset";
+      EXPECT_TRUE(CheckSchemaVersion(reader, 3, why, &found) == Schema::kUsable);
       sqlite3_close(reader);
     }
   }
@@ -1629,7 +1721,7 @@ void StorePathsResolveAgainstTheRootFromBelowIt() {
 
   TEST_CASE("navigation: a pin jump opens the file the pin names");
   {
-    store->SetPin(1, "file.cpp", 1, 1);
+    store->SetPin(1, "file.cpp");
     Editor ed = editor();
     JumpToPin(ed, 1);
     EXPECT_TRUE(opened(ed, sub / "file.cpp"));
@@ -1668,7 +1760,7 @@ void StorePathsResolveAgainstTheRootFromBelowIt() {
 
   TEST_CASE("navigation: a file outside the project is keyed absolute and still opens");
   {
-    store->SetPin(2, outside.string(), 1, 1);
+    store->SetPin(2, outside.string());
     Editor ed = editor();
     JumpToPin(ed, 2);
     EXPECT_TRUE(opened(ed, outside));
@@ -1908,7 +2000,7 @@ void VisitReadsAreBoundedAndTheTableIsPruned() {
     EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'"
                          " AND name = 'files_by_ts';"),
               std::int64_t{1});
-    EXPECT_EQ(scalar(db, "PRAGMA user_version;"), std::int64_t{2});
+    EXPECT_EQ(scalar(db, "PRAGMA user_version;"), std::int64_t{3});
   }
 }
 
@@ -2243,7 +2335,7 @@ void SymbolReadsAreBoundedAndTheTableIsPruned() {
     EXPECT_EQ(scalar(prune_db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'"
                                " AND tbl_name = 'symbols' AND name NOT LIKE 'sqlite_%';"),
               std::int64_t{0});
-    EXPECT_EQ(scalar(prune_db, "PRAGMA user_version;"), std::int64_t{2});
+    EXPECT_EQ(scalar(prune_db, "PRAGMA user_version;"), std::int64_t{3});
   }
 }
 

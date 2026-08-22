@@ -1149,10 +1149,13 @@ void Windows() {
 
     RunTypableCommand(ed, "pin 3");
     EXPECT_TRUE(ed.status.find("pinned ") != std::string::npos);
-    EXPECT_TRUE(ed.status.find(":1 to 3") != std::string::npos);
+    EXPECT_TRUE(ed.status.find("pf.txt to 3") != std::string::npos);
+    // No line in the message, because there is no line in the pin. Pinning the
+    // same file again from a different place is still a replacement -- of the
+    // slot, which is all a pin is.
     RunCommands(ed, {"move_line_down"});
     RunTypableCommand(ed, "pin 3");
-    EXPECT_TRUE(ed.status.find(":2 to 3") != std::string::npos);
+    EXPECT_TRUE(ed.status.find("pf.txt to 3") != std::string::npos);
     EXPECT_TRUE(ed.status.find("replaced the old pin") != std::string::npos);
     RunTypableCommand(ed, "clear-pin 3");
     EXPECT_EQ(ed.status.text(), std::string{"cleared pin 3"});

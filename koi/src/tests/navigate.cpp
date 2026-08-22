@@ -386,4 +386,138 @@ void PickerCommandShape() {
   }
 }
 
+
+// Pins name files, not positions, so what a jump has to get right is the
+// position it derives -- and there are two sources for it, in this order: the
+// live cursor of an open buffer, and `files.last_line` for one that is closed.
+void FilePinsLandWhereYouLeft() {
+  TEST_CASE("pins: a jump lands where you last were, not where you pinned");
+
+  const Scratch scratch{"koi-file-pins"};
+  const std::filesystem::path a = scratch.Write("fa.cpp", NumberedLines(40));
+  const std::filesystem::path b = scratch.Write("fb.cpp", NumberedLines(40));
+  Editor ed;
+  ed.theme = BuiltinTheme();
+  std::string db_error;
+  ed.project = ProjectStore::Open(scratch.dir / "fp.db", db_error);
+  EXPECT_TRUE(ed.project != nullptr);
+  if (ed.project == nullptr) return;
+
+  EXPECT_TRUE(OpenTarget(ed, a.string() + ":5"));
+  RunTypableCommand(ed, "pin 1");
+  EXPECT_TRUE(OpenTarget(ed, b.string() + ":9"));
+  RunTypableCommand(ed, "pin 2");
+
+  // The pin was placed at line 5 and the cursor has moved a long way since.
+  // A pinned *position* would still say 5.
+  EXPECT_TRUE(OpenTarget(ed, a.string() + ":30"));
+  RunTypableCommand(ed, "jump-pin 2");
+  EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{8});
+  RunTypableCommand(ed, "jump-pin 1");
+  EXPECT_EQ(ed.doc.file.filename().string(), std::string{"fa.cpp"});
+  EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{29});
+
+  // And it keeps following. Nothing is re-pinned here.
+  RunCommands(ed, {"move_line_down", "move_line_down"});
+  RunTypableCommand(ed, "jump-pin 2");
+  RunTypableCommand(ed, "jump-pin 1");
+  EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{31});
+
+  TEST_CASE("pins: a closed file falls back to what the store last recorded");
+  {
+    // The live cursor is the better answer only while there is one. A fresh
+    // editor sharing the same database has no buffers, so this is the store's
+    // half of the same jump -- and it has to agree with where the other editor
+    // left off.
+    Editor cold;
+    cold.theme = BuiltinTheme();
+    cold.project = ed.project;
+    ResetToOriginal(cold.doc.table, "");
+    cold.doc.selections.Set(MinWidth1(cold.doc.table, Selection{0, 0, -1}));
+    RunTypableCommand(cold, "jump-pin 1");
+    EXPECT_EQ(cold.doc.file.filename().string(), std::string{"fa.cpp"});
+    EXPECT_EQ(LineAt(cold.doc.table, Cur(cold)), Index{31});
+  }
+
+  TEST_CASE("pins: an unset slot says so and moves nothing");
+  {
+    const std::filesystem::path was = ed.doc.file;
+    const Index at = Cur(ed);
+    RunTypableCommand(ed, "jump-pin 4");
+    EXPECT_TRUE(ed.status.find("pin 4 is not set") != std::string::npos);
+    EXPECT_EQ(ed.doc.file, was);
+    EXPECT_EQ(Cur(ed), at);
+  }
+}
+
+// goto_last_edit reads the revision trees rather than any stored position, so
+// what it has to get right is which buffer holds the newest step and where that
+// step left the primary cursor.
+void LastEditIsFoundAcrossFiles() {
+  TEST_CASE("goto_last_edit: the newest edit wins, whichever file it is in");
+
+  const Scratch scratch{"koi-last-edit"};
+  const std::filesystem::path a = scratch.Write("ea.cpp", NumberedLines(30));
+  const std::filesystem::path b = scratch.Write("eb.cpp", NumberedLines(30));
+  Editor ed;
+  ed.theme = BuiltinTheme();
+
+  RunTypableCommand(ed, "goto_last_edit");
+  EXPECT_TRUE(OpenTarget(ed, a.string()));
+  RunCommands(ed, {"goto_last_edit"});
+  EXPECT_TRUE(ed.status.find("nothing has been edited yet") != std::string::npos);
+
+  EXPECT_TRUE(OpenTarget(ed, a.string() + ":6"));
+  TypeInto(ed, 'X');
+  EXPECT_TRUE(OpenTarget(ed, b.string() + ":20"));
+  TypeInto(ed, 'Y');
+
+  // Back to a, well away from either edit, and then home again. The newest
+  // edit is b's, so that is where this goes -- across the file boundary,
+  // without either file having been pinned or recorded anywhere.
+  EXPECT_TRUE(OpenTarget(ed, a.string() + ":2"));
+  RunCommands(ed, {"goto_last_edit"});
+  EXPECT_EQ(ed.doc.file.filename().string(), std::string{"eb.cpp"});
+  EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{19});
+
+  TEST_CASE("goto_last_edit: an older edit takes over once the newest is undone");
+  {
+    // `current` walks back with the undo, and the step it lands on is a's --
+    // which is the right answer, because after the undo b's edit no longer
+    // exists to go back to.
+    RunCommands(ed, {"undo"});
+    RunCommands(ed, {"goto_last_edit"});
+    EXPECT_EQ(ed.doc.file.filename().string(), std::string{"ea.cpp"});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{5});
+  }
+
+  TEST_CASE("goto_last_edit: it is the primary cursor that is followed");
+  {
+    EXPECT_TRUE(OpenTarget(ed, b.string() + ":3"));
+    RunCommands(ed, {"copy_selection_on_next_line", "copy_selection_on_next_line"});
+    EXPECT_TRUE(ed.doc.selections.Ranges().size() >= 3u);
+    const std::size_t primary = ed.doc.selections.PrimaryIndex();
+    TypeInto(ed, 'Z');
+    const Index want = LineAt(ed.doc.table, ed.doc.selections.Ranges()[primary].head);
+    EXPECT_TRUE(OpenTarget(ed, a.string() + ":28"));
+    RunCommands(ed, {"goto_last_edit"});
+    EXPECT_EQ(ed.doc.file.filename().string(), std::string{"eb.cpp"});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), want);
+  }
+
+  TEST_CASE("goto_last_edit: a jump back to it is a jump, not a scroll");
+  {
+    // It goes through the same door every cross-file move does, so `[[` comes
+    // back from it -- which needs a jump store to have anywhere to record.
+    std::string jump_error;
+    ed.jumps = JumpStore::Open(scratch.dir / "jumps.db", "pane-edit", jump_error);
+    EXPECT_TRUE(ed.jumps != nullptr);
+    EXPECT_TRUE(OpenTarget(ed, a.string() + ":12"));
+    RunCommands(ed, {"goto_last_edit"});
+    EXPECT_EQ(ed.doc.file.filename().string(), std::string{"eb.cpp"});
+    RunCommands(ed, {"jump_backward"});
+    EXPECT_EQ(ed.doc.file.filename().string(), std::string{"ea.cpp"});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{11});
+  }
+}
 }  // namespace koi

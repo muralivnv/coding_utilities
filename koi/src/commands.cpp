@@ -1949,6 +1949,7 @@ constexpr std::array kCommands = std::to_array<CommandDef>({
     {"goto_excerpt_source", KOI_CMD({ GotoExcerptSource(ed); }), "open the file this excerpt came from"},
     {"goto_file_start", KOI_CMD({ RecordJump(ed); DoMove(ed, Motion::kDocStart, false); }), "go to the start of the file"},
     {"goto_first_nonwhitespace", KOI_CMD({ DoMove(ed, Motion::kLineFirstNonBlank, false); }), "go to the first non-blank"},
+    {"goto_last_edit", KOI_CMD({ GoToLastEdit(ed); }), "go to the most recent edit, in whichever file it was"},
     {"goto_last_line", KOI_CMD({ RecordJump(ed); DoMove(ed, Motion::kLastLine, false); }), "go to the last line"},
     {"goto_line_end", KOI_CMD({ DoMove(ed, Motion::kLineEnd, false); }), "go to the end of the line"},
     {"goto_line_start", KOI_CMD({ DoMove(ed, Motion::kLineStart, false); }), "go to the start of the line"},
@@ -4202,11 +4203,11 @@ constexpr std::array kTypable = std::to_array<TypableDef>({
      [](Editor& ed, std::string_view) { WatchView(ed); }},
     {"unwatch", "", "stop re-running this view's command on every save",
      [](Editor& ed, std::string_view) { UnwatchView(ed); }},
-    {"pins-excerpt", "", "every pinned position, as excerpts in one view",
+    {"pins-excerpt", "", "every pinned file, excerpted where you last were in it",
      [](Editor& ed, std::string_view) { PinExcerpts(ed); }},
     {"messages", "", "recent status messages, as a view",
      [](Editor& ed, std::string_view) { MessagesView(ed); }},
-    {"pin", "<1-4>", "pin this position to a slot",
+    {"pin", "<1-4>", "pin this file to a slot",
      [](Editor& ed, std::string_view rest) {
        if (int v = 0; SlotOf(ed, "pin", rest, v)) SetPinHere(ed, v);
      }},
@@ -4214,7 +4215,7 @@ constexpr std::array kTypable = std::to_array<TypableDef>({
      [](Editor& ed, std::string_view rest) {
        if (int v = 0; SlotOf(ed, "clear-pin", rest, v)) ClearPinSlot(ed, v);
      }},
-    {"jump-pin", "<1-4>", "go to a pinned position",
+    {"jump-pin", "<1-4>", "go to a pinned file, where you last were in it",
      [](Editor& ed, std::string_view rest) {
        if (int v = 0; SlotOf(ed, "jump-pin", rest, v)) JumpToPin(ed, v);
      }},

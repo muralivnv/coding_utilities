@@ -129,6 +129,8 @@ void FilePickerRanking();
 void FileFilter();
 void BufferPickerRows();
 void PickerCommandShape();
+void FilePinsLandWhereYouLeft();
+void LastEditIsFoundAcrossFiles();
 
 // overview.cpp -- the overview mode
 void OverviewMarksTheSectionsItCouldNotFinish();

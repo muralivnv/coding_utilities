@@ -331,6 +331,25 @@ std::string SelectedWord(const Editor& ed) {
   return std::string{Trim(text, " \t\r\n")};
 }
 
+// Where jumping to `path` should land, given that the store only learns your
+// position at the handful of places that call RecordVisitHere. A buffer that is
+// already open knows better than the store does -- you can have moved half the
+// file since the last visit was recorded, and switching panes records nothing
+// at all -- so the live cursor wins whenever there is one.
+//
+// `path` is the resolved spelling, which is what Document::file holds.
+bool LiveCursorIn(const Editor& ed, std::string_view path, Index& line, Index& column) {
+  const std::size_t at = FindFileBuffer(ed, fs::path{path});
+  if (at >= BufferCount(ed)) return false;
+  const Document& doc = BufferAt(ed, at);
+  if (IsExcerptView(doc)) return false;
+  const Index cursor = CursorOf(doc.table, doc.selections.Primary());
+  const Index at_line = LineAt(doc.table, cursor);
+  line = at_line + 1;
+  column = cursor - LineStart(doc.table, at_line) + 1;
+  return true;
+}
+
 void OpenPin(Editor& ed, const Pin& pin, std::string_view what) {
   if (pin.path.empty()) {
     ed.status = std::string{what} + " is not set";
@@ -338,7 +357,11 @@ void OpenPin(Editor& ed, const Pin& pin, std::string_view what) {
   }
   // The pin came out of the store, so it is spelled against the project root;
   // opening resolves against the current directory (ResolveStorePath).
-  OpenAt(ed, ResolveStorePath(pin.path), pin.line, pin.column);
+  const std::string path = ResolveStorePath(pin.path);
+  Index line = pin.line;
+  Index column = pin.column;
+  std::ignore = LiveCursorIn(ed, path, line, column);
+  OpenAt(ed, path, line, column);
 }
 
 bool RequireProject(Editor& ed) {
@@ -1550,6 +1573,12 @@ std::vector<ExcerptRef> ParseCommandHits(std::string_view output, bool with_msg)
 // :goto-source later opens, so what these two build from store rows is the
 // resolved spelling, not the stored one. The root is derived once for the loop,
 // the way the store's own row reads derive it.
+//
+// The line is where the file was last left, not a line the user chose, so this
+// view drifts with them: every visit and every edit moves it, and an open
+// buffer reports its live cursor. Which is why the pins view is rebuilt from
+// here rather than kept -- see RefreshLiveExcerptViews, and the
+// MarkLiveViewsStale in RecordHere that tells it something moved.
 std::vector<ExcerptRef> PinRefs(Editor& ed) {
   std::vector<ExcerptRef> refs;
   if (!ed.project) return refs;
@@ -1558,8 +1587,12 @@ std::vector<ExcerptRef> PinRefs(Editor& ed) {
   for (std::size_t at = 0; at < pins.size(); ++at) {
     const Pin& pin = pins[at];
     if (pin.path.empty()) continue;
-    refs.push_back(ExcerptRef{ResolveStorePath(root, pin.path), std::max<Index>(1, pin.line), 0,
-                              "pin " + std::to_string(at + 1)});
+    const std::string path = ResolveStorePath(root, pin.path);
+    Index line = pin.line;
+    Index column = pin.column;
+    std::ignore = LiveCursorIn(ed, path, line, column);
+    refs.push_back(
+        ExcerptRef{path, std::max<Index>(1, line), 0, "pin " + std::to_string(at + 1)});
   }
   return refs;
 }
@@ -3029,6 +3062,17 @@ void MaybeRefreshExcerptView(Editor& ed) {
   Document& doc = ed.doc;
   if (!IsExcerptView(doc)) return;
   AlignExcerptModel(doc);
+  // A pins view is a view of where you have been, and moving the cursor is not
+  // an event anything records -- so between two visits the store's answer can
+  // go stale without anything marking it. Focusing one asks the question again
+  // rather than trusting the mark. It is a keypress, not a frame, and
+  // recomputing costs four rows; only a genuine difference rebuilds.
+  if ((doc.excerpts.kind == ExcerptView::Kind::kPins) && !doc.modified &&
+      !doc.excerpts.rebuild_on_focus && !SameRefs(PinRefs(ed), doc.excerpts.refs)) {
+    doc.excerpts.refs_stale = true;
+    RebuildExcerptView(ed);
+    return;
+  }
   if (doc.excerpts.rebuild_on_focus && !doc.modified) {
     doc.excerpts.rebuild_on_focus = false;
     RebuildExcerptView(ed);
@@ -3213,25 +3257,23 @@ void SetPinHere(Editor& ed, int slot) {
     ed.status.Warn("no file to pin");
     return;
   }
-  const Index cursor = CursorOf(ed.doc.table, ed.doc.selections.Primary());
-  const Index line = LineAt(ed.doc.table, cursor);
   const std::vector<Pin> before = ed.project->Pins();
   const bool replacing =
       (slot >= 1) && (slot <= std::ssize(before)) && !before[static_cast<size_t>(slot - 1)].path.empty();
-  ed.project->SetPin(slot, CurrentFile(ed), line + 1,
-                     cursor - LineStart(ed.doc.table, line) + 1);
+  ed.project->SetPin(slot, CurrentFile(ed));
   MarkLiveViewsStale(ed, ExcerptView::Kind::kPins);
   const std::vector<Pin> after = ed.project->Pins();
+  // Read back, so spelled the way the store spells it. The line is not checked
+  // because the store no longer holds one -- it reports where the file was last
+  // left, which is a different question from whether the pin was written.
   const bool landed = (slot >= 1) && (slot <= std::ssize(after)) &&
-                      // Read back, so spelled the way the store spells it.
-                      (after[static_cast<size_t>(slot - 1)].path == ProjectPath(ed.doc.file)) &&
-                      (after[static_cast<size_t>(slot - 1)].line == line + 1);
+                      (after[static_cast<size_t>(slot - 1)].path == ProjectPath(ed.doc.file));
   if (!landed) {
     ed.status.Fail("pin " + std::to_string(slot) + " was not written to the project database");
     return;
   }
-  ed.status = "pinned " + DisplayPath(ed.doc.file) + ":" + std::to_string(line + 1) + " to " +
-              std::to_string(slot) + (replacing ? " -- replaced the old pin" : "");
+  ed.status = "pinned " + DisplayPath(ed.doc.file) + " to " + std::to_string(slot) +
+              (replacing ? " -- replaced the old pin" : "");
 }
 
 void ClearPinSlot(Editor& ed, int slot) {
@@ -3265,6 +3307,70 @@ void JumpToPin(Editor& ed, int slot) {
   OpenPin(ed, pins[static_cast<size_t>(slot - 1)], "pin " + std::to_string(slot));
 }
 
+// The most recent edit anywhere, which is a question the revision trees already
+// answer -- so this stores nothing and there is nothing to keep in sync.
+//
+// Every open buffer's `revisions[current]` is the step that produced the text
+// it is showing, `stamp_seq` is where that step falls in the order every edit
+// in the process was written in, and `cursors_after` is where the cursors were
+// when it was. Coalescing keeps both current (piece_doc.cpp), so a burst of
+// typing is one step counted at its last keystroke rather than a hundred. Undo
+// moves `current` back, which is right: after undoing, the last edit standing
+// really is the older one.
+//
+// Deliberately not built on the project store. `files.last_line` is bumped by
+// every visit as well as every edit, and RecordEditHere only runs on save, so
+// "the last place an edit happened" read from there is really "wherever the
+// cursor was when something was last written to disk".
+//
+// The cost is that this is session-scoped and covers open buffers only, and
+// that history is budget-trimmed (PieceTable::history_budget_bytes), so a long
+// enough session forgets its oldest steps. Persisting it would mean a new table
+// written on every buffer leave, for a question that is almost always about the
+// last few minutes.
+void GoToLastEdit(Editor& ed) {
+  const std::size_t count = BufferCount(ed);
+  std::size_t best = count;
+  std::uint64_t newest = 0;  // stamp_seq counts from 1, so 0 is "none yet"
+  for (std::size_t i = 0; i < count; ++i) {
+    const Document& doc = BufferAt(ed, i);
+    // A view's offsets are positions in a text the view assembled, not in any
+    // file, so an edit inside one has no location to go to.
+    if (IsExcerptView(doc) || !HasDiskFile(doc)) continue;
+    const PieceTable& table = doc.table;
+    // revisions[0] is the file as loaded and no edit made it.
+    if ((table.current <= 0) || (table.current >= std::ssize(table.revisions))) continue;
+    const Revision& rev = table.revisions[static_cast<std::size_t>(table.current)];
+    if (rev.forward.empty() || (rev.stamp_seq <= newest)) continue;
+    newest = rev.stamp_seq;
+    best = i;
+  }
+  if (best == count) {
+    ed.status.Warn("nothing has been edited yet");
+    return;
+  }
+
+  // Everything is read out before OpenAt, because opening moves documents:
+  // SwitchToBuffer moves ed.doc into the buffer list and the target out of it,
+  // so `doc` and anything pointing into it are stale from that call onwards.
+  const Document& doc = BufferAt(ed, best);
+  const PieceTable& table = doc.table;
+  const Revision& rev = table.revisions[static_cast<std::size_t>(table.current)];
+  const CursorState& after = rev.cursors_after;
+  // The primary cursor, as asked. A revision whose cursors were never noted
+  // falls back to the start of its first edit, which is where the change is
+  // even when it is not where the cursor ended up.
+  Index at = rev.forward.front().start_byte;
+  if (after.primary < after.spans.size()) {
+    at = after.spans[static_cast<std::size_t>(after.primary)].head;
+  }
+  at = std::clamp<Index>(at, 0, DocLength(table));
+  const Index line = LineAt(table, at);
+  const Index column = at - LineStart(table, line) + 1;
+  const std::string path = doc.file.string();
+  OpenAt(ed, path, line + 1, column);
+}
+
 void JumpToHotSymbol(Editor& ed, int index) {
   if (!RequireProject(ed)) return;
   const std::vector<SymbolVisit> hot = ed.project->HotSymbols(kHotSymbolSlots);
@@ -3291,13 +3397,16 @@ void RecordHere(Editor& ed, bool edited) {
   const Index line = LineAt(ed.doc.table, cursor);
   const Index column = cursor - LineStart(ed.doc.table, line) + 1;
   if (edited) {
-    // RecordEdit moves a pin in behind our back, so an open pins view is out of
-    // date the moment this returns.
     ed.project->RecordEdit(path, line + 1, column);
-    MarkLiveViewsStale(ed, ExcerptView::Kind::kPins);
   } else {
     ed.project->RecordVisit(path, line + 1, column);
   }
+  // Either way the store's idea of where this file was last left has just
+  // moved, and that is the line the pins view excerpts around -- so an open one
+  // is out of date the moment this returns. Marking is cheap: the rebuild only
+  // happens for a view that is on screen, and PinRefs comparing equal skips it
+  // (RefreshLiveExcerptViews).
+  MarkLiveViewsStale(ed, ExcerptView::Kind::kPins);
 }
 
 }

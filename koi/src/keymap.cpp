@@ -723,6 +723,7 @@ R = ["collapse_selection", "expand_selection", "trim_selections", "show_referenc
 D = ["collapse_selection", "expand_selection", "trim_selections", "show_definition_excerpts"]
 o = ["goto_excerpt_source", "align_view_center"]
 x = "excerpt_drop"
+"." = ["goto_last_edit", "align_view_center"]
 
 [keys.normal."space"]
 space = ["last_picker", "align_view_center"]

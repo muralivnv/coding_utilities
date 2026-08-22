@@ -185,6 +185,8 @@ int main() {
   koi::RenderingGaps();
   koi::BufferPickerRows();
   koi::PickerCommandShape();
+  koi::FilePinsLandWhereYouLeft();
+  koi::LastEditIsFoundAcrossFiles();
   koi::KeymapErrors();
   koi::ProjectStoreRobustness();
   koi::ReloadEveryBufferSuite();

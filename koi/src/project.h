@@ -28,6 +28,10 @@ struct SymbolVisit {
   Index line{0};
 };
 
+// A pinned file, and where you last were in it. Only the path is stored: the
+// line and column are read back out of `files` on every Pins() call, so a pin
+// follows you around the file instead of naming a line number that nothing
+// updates and every edit above invalidates.
 struct Pin {
   std::string path;
   Index line{1};
@@ -78,9 +82,13 @@ struct ProjectStore {
 
   virtual std::vector<std::string> HotFiles(int limit, std::string_view current_file) = 0;
 
+  // Every slot in slot order, with an empty path for each one that is unset, so
+  // the result is always kPinSlots long and indexable by slot - 1.
   virtual std::vector<Pin> Pins() = 0;
 
-  virtual void SetPin(int slot, std::string_view file, Index line, Index column) = 0;
+  // Pins the file, not a position in it. Pinning a file that already holds
+  // another slot moves it rather than letting it occupy two.
+  virtual void SetPin(int slot, std::string_view file) = 0;
 
   virtual void ClearPin(int slot) = 0;
 

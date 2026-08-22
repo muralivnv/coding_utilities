@@ -1,6 +1,7 @@
 #include "piece_doc.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 
 // piece_doc.h deliberately does not include this -- unicode.h includes
@@ -9,6 +10,15 @@
 
 namespace koi {
 namespace {
+
+// Relaxed: the only thing anyone asks of these is which of two is larger, and
+// nothing is published through them. Atomic at all because a document may be
+// edited off the main thread, and two threads sharing a counter that is not is
+// a data race whatever the reads are for.
+std::uint64_t NextEditSeq() {
+  static std::atomic<std::uint64_t> next{1};
+  return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 std::uint64_t NowMs() {
   return static_cast<std::uint64_t>(
@@ -333,6 +343,7 @@ ErrorCtx Apply(PieceTable& table, std::span<const Change> changes,
     top.cursors_after = cursors_after;
     top.forward.insert(top.forward.end(), forward.begin(), forward.end());
     top.stamp_ms = NowMs();
+    top.stamp_seq = NextEditSeq();
     if (table.group_depth > 0) table.group_started = true;
   } else {
     Revision rev;
@@ -349,6 +360,7 @@ ErrorCtx Apply(PieceTable& table, std::span<const Change> changes,
     rev.parent = table.current;
     rev.serial = table.serial_next++;
     rev.stamp_ms = NowMs();
+    rev.stamp_seq = NextEditSeq();
 
     table.revisions.push_back(std::move(rev));
     const Index at = std::ssize(table.revisions) - 1;
