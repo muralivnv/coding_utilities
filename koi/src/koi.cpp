@@ -26,6 +26,7 @@
 #include <string_view>
 #include <vector>
 
+#include "anchor.h"
 #include "args.h"
 #include "cli.h"
 #include "commands.h"
@@ -230,25 +231,27 @@ int Run(const char* arg, std::optional<std::string> piped) {
   GoToTarget(ed.doc, target);
 
   {
-    // A message with a store behind it is the recycling warning, not a failure
-    // (see JumpStore::Open): the old database was corrupt and this session is
-    // starting from an empty one. Saying nothing there would be the silent
-    // data loss the whole gate exists to prevent.
-    std::string jump_error;
-    ed.jumps = JumpStore::Open(JumpDbPath(), PaneId(), jump_error);
-    if (!jump_error.empty()) {
-      ed.status.Warn(ed.jumps ? ("jump list " + jump_error) : ("jump list off: " + jump_error));
-    }
-  }
-  {
+    // The project store first: the jump list is a view over its `locations`
+    // since v4, and without it there is no list. A message with a store behind
+    // it is the recycling warning, not a failure: the old database was corrupt
+    // and this session is starting from an empty one. Saying nothing there
+    // would be the silent data loss the whole gate exists to prevent.
     std::string project_error;
     ed.project = ProjectStore::Open(ProjectDbPath(), project_error);
     if (!project_error.empty()) {
       ed.status.Warn(ed.project ? ("project state " + project_error)
                                 : ("project state off: " + project_error));
     }
+    std::string jump_error;
+    ed.jumps = JumpStore::Open(ed.project, PaneId(), jump_error);
+    if (!ed.jumps && project_error.empty()) ed.status.Warn("jump list off: " + jump_error);
   }
   if (!target.has_line) RestoreLastPosition(ed);
+  // The first buffer does not come through OpenFile, so its rows are adopted
+  // and healed here instead -- otherwise the file koi was started on is the one
+  // file whose anchors nothing tracks.
+  AdoptAnchorRows(ed, ed.doc);
+  StartAnchorHeal(ed, ed.doc.file, {}, false);
   RecordJump(ed);
   RecordVisitHere(ed);
 
@@ -361,6 +364,11 @@ int Run(const char* arg, std::optional<std::string> piped) {
   std::size_t watched_active = static_cast<std::size_t>(-1);
   while (!ed.quit) {
     if (HangupRequested()) break;
+    // What the turn before this one did: an edit is a boundary, and wherever
+    // the cursor has ended up is where the linger clock starts. At the top
+    // rather than after the dispatch below because an event leaves this loop by
+    // a dozen different `continue`s -- a mouse click moves the caret too.
+    NoteCommandBoundary(ed);
     RegisterCrashBuffers(ed);
     if (ed.active != watched_active) {
       watched_active = ed.active;
@@ -393,11 +401,18 @@ int Run(const char* arg, std::optional<std::string> piped) {
     } else {
       const bool chord = !pending.empty() && (ed.mode == Mode::kInsert);
       const bool draining = ed.recorder && ed.recorder->Buffered();
+      // A lone match in the smart-jump prompt jumps by itself once the typing
+      // stops, so the settle needs the loop to wake with nothing typed. This is
+      // the only clock it gets, the same way the linger rule takes its clock
+      // from whatever wakes this loop next.
+      const bool settling = !pasting && SmartJumpSettling(ed);
       constexpr int kJobPollMs = 80;
+      constexpr int kSettlePollMs = static_cast<int>(kSmartAutoJumpSettle * 1000.0);
       const int wait = chord ? kChordTimeoutMs : kRecordFlushMs;
       const int rc = pasting               ? tb_peek_event(&ev, kPasteStallMs)
                      : (chord || draining) ? tb_peek_event(&ev, wait)
                      : busy                ? tb_peek_event(&ev, kJobPollMs)
+                     : settling            ? tb_peek_event(&ev, kSettlePollMs)
                                            : tb_poll_event(&ev);
       if (rc != TB_OK) {
         if (HangupRequested()) break;
@@ -418,6 +433,13 @@ int Run(const char* arg, std::optional<std::string> piped) {
           }
           if (draining) {
             ed.recorder->Flush();
+            continue;
+          }
+          // Nothing arrived, which is what the settle is waiting for. Checked
+          // only here: firing on a turn an event did arrive would close the
+          // prompt in front of a key the user has already pressed.
+          if (settling) {
+            CheckSmartJumpAutoFire(ed);
             continue;
           }
           if (busy) continue;
@@ -442,6 +464,11 @@ int Run(const char* arg, std::optional<std::string> piped) {
       ed.leap = {};
       ed.pending_count = 0;
     };
+
+    // An event arrived, so the sitting-still that came before it is over and
+    // its length is known. This is the only clock the linger rule gets: the
+    // poll above blocks with no timeout when there is nothing to do.
+    NoteInputBoundary(ed);
 
     if (ev.type == TB_EVENT_PASTE_BEGIN) {
       drop_pending_input();
@@ -623,11 +650,7 @@ int Run(const char* arg, std::optional<std::string> piped) {
     }
     FitFocusedViewport(ed, tb_width(), tb_height());
   }
-  KillAllCommandJobs(ed);
-  StopScanWorker();
-  RecordJump(ed);
-  RecordVisitHere(ed);
-  if (ed.recorder) ed.recorder->Flush();
+  ShutdownEditor(ed);
   return 0;
 }
 

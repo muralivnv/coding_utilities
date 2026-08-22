@@ -26,6 +26,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "anchor.h"
 #include "commands.h"
 #include "mmap_stream.h"
 #include "operation.h"
@@ -34,10 +35,36 @@
 #include "regex.h"
 #include "shell.h"
 #include "subprocess.h"
+#include "textobject.h"
 #include "thread_pool.h"
 #include "unicode.h"
 
 namespace koi {
+
+std::vector<QueryWord> SplitQuery(std::string_view query) {
+  std::vector<QueryWord> words;
+  std::size_t at = 0;
+  while (at < query.size()) {
+    while ((at < query.size()) && ((query[at] == ' ') || (query[at] == '\t'))) ++at;
+    if (at >= query.size()) break;
+
+    QueryWord word;
+    if ((query[at] == '\'') || (query[at] == '"')) {
+      const char quote = query[at];
+      ++at;
+      word.quoted = true;
+      while ((at < query.size()) && (query[at] != quote)) word.text += query[at++];
+      if (at < query.size()) ++at;
+    } else {
+      while ((at < query.size()) && (query[at] != ' ') && (query[at] != '\t')) {
+        word.text += query[at++];
+      }
+    }
+    words.push_back(std::move(word));
+  }
+  return words;
+}
+
 namespace {
 
 namespace fs = std::filesystem;
@@ -227,6 +254,7 @@ std::string RankedFileRows(Editor& ed) {
     Index line{1};
     Index column{1};
     Index rank{-1};
+    double score{0};
   };
 
   std::unordered_map<std::string, Index> frecent;
@@ -239,17 +267,29 @@ std::string RankedFileRows(Editor& ed) {
     visits = ed.project->FrecentFiles(0);
     for (Index i = 0; i < std::ssize(visits); ++i) frecent.emplace(visits[i].path, i);
   }
+  // The one call site, and the reason the helper is lazy: a picker opening is
+  // the only moment worth spending git subprocesses on, and after the first
+  // open on a branch even this is a cache read.
+  const std::vector<std::string>& branch_diff = BranchDiffFiles();
+  const std::unordered_set<std::string_view> changed{branch_diff.begin(), branch_diff.end()};
 
   std::vector<Row> rows;
   std::unordered_set<std::string> seen;
   for (const std::string_view path : CapturedLines(ed, FileFilterCommand(ed))) {
     if (path.empty() || !seen.emplace(path).second) continue;
-    Row row{std::string{path}, 1, 1, -1};
-    const auto hit = frecent.find(ProjectPath(fs::path{path}));
+    Row row{std::string{path}, 1, 1, -1, 0};
+    const std::string key = ProjectPath(fs::path{path});
+    const auto hit = frecent.find(key);
     if (hit != frecent.end()) {
+      const FileVisit& visit = visits[static_cast<std::size_t>(hit->second)];
       row.rank = hit->second;
-      row.line = std::max<Index>(1, visits[static_cast<std::size_t>(hit->second)].line);
-      row.column = std::max<Index>(1, visits[static_cast<std::size_t>(hit->second)].column);
+      row.line = std::max<Index>(1, visit.line);
+      row.column = std::max<Index>(1, visit.column);
+      // The last of the frecency terms, and the only one the store cannot
+      // apply: a file you have touched on this branch is likelier to be the one
+      // you want next. Small on purpose -- it reorders inside the frecent set
+      // and never lifts an unvisited file into it.
+      row.score = visit.score * (changed.contains(key) ? 1.1 : 1.0);
     }
     rows.push_back(std::move(row));
   }
@@ -258,7 +298,12 @@ std::string RankedFileRows(Editor& ed) {
     const bool a_seen = (a.rank >= 0);
     const bool b_seen = (b.rank >= 0);
     if (a_seen != b_seen) return a_seen;
-    return a_seen ? (a.rank < b.rank) : false;
+    if (!a_seen) return false;
+    // The store's own order is the tie-break, so two rows the branch bonus does
+    // not separate come out exactly as they went in.
+    if (a.score > b.score) return true;
+    if (b.score > a.score) return false;
+    return a.rank < b.rank;
   });
 
   std::string out;
@@ -486,6 +531,17 @@ void BufferPicker(Editor& ed, std::string_view query) {
   ChooseBufferRow(ed, RowPayload(rows.front()));
 }
 
+// The pipeline behind each fallback picker, spelled the way kPipelines names
+// it -- one mapping, so the dead end opens the picker it says it does.
+std::string_view SmartPickerPipeline(SmartPicker picker) {
+  switch (picker) {
+    case SmartPicker::kContent: return "content";
+    case SmartPicker::kSymbol: return "symbols";
+    case SmartPicker::kFile: break;
+  }
+  return "files";
+}
+
 void FilePicker(Editor& ed, std::string_view query) { RunPickerNamed(ed, "files", query); }
 
 void ContentPicker(Editor& ed, std::string_view query) { RunPickerNamed(ed, "content", query); }
@@ -671,6 +727,9 @@ std::string BuildExcerpts(const std::vector<ExcerptRef>& refs, std::string_view 
     if (fresh) by_path.emplace_back(one.path, std::vector<Mark>{});
     by_path[at->second].second.push_back(Mark{std::max<Index>(1, one.line), one.col, &one.msg});
   }
+  // A ranking alphabetised is not a ranking, and neither is a list of pins
+  // sorted by path. Every other kind is a set of matches, where alphabetical is
+  // the only order that means anything.
   const bool ordered_by_refs = (out.kind == ExcerptView::Kind::kPins);
   const bool anchors_are_the_point = ordered_by_refs;
   out.anchor_index.clear();
@@ -1338,35 +1397,6 @@ struct SearchQuery {
   std::vector<gai::Pcre2Regex> excludes;
   std::string error;
 };
-
-struct QueryWord {
-  std::string text;
-  bool quoted{false};
-};
-
-std::vector<QueryWord> SplitQuery(std::string_view query) {
-  std::vector<QueryWord> words;
-  std::size_t at = 0;
-  while (at < query.size()) {
-    while ((at < query.size()) && ((query[at] == ' ') || (query[at] == '\t'))) ++at;
-    if (at >= query.size()) break;
-
-    QueryWord word;
-    if ((query[at] == '\'') || (query[at] == '"')) {
-      const char quote = query[at];
-      ++at;
-      word.quoted = true;
-      while ((at < query.size()) && (query[at] != quote)) word.text += query[at++];
-      if (at < query.size()) ++at;
-    } else {
-      while ((at < query.size()) && (query[at] != ' ') && (query[at] != '\t')) {
-        word.text += query[at++];
-      }
-    }
-    words.push_back(std::move(word));
-  }
-  return words;
-}
 
 SearchQuery ParseSearchQuery(std::string_view query) {
   SearchQuery out;
@@ -2296,6 +2326,11 @@ bool PumpCommandJobs(Editor& ed, bool defer_present) {
   // :from-cancel of a command that would not die promptly.
   ReapAbandoned();
 
+  // Heals land here too. They have no view to open and nothing to say, but they
+  // do write to the store, and store writes stay on this thread -- so the pump
+  // every finished job comes back through is where they are applied.
+  const bool healing = PumpAnchorHeals(ed);
+
   std::erase_if(ed.pending_commands, [&ed](PendingCommand& job) {
     if (job.then != PendingCommand::Then::kRebuild) return false;
     for (std::size_t i = 0; i < BufferCount(ed); ++i) {
@@ -2374,7 +2409,7 @@ bool PumpCommandJobs(Editor& ed, bool defer_present) {
     i = 0;
     running = false;
   }
-  return running;
+  return running || healing;
 }
 
 bool CancelCommandJob(Editor& ed) {
@@ -3390,6 +3425,11 @@ void JumpToHotSymbol(Editor& ed, int index) {
 
 namespace {
 
+double NowSeconds() {
+  const auto since = std::chrono::system_clock::now().time_since_epoch();
+  return std::chrono::duration<double>(since).count();
+}
+
 void RecordHere(Editor& ed, bool edited) {
   if (!ed.project || !HasDiskFile(ed.doc)) return;
   const std::string path = CurrentFile(ed);
@@ -3409,10 +3449,465 @@ void RecordHere(Editor& ed, bool edited) {
   MarkLiveViewsStale(ed, ExcerptView::Kind::kPins);
 }
 
+// -- what a location row says about a place -----------------------------------
+
+// The line rule itself lives in anchor.h, and has to: what a record stores here
+// is compared, later and elsewhere, against what a heal reads back out of the
+// file. Two spellings of "the same line" would not fail loudly, they would make
+// every row unhealable. TrimAnchorLine is the view-returning form, which is
+// what the per-line census below wants.
+std::string LineTextAt(const PieceTable& table, Index line, std::string& scratch) {
+  ReadDocRangeInto(table, LineContentRange(table, line), scratch);
+  return NormalizeAnchorLine(scratch);
+}
+
+// Past either this or kMaxUniqBytes (editor.h, shared with the heal job) a
+// record leaves `uniq` at 0, "unknown". The census is one pass over the buffer
+// and it runs on the input loop: measured at about 7 us per kilobyte, so koi's
+// own largest source (140 KB) costs a millisecond and the cap costs fifteen. A
+// generated file bigger than that is not worth a visible pause for a number
+// that only sharpens a heal.
+constexpr Index kMaxUniqLines = 100000;
+
+// What a record costs the second time in one revision: nothing. The enclosing
+// range and the line-hash census are both properties of (document, revision),
+// and a boundary record, a jump record and a linger record at one place all ask
+// for them in the same breath.
+//
+// One entry, because there is one cursor: the editor records where it is, and
+// where it is is in one document. A buffer switch or a keystroke drops it.
+struct RecordCache {
+  Index document{0};
+  Index revision{-1};
+
+  // The enclosing definition of one cursor position, and the position it was
+  // resolved for. Keyed on the position and not on the range it landed in: a
+  // nested named function is a strict subset of its parent's range, so "still
+  // inside the cached range" would answer with the parent for every cursor
+  // inside the child. An empty `symbol` is a resolved "none", cached too.
+  bool symbol_valid{false};
+  Index symbol_cursor{-1};
+  Index symbol_from{0};
+  Index symbol_to{0};
+  std::string symbol;
+
+  bool uniq_valid{false};
+  std::unordered_map<std::uint64_t, std::int64_t> lines;
+};
+
+RecordCache& CacheFor(const Document& doc) {
+  static RecordCache cache;
+  if ((cache.document != doc.id) || (cache.revision != doc.table.revision)) {
+    cache = RecordCache{};
+    cache.document = doc.id;
+    cache.revision = doc.table.revision;
+  }
+  return cache;
+}
+
+// The name of the definition that opens `range`, from the live tree.
+//
+// The definitions query over the range, and the earliest capture in it wins:
+// the outermost pattern that starts inside a function's own span is the
+// function's own declarator, and anything nested -- a lambda, a local class --
+// starts after it. It is the same query the symbol picker's rows come from,
+// which is what makes the name here and the name in `symbols` the same string.
+std::string DefinitionNameIn(Document& doc, Index from, Index to) {
+  static constexpr std::array<std::string_view, 1> kDefinitions{"definitions.scm"};
+  std::vector<Capture> captures;
+  std::string error;
+  if (!doc.syntax->Captures(doc.table, kDefinitions, Interval(from, to), captures, error)) {
+    return {};
+  }
+  const Capture* first = nullptr;
+  for (const Capture& one : captures) {
+    if ((one.from < from) || (one.to > to)) continue;
+    if ((first == nullptr) || (one.from < first->from)) first = &one;
+  }
+  if (first == nullptr) return {};
+
+  std::string text = ReadDocRange(doc.table, Interval(first->from, first->to));
+  std::string_view kept = TrimAnchorLine(text);
+  std::string name{kept};
+  for (char& c : name) {
+    if ((c == '\n') || (c == '\r') || (c == '\t')) c = ' ';
+  }
+  return name;
+}
+
+// The innermost definition the cursor is inside, or nothing.
+//
+// Only ever from a tree that already exists. TextObjectRanges parses the buffer
+// itself when it is handed no live Syntax -- 21 ms, on the input loop, per
+// record -- so a document with no syntax attached, or one whose Syntax is for
+// another language than the file now has, records a null symbol and healing
+// fills it in later (docs/smart-jump.md, Recording).
+std::string EnclosingSymbol(Editor& ed, Index cursor) {
+  Document& doc = ed.doc;
+  if ((doc.syntax == nullptr) || (doc.syntax->Language() != LanguageForPath(doc.file))) return {};
+
+  RecordCache& cache = CacheFor(doc);
+  // The cursor itself, not the range it was in. The query below returns the
+  // whole chain of functions the cursor sits in, so "inside the last answer"
+  // says nothing about a function nested deeper that the last cursor happened
+  // to be outside of -- and answering the parent for a cursor in a nested `def`
+  // is a wrong name on the row and a wrong name credited in `symbols`.
+  if (cache.symbol_valid && (cache.symbol_cursor == cursor)) return cache.symbol;
+
+  static constexpr std::array<std::string_view, 1> kAround{"around"};
+  std::vector<ObjectRange> ranges;
+  std::string error;
+  if (!TextObjectRanges(doc.table, doc.file, "function", kAround, ranges, error, doc.syntax.get(),
+                        Interval(cursor, cursor + 1))) {
+    return {};
+  }
+  // Innermost first, and the first one that has a name is the answer: a lambda
+  // is a `function.around` with no declarator, and the place to call that is
+  // the function the lambda is written in.
+  std::ranges::sort(ranges, [](const ObjectRange& a, const ObjectRange& b) {
+    return (a.to - a.from) < (b.to - b.from);
+  });
+  cache.symbol_valid = true;
+  cache.symbol_cursor = cursor;
+  cache.symbol_from = 0;
+  cache.symbol_to = 0;
+  cache.symbol.clear();
+  for (const ObjectRange& one : ranges) {
+    if ((cursor < one.from) || (cursor >= one.to)) continue;
+    std::string name = DefinitionNameIn(doc, one.from, one.to);
+    if (name.empty()) continue;
+    cache.symbol_from = one.from;
+    cache.symbol_to = one.to;
+    cache.symbol = std::move(name);
+    break;
+  }
+  return cache.symbol;
+}
+
+// How many lines of the buffer read the same as this one, from a census built
+// once per revision. Zero is "not counted", which is what an empty line and an
+// oversized buffer both get.
+std::int64_t UniqOf(Document& doc, std::string_view content) {
+  if (content.empty()) return 0;
+  RecordCache& cache = CacheFor(doc);
+  if (!cache.uniq_valid) {
+    const PieceTable& table = doc.table;
+    const Index lines = LineCount(table);
+    if ((lines > kMaxUniqLines) || (DocLength(table) > kMaxUniqBytes)) return 0;
+    // One read and one pass. Per-line reads down the piece tree would be a
+    // descent each; this is a copy and a walk. Sized up front, because a
+    // rehash halfway through is a third of what this costs.
+    cache.lines.reserve(static_cast<std::size_t>(lines));
+    const std::string text = ReadDocRange(table, Interval(0, DocLength(table)));
+    std::string_view rest{text};
+    while (!rest.empty()) {
+      const std::size_t end = rest.find('\n');
+      const std::string_view line = rest.substr(0, end);
+      const std::string_view normalized = TrimAnchorLine(line);
+      if (!normalized.empty()) ++cache.lines[AnchorLineHash(normalized)];
+      if (end == std::string_view::npos) break;
+      rest.remove_prefix(end + 1);
+    }
+    cache.uniq_valid = true;
+  }
+  const auto found = cache.lines.find(AnchorLineHash(content));
+  return (found == cache.lines.end()) ? 0 : found->second;
+}
+
+// The lines on either side, which is what tells one `}` from another. Not part
+// of what a row is matched on -- it confirms a candidate the content found.
+std::string ContextAround(const PieceTable& table, Index line, std::string& scratch) {
+  constexpr Index kContextLines = 2;
+  std::string out;
+  bool first = true;
+  const Index last = LineCount(table) - 1;
+  for (Index at = line - kContextLines; at <= (line + kContextLines); ++at) {
+    if (at == line) continue;
+    // A blank line is context too, and it keeps its place: the entries are
+    // positional, so dropping the empty ones would make "two above" mean
+    // different lines in different files. A slot off either end of the buffer
+    // is an empty entry for the same reason -- AnchorContextAt() pads the same
+    // way, and a heal compares the two entry by entry.
+    if (!first) out += '\n';
+    first = false;
+    if ((at < 0) || (at > last)) continue;
+    out += LineTextAt(table, at, scratch);
+  }
+  return out;
+}
+
+// The symbols table, from the place just recorded. RecordSymbolVisit used to
+// fire only on an arrival through a symbol mechanism -- a picker row, a hot
+// symbol -- so a function worked on for days had no row and `d pin` found
+// nothing. Debounced on the symbol rather than on the clock: staying inside one
+// function is one visit to it, however many locations inside it get recorded.
+void NoteSymbolVisit(Editor& ed, std::string_view symbol, Index cursor_line) {
+  if (!ed.project || symbol.empty()) return;
+  if ((ed.record.symbol_document == ed.doc.id) && (ed.record.symbol == symbol)) return;
+  ed.record.symbol_document = ed.doc.id;
+  ed.record.symbol = symbol;
+  // Where the definition starts, not where the cursor was inside it: this row
+  // is what a hot-symbol jump lands on, and landing halfway down a function is
+  // not landing on it. The cursor's line is the fallback for a resolution the
+  // cache no longer holds the range of.
+  const RecordCache& cache = CacheFor(ed.doc);
+  const Index line = (cache.symbol_valid && (cache.symbol == symbol))
+                         ? LineAt(ed.doc.table, cache.symbol_from) + 1
+                         : cursor_line;
+  // The path is built here and not taken from a row, because the boundary this
+  // is reached from may have decided there is no row to build.
+  ed.project->RecordSymbolVisit(symbol, ed.doc.file.native(), line);
+}
+
+// Whether this buffer's file is one the store will keep rows for, from an
+// answer held per file rather than reached per boundary: LocationKey
+// canonicalises, which is a stat down every component of the path.
+bool StorableHere(Editor& ed) {
+  const std::string& path = ed.doc.file.native();
+  if (ed.record.storable_path != path) {
+    ed.record.storable_path = path;
+    ed.record.storable = StorablePath(LocationKey(path));
+  }
+  return ed.record.storable;
+}
+
+// One record of the current place, with everything that goes with it: the row,
+// the `files` bump behind it, the symbol, and the bookkeeping that keeps the
+// next few keystrokes from writing it all again.
+//
+// The in-memory debounce is not the store's. The store holds a row's counters
+// still for thirty seconds (kLocationVisitDebounce) so that a burst of typing
+// is one edit rather than forty; this one holds the *write* still over the same
+// window. It is decided before the place is described and not after: describing
+// one is a read of the whole buffer (the uniq census), and on a large file that
+// is milliseconds per keystroke thrown away -- an edit boundary is one record
+// per revision by construction, so the census cache never once hits on the path
+// that pays for it. Moving more than a merge's worth of lines away, or changing
+// kind, is a new place and writes at once.
+//
+// `force` is for the save: it is the moment the file on disk becomes something
+// a row can name (the blob), and a save inside the window would otherwise leave
+// the row describing the dirty buffer it was recorded from. A save is a human
+// action; the store's own debounce still keeps it from counting twice.
+void RecordBoundary(Editor& ed, int kind, bool force = false) {
+  if (!ed.project) return;
+  Document& doc = ed.doc;
+  // The two kinds of buffer that are not places -- a view assembles text that
+  // is in no file, a scratch buffer has nothing to come back to -- and then the
+  // one that is a place the store has been told not to keep. All three before
+  // anything is read out of the buffer.
+  if (IsExcerptView(doc) || !HasDiskFile(doc)) return;
+  if (!StorableHere(ed)) {
+    ed.record.recorded = true;
+    return;
+  }
+
+  const Index cursor = CursorOf(doc.table, doc.selections.Primary());
+  const Index line = LineAt(doc.table, cursor) + 1;
+  const double now = NowSeconds();
+  const bool same = (ed.record.wrote_kind == kind) && (ed.record.wrote_document == doc.id) &&
+                    (std::abs(line - ed.record.wrote_line) <= kLocationMergeLines);
+  if (force || !same || ((now - ed.record.wrote_at) >= kLocationVisitDebounce)) {
+    LocationRecord row;
+    if (!LocationHere(ed, row)) return;
+    row.kind = kind;
+    ed.project->WriteLocation(row);
+    // The row that has just been written names this cursor at this revision,
+    // which is the one moment its stored line is certainly true. Taking it into
+    // the shadow now is what makes every later edit above it a shift instead of
+    // a stale number -- and it is why jump_backward lands on the text it left
+    // rather than on the line number it left.
+    AdoptAnchorRows(ed, ed.doc);
+    ed.record.wrote_document = doc.id;
+    ed.record.wrote_line = row.line;
+    ed.record.wrote_kind = kind;
+    ed.record.wrote_at = now;
+
+    // `files` moves with the row: since v4 an edit is recorded where it
+    // happens rather than when the file is saved, so `files.edits` counts edit
+    // bursts, and a burst is what the debounce defines. `same` is in the
+    // condition and not just the window, or the first edit at a place a linger
+    // has just recorded would be swallowed by that linger's window -- and an
+    // edit is the signal worth three visits.
+    if (!same || ((now - ed.record.files_at) >= kLocationVisitDebounce)) {
+      ed.record.files_at = now;
+      RecordHere(ed, kind != 0);
+    }
+    ed.record.note_document = doc.id;
+    ed.record.note_line = line;
+    NoteSymbolVisit(ed, row.symbol, row.line);
+  } else if ((ed.record.note_document != doc.id) || (ed.record.note_line != line)) {
+    // The row is debounced, the symbol is not: ten lines is inside the merge
+    // window and can still be inside a different function. Only the tree query
+    // runs here, and only when the cursor has left the line the last note was
+    // made from -- typing on one line cannot walk into another definition, and
+    // typing a definition's own name should not credit every prefix of it.
+    ed.record.note_document = doc.id;
+    ed.record.note_line = line;
+    NoteSymbolVisit(ed, EnclosingSymbol(ed, cursor), line);
+  }
+
+  ed.record.recorded = true;
+}
+
+// A smart-jump arrival, armed rather than recorded. Everything else in this
+// file writes where the cursor is the moment it gets there; this one waits to
+// find out whether the jump was right, because a mis-jump that records itself
+// makes the next mis-jump likelier -- zoxide's documented trust-killer, and the
+// reason this corpus can be believed.
+void ArmSmartJumpBounce(Editor& ed, Index line) {
+  ed.record.pending = true;
+  ed.record.pending_document = ed.doc.id;
+  ed.record.pending_line = line;
+  ed.record.pending_revision = ed.doc.table.revision;
+  ed.record.pending_since = NowSeconds();
+  ed.record.pending_typed.clear();
+  ed.record.pending_target.clear();
+  ed.record.pending_query.clear();
+}
+
+// The arrival is dropped: no row, no credit, no trace. Both halves go together
+// -- a `queries` accept left behind here would be spent on the next arrival.
+void DropSmartJumpArrival(Editor& ed) {
+  ed.record.pending = false;
+  ed.record.pending_typed.clear();
+  ed.record.pending_target.clear();
+  ed.record.pending_query.clear();
+}
+
+// The other half, run at both boundaries: the arrival is written once it has
+// been stood in for kBounceSeconds or edited, and dropped without a trace if
+// the cursor has gone anywhere else first.
+//
+// Same window as a merge (kLocationMergeLines): moving a few lines inside the
+// function you landed in is not leaving, and the row a record would land on is
+// the same one either way.
+void CheckSmartJumpArrival(Editor& ed) {
+  if (!ed.record.pending) return;
+  Document& doc = ed.doc;
+  if (doc.id != ed.record.pending_document) {
+    DropSmartJumpArrival(ed);
+    return;
+  }
+  // Where the cursor is now decides both paths, the edited one included: one
+  // command can edit and move at once -- undo at a distance, a multi-line
+  // paste, a bound list of commands -- and an edit that leaves the cursor
+  // elsewhere is not an edit at the arrival. Recording it would name a place
+  // never stood in and credit the query for having found it.
+  const Index line = LineAt(doc.table, CursorOf(doc.table, doc.selections.Primary())) + 1;
+  if (std::abs(line - ed.record.pending_line) > kLocationMergeLines) {
+    DropSmartJumpArrival(ed);
+    return;
+  }
+  const bool edited = doc.table.revision != ed.record.pending_revision;
+  if (!edited && ((NowSeconds() - ed.record.pending_since) < kBounceSeconds)) return;
+  ed.record.pending = false;
+  // Forced: the arrival is a place in its own right, and the debounce window
+  // the jump's own departure record opened would otherwise swallow it.
+  RecordBoundary(ed, edited ? 1 : 0, true);
+  // The credit, on the same evidence as the row. A bounced mis-jump reaches
+  // neither the store nor `queries`.
+  if (!ed.record.pending_typed.empty() && ed.project) {
+    ed.project->RecordQueryAccept(ed.record.pending_typed, ed.record.pending_target);
+  }
+  ed.record.pending_typed.clear();
+  ed.record.pending_target.clear();
+  ed.record.pending_query.clear();
+}
+
+}
+
+bool LocationHere(Editor& ed, LocationRecord& out) {
+  Document& doc = ed.doc;
+  // The two kinds of buffer that are not places: a view assembles text that is
+  // in no file, and a scratch buffer has nothing to come back to.
+  if (IsExcerptView(doc) || !HasDiskFile(doc)) return false;
+
+  const PieceTable& table = doc.table;
+  const Index cursor = CursorOf(table, doc.selections.Primary());
+  Index line = 0;
+  Index start = 0;
+  LineAtAndStart(table, cursor, line, start);
+
+  out = LocationRecord{};
+  out.path = doc.file.string();
+  out.line = line + 1;
+  out.col = cursor - start + 1;
+  out.has_text = true;
+
+  std::string scratch;
+  out.content = LineTextAt(table, line, scratch);
+  out.context = ContextAround(table, line, scratch);
+  out.uniq = UniqOf(doc, out.content);
+  out.symbol = EnclosingSymbol(ed, cursor);
+  // The blob names the file on disk, so it is only true of a buffer that is
+  // still that file. ExternallyModified is two stat()s and catches the case the
+  // dirty flag cannot: somebody else wrote the file while it sat here clean.
+  if (!doc.modified && !doc.disk_blob.empty() && !ExternallyModified(doc)) {
+    out.blob = doc.disk_blob;
+  }
+  return true;
+}
+
+void NoteRecordedHere(Editor& ed, const LocationRecord& row) {
+  // Written by the jump list rather than by RecordBoundary, and the shadow
+  // wants it for the same reason -- see there.
+  AdoptAnchorRows(ed, ed.doc);
+  ed.record.wrote_document = ed.doc.id;
+  ed.record.wrote_line = row.line;
+  ed.record.wrote_kind = row.kind;
+  ed.record.wrote_at = NowSeconds();
+  ed.record.recorded = true;
+  ed.record.note_document = ed.doc.id;
+  ed.record.note_line = row.line;
+  NoteSymbolVisit(ed, row.symbol, row.line);
+}
+
+void NoteInputBoundary(Editor& ed) {
+  // Linger: three seconds at one place, and the place is recorded once.
+  //
+  // There is no timer and no thread. The loop this hangs off blocks in
+  // tb_poll_event with no timeout when nothing is happening, so the record
+  // lands on the *next* event after the three seconds rather than at the
+  // instant they pass -- which is what the design allows for, and the only
+  // difference it makes is to a place the user walked away from the terminal
+  // in: it is recorded when they come back.
+  CheckSmartJumpArrival(ed);
+  if (ed.record.recorded || (ed.record.document != ed.doc.id) || (ed.record.line < 0)) return;
+  if ((NowSeconds() - ed.record.since) < kLingerSeconds) return;
+  RecordBoundary(ed, 0);
+}
+
+void NoteCommandBoundary(Editor& ed) {
+  // Before the place tracking below moves on: this is the last moment the
+  // arrival's own line and revision can be compared with where the command
+  // that just ran has left the cursor.
+  CheckSmartJumpArrival(ed);
+
+  Document& doc = ed.doc;
+  const Index revision = doc.table.revision;
+  // An edit is a command boundary where the buffer's revision moved. Only
+  // within one document: across a buffer switch the two numbers are unrelated.
+  const bool edited = (ed.record.document == doc.id) && (ed.record.revision >= 0) &&
+                      (revision != ed.record.revision);
+
+  // The document id and the line are what a stay is: this runs once per turn of
+  // the input loop, so nothing here reads a path or allocates.
+  const Index line = LineAt(doc.table, CursorOf(doc.table, doc.selections.Primary()));
+  if ((doc.id != ed.record.document) || (line != ed.record.line)) {
+    ed.record.document = doc.id;
+    ed.record.line = line;
+    ed.record.since = NowSeconds();
+    ed.record.recorded = false;
+  }
+  ed.record.revision = revision;
+
+  if (edited) RecordBoundary(ed, 1);
 }
 
 void RecordVisitHere(Editor& ed) { RecordHere(ed, false); }
-void RecordEditHere(Editor& ed) { RecordHere(ed, true); }
+
+void RecordEditHere(Editor& ed) { RecordBoundary(ed, 1, true); }
 
 void StartScanWorker(Index workers) { EnsureScanWorker(workers); }
 
@@ -3431,5 +3926,295 @@ void RestoreLastPosition(Editor& ed) {
   target.has_column = column > 0;
   GoToTarget(ed.doc, target);
 }
+
+// -- smart jump --------------------------------------------------------------
+//
+// The editor half of docs/smart-jump.md: the prompt, the landing rules and the
+// step-through. The parser, the snapshot and the ranking are in smartjump.cpp,
+// which knows nothing about an Editor; what is left here is what has to drive
+// the recorder, the excerpt views and the pickers, and all three of those live
+// in this file already.
+
+namespace {
+
+SmartJumpState& SmartJumpStateOf(Editor& ed) {
+  if (!ed.smart_jump) ed.smart_jump = std::make_shared<SmartJumpState>();
+  return *ed.smart_jump;
+}
+
+// Everything a smart-jump landing does that an ordinary open does not.
+//
+// The place being left goes into the jump list, as it does for every jump
+// motion. The place being arrived at does not go into the store at all -- it is
+// armed instead, and earns its row by being stood in. And the stored line is
+// corrected by the open buffer's shadow before it is used, because a line in
+// the store is a cache and every edit above it since has moved the text it
+// names.
+// `landed` comes back as the line the cursor is actually on, which is the
+// stored line healed, re-found and clamped -- what the status has to name.
+bool LandSmartJump(Editor& ed, const SmartMatch& match, Index column, Index& landed) {
+  if (match.path.empty()) return false;
+  const fs::path path{match.path};
+  RecordJump(ed);
+
+  const bool already_here = !IsExcerptView(ed.doc) && HasDiskFile(ed.doc) &&
+                            (CanonicalOf(ed.doc.file) == CanonicalOf(path));
+  if (!already_here && !OpenFile(ed, path)) return false;
+
+  Target target;
+  target.path = path;
+  target.line = std::max<Index>(1, match.line);
+  target.has_line = true;
+  target.column = (match.col > 0) ? match.col : column;
+  target.has_column = target.column > 0;
+  if (Index live = target.line; AnchorShadowLine(ed, ed.doc, match.row_id, live)) {
+    target.line = live;
+  }
+  // The symbol tier heals by name, not by line: `symbols.line` has no anchor
+  // behind it, so re-find the definition in the file as it stands and prefer
+  // that. One parse per symbol landing -- a jump can afford what a keystroke
+  // cannot -- and the store row is refreshed so the next list shows the truth.
+  if (!match.symbol.empty()) {
+    std::string scan_error;
+    const std::string text = ReadDocRange(ed.doc.table, Interval(0, DocLength(ed.doc.table)));
+    for (const DefinitionSpan& span : ScanDefinitionSpans(ed.doc.file, text, scan_error)) {
+      if (span.name != match.symbol) continue;
+      target.line = span.from_line;
+      if (ed.project) {
+        ed.project->RecordSymbolVisit(match.symbol, ed.doc.file.string(), span.from_line);
+      }
+      break;
+    }
+  }
+  GoToTarget(ed.doc, target);
+  // Armed from where the cursor actually is rather than from what was asked
+  // for: GoToTarget clamps to the last line, and a stored line past the end of
+  // a file that shrank between sessions would otherwise cancel its own arrival
+  // on the disparity -- such a row could never record, credit, or even miss.
+  landed = LineAt(ed.doc.table, CursorOf(ed.doc.table, ed.doc.selections.Primary())) + 1;
+  ArmSmartJumpBounce(ed, landed);
+  return true;
+}
+
+// What one more press in this direction would give, for the status line. The
+// row just landed on is under the cursor already, so naming it answers nothing;
+// the only question stepping asks is whether to press again, and that is a
+// question about the row after this one. Nothing to say for a list of one.
+//
+// The line is healed the way the landing heals it: from the open buffer's
+// shadow when the row belongs to it -- which is the common case, a second line
+// in the file just opened -- and the stored line otherwise, which is the best
+// that is known without opening the file.
+std::string SmartNextSaid(Editor& ed, const std::vector<SmartMatch>& matches, std::size_t at,
+                          bool forward) {
+  const auto count = static_cast<std::ptrdiff_t>(matches.size());
+  if (count < 2) return {};
+  const std::ptrdiff_t step = static_cast<std::ptrdiff_t>(at) + (forward ? 1 : -1);
+  const bool wraps = (step < 0) || (step >= count);
+  const SmartMatch& next = matches[static_cast<std::size_t>(((step % count) + count) % count)];
+  Index line = next.line;
+  AnchorShadowLine(ed, ed.doc, next.row_id, line);
+  // The end of the list, said as what it costs: one more press is the top of
+  // the list again, not a new place.
+  return (wraps ? "next wraps to " : "next ") + SmartDisplayAt(next, line);
+}
+
+// One accepted arrival: the jump, the query credited for having found it, and
+// the cursor into the ranked list moved so that next and prev step from here.
+bool AcceptSmartJump(Editor& ed, std::size_t at, Index& landed, Index column = 0) {
+  SmartJumpState& state = SmartJumpStateOf(ed);
+  if (at >= state.matches.size()) return false;
+  const SmartMatch match = state.matches[at];
+  if (!LandSmartJump(ed, match, column, landed)) {
+    ed.status.Warn("cannot open " + match.path);
+    return false;
+  }
+  state.at = at;
+  // Held with the armed arrival, not written here: see CheckSmartJumpArrival.
+  if (ed.project && !state.typed.empty()) {
+    ed.record.pending_typed = state.typed;
+    ed.record.pending_target = match.key;
+  }
+  return true;
+}
+
+}
+
+void SmartJumpPrompt(Editor& ed) {
+  if (!RequireProject(ed)) return;
+  // Asking again is rejecting the last answer. An arrival still unconfirmed
+  // when this prompt reopens is one the user is walking away from without
+  // having moved the cursor to say so, and the clock would otherwise run on
+  // through the typing of its replacement -- prompt keys move no cursor, so
+  // nothing would cancel it -- and credit the very pair being abandoned. An
+  // arrival that had already earned its row earned it at the boundary that ran
+  // on the keystroke opening this prompt, so nothing confirmed is taken back.
+  //
+  // An arrival that fired by itself is a guess -- no key was pressed to accept
+  // it -- so the prompt that rejects one opens with the query that fired typed
+  // back in, to be extended rather than retyped. One submitted by hand leaves
+  // nothing behind: that landing was asked for.
+  const std::string again = ed.record.pending ? ed.record.pending_query : std::string{};
+  DropSmartJumpArrival(ed);
+  PromptOpen(ed, PromptKind::kSmartJump);
+  // The whole corpus, once, here. Every keystroke after this re-scores it in
+  // full and touches nothing else -- no disk, no parser, no subprocess.
+  SmartJumpState& state = SmartJumpStateOf(ed);
+  BuildSmartCorpus(*ed.project, state.corpus);
+  state.auto_query.clear();
+  if (!again.empty()) {
+    ed.prompt_input = again;
+    ed.prompt_cursor = ed.prompt_input.size();
+  }
+  // Deliberately not previewed: the prefill is still a lone match, and arming
+  // the auto-jump on it would fire the very jump this prompt is taking back.
+}
+
+bool SmartJumpSettling(const Editor& ed) {
+  return ed.prompt_active && (ed.prompt_kind == PromptKind::kSmartJump) &&
+         (ed.smart_jump != nullptr) && !ed.smart_jump->auto_query.empty();
+}
+
+void CheckSmartJumpAutoFire(Editor& ed) {
+  if (!SmartJumpSettling(ed)) return;
+  SmartJumpState& state = *ed.smart_jump;
+  if ((NowSeconds() - state.auto_since) < kSmartAutoJumpSettle) return;
+  const std::string fired = state.auto_query;
+  state.auto_query.clear();
+  // Enter's own path, minus the keystroke: the bounce arming, the deferred
+  // credit, the prompt history and the status all belong to the landing, and a
+  // second way in here would be a second set of them to keep in step.
+  PromptSubmit(ed);
+  // Stamped after the landing rather than before it, because arming the arrival
+  // is what clears the field.
+  if (ed.record.pending) ed.record.pending_query = fired;
+}
+
+void SmartJumpPreview(Editor& ed) {
+  if (!ed.prompt_active || (ed.prompt_kind != PromptKind::kSmartJump) || !ed.smart_jump) return;
+  SmartJumpState& state = *ed.smart_jump;
+  const SmartQuery query = ParseSmartQuery(ed.prompt_input);
+  // The count and the best target with its line text, so that where Enter goes
+  // is visible before it is pressed. On the pane's status line, not in a box:
+  // there is one prompt in this editor and this is it. The summary and not the
+  // list: this runs on every keystroke and the rest of the ranking is strings
+  // nothing here reads.
+  const SmartSummary summary = SummariseSmartMatches(state.corpus, query, ed.project.get());
+  // One match arms the auto-jump; every other count disarms it -- a parse
+  // error, a term too short and a corpus that answered nothing all count zero.
+  // The clock restarts on every keystroke, so what the settle measures is quiet
+  // and not how long the match has been lone: a query passes through one match
+  // mid-word, and firing there would leave the rest of the word to the buffer.
+  //
+  // smart-jump-auto off never arms, which is the whole of the setting: with
+  // nothing armed SmartJumpSettling stays false and the input loop never polls.
+  state.auto_query.clear();
+  if ((summary.count == 1) && ed.settings.smart_jump_auto) {
+    state.auto_query = ed.prompt_input;
+    state.auto_since = NowSeconds();
+  }
+  const std::string said = SmartJumpFeedback(query, summary);
+  if (said.empty()) {
+    ed.status.clear();
+  } else {
+    ed.status = said;
+  }
+}
+
+void SmartJumpSubmit(Editor& ed, std::string_view line) {
+  if (!RequireProject(ed)) return;
+  SmartJumpState& state = SmartJumpStateOf(ed);
+  // Reached without the prompt having been opened -- a bound query, a test --
+  // so there is no snapshot to score against yet.
+  if (state.corpus.files.empty() && state.corpus.symbols.empty() &&
+      state.corpus.locations.empty()) {
+    BuildSmartCorpus(*ed.project, state.corpus);
+  }
+
+  const SmartQuery query = ParseSmartQuery(line);
+  if (!query.error.empty()) {
+    ed.status.Warn(query.error);
+    return;
+  }
+  std::vector<SmartMatch> matches = RankSmartMatches(state.corpus, query, ed.project.get());
+  if (matches.empty()) {
+    // Said plainly -- nothing found means you have not been there, and this
+    // list never widens on its own -- and then handed straight to the picker
+    // that does search the project, with the deciding clause's terms in it.
+    // Tab does the same before Enter; this is the same door at the dead end.
+    // And the last list goes with it: stepping after this would otherwise walk
+    // the previous query's matches, which is not what was asked for.
+    state.matches.clear();
+    state.typed.clear();
+    state.at = 0;
+    const SmartHandoff handoff = SmartJumpHandoff(query);
+    ed.status = "not been there -- " + std::string{SmartPickerName(handoff.picker)};
+    // Terms and all, so the picker opens with them typed: this has to be the
+    // same place you would have got to by choosing the picker yourself.
+    RunPickerNamed(ed, SmartPickerPipeline(handoff.picker), handoff.query);
+    return;
+  }
+
+  state.matches = std::move(matches);
+  state.typed = query.typed;
+  state.at = 0;
+
+  // Enter lands on the best match, always -- the way a search lands on its
+  // first hit -- and stepping is the disambiguator, not a list view. A wrong
+  // landing costs one keypress (smart_jump_next) and teaches nothing: both the
+  // row and the query credit wait out the bounce.
+  const std::size_t count = state.matches.size();
+  Index landed = 0;
+  if (AcceptSmartJump(ed, 0, landed)) {
+    // One match names itself, because there is nowhere else to go. Several name
+    // the second one: the first is under the cursor, and what is worth saying
+    // is where smart_jump_next would take you from it.
+    ed.status = (count == 1) ? SmartDisplayAt(state.matches.front(), landed)
+                             : ("jump 1/" + std::to_string(count) + "  " +
+                                SmartNextSaid(ed, state.matches, 0, true));
+  }
+}
+
+void SmartJumpToPicker(Editor& ed) {
+  // The same door the dead end opens, one keystroke earlier: the most specific
+  // clause names the picker and hands over its own terms, escaped and joined the
+  // way a picker query is a pattern.
+  const SmartHandoff handoff = SmartJumpHandoff(ParseSmartQuery(ed.prompt_input));
+  PromptCancel(ed);
+  RunPickerNamed(ed, SmartPickerPipeline(handoff.picker), handoff.query);
+}
+
+void SmartJumpStep(Editor& ed, bool forward) {
+  SmartJumpState& state = SmartJumpStateOf(ed);
+  if (state.matches.empty()) {
+    ed.status.Warn("no smart jump to step through");
+    return;
+  }
+  const auto count = static_cast<std::ptrdiff_t>(state.matches.size());
+  const std::ptrdiff_t target = static_cast<std::ptrdiff_t>(state.at) + (forward ? 1 : -1);
+  const bool wrapped = (target < 0) || (target >= count);
+  const auto landed = static_cast<std::size_t>(((target % count) + count) % count);
+
+  const SmartMatch match = state.matches[landed];
+  Index at_line = 0;
+  if (!LandSmartJump(ed, match, 0, at_line)) {
+    ed.status.Warn("cannot open " + match.path);
+    return;
+  }
+  state.at = landed;
+  // Not an accept: stepping is how a wrong auto-jump gets corrected, and
+  // teaching `queries` every row walked past on the way is how the correction
+  // would make the next query worse.
+  // Where the next press goes, not where this one landed -- and for a list of
+  // one there is no next, so that one names itself. The wrap note is about the
+  // step just taken; "next wraps to" is about the one after it.
+  const std::string said = (count == 1) ? SmartDisplayAt(match, at_line)
+                                        : SmartNextSaid(ed, state.matches, landed, forward);
+  ed.status = "jump " + std::to_string(landed + 1) + "/" + std::to_string(count) + "  " + said +
+              ((!wrapped || (count == 1)) ? ""
+               : forward                  ? " -- wrapped to the top"
+                                          : " -- wrapped to the bottom");
+}
+
 
 }

@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 
+#include "anchor.h"
 #include "query.h"
 
 namespace koi {
@@ -18,6 +19,7 @@ namespace fs = std::filesystem;
 
 constexpr std::string_view kDefinitionsFile = "definitions.scm";
 constexpr std::string_view kReferencesFile = "references.scm";
+constexpr std::string_view kTextObjectsFile = "textobjects.scm";
 
 std::span<const std::string_view> FilesFor(SymbolKind kind) {
   static constexpr std::array<std::string_view, 1> definitions{kDefinitionsFile};
@@ -318,6 +320,131 @@ std::vector<Symbol> CollectSymbols(std::span<const std::string> paths, SymbolKin
   std::vector<Symbol> out;
   for (Symbol&& symbol : ScanSymbols(paths, kind, error, containing_word)) {
     out.push_back(std::move(symbol));
+  }
+  return out;
+}
+
+namespace {
+
+// Where every line of `text` starts, so a node's byte offset becomes a line
+// number by binary search rather than by a newline count per node.
+std::vector<std::size_t> LineStarts(std::string_view text) {
+  std::vector<std::size_t> starts{0};
+  for (std::size_t at = 0; at < text.size(); ++at) {
+    if (text[at] == '\n') starts.push_back(at + 1);
+  }
+  return starts;
+}
+
+// 1-based, the way a location row counts lines.
+Index LineOf(const std::vector<std::size_t>& starts, std::size_t at) {
+  const auto found = std::ranges::upper_bound(starts, at);
+  return static_cast<Index>(found - starts.begin());
+}
+
+// One capture, flattened out of the cursor so the two query runs below can be
+// written once.
+struct CaptureSpan {
+  std::size_t from{0};
+  std::size_t to{0};
+  std::string_view name;
+};
+
+}
+
+std::vector<DefinitionSpan> ScanDefinitionSpans(const fs::path& path, std::string_view text,
+                                                std::string& error) {
+  std::vector<DefinitionSpan> out;
+  const std::string_view language = LanguageForPath(path);
+  if (language.empty() || text.empty()) return out;
+
+  static constexpr std::array<std::string_view, 1> kObjectFiles{kTextObjectsFile};
+  static constexpr std::array<std::string_view, 1> kDefinitionFiles{kDefinitionsFile};
+  if (FindRuntimeFile(fs::path{"queries"} / language / kTextObjectsFile).empty()) return out;
+
+  const std::shared_ptr<CompiledQuery> objects = CompileQuery(language, kObjectFiles, error);
+  if (objects == nullptr) return out;
+  const std::shared_ptr<CompiledQuery> definitions = CompileQuery(language, kDefinitionFiles, error);
+  if (definitions == nullptr) return out;
+
+  uint32_t scan_end = 0;
+  if (!TreeSitterByteRange(text.size(), scan_end)) return out;
+
+  Scanner scanner;
+  if ((scanner.parser == nullptr) || (scanner.cursor == nullptr)) return out;
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() + kScanBudget;
+
+  // The one parse a heal is allowed. Both queries run over the tree it produced
+  // -- matching twice is nothing next to parsing twice, and it saves having to
+  // tell two files' capture names apart by spelling.
+  ParsedBuffer parsed = ParseBuffer(scanner.parser, *objects, language, text, kScanBudget);
+  if (!parsed) {
+    if (parsed.timed_out) {
+      Remember(error, path.filename().string() + " exceeded the parse budget -- not named");
+    }
+    Remember(error, std::move(parsed.grammar_error));
+    return out;
+  }
+
+  scanner.query_deadline = Deadline{deadline, nullptr};
+  scanner.query_options.payload = &scanner.query_deadline;
+  scanner.query_options.progress_callback = StopQueryAtDeadline;
+
+  const auto collect = [&](const CompiledQuery& query, std::vector<CaptureSpan>& into) {
+    const std::span<const std::string> names = CaptureNamesOf(query);
+    ts_query_cursor_set_byte_range(scanner.cursor, 0, scan_end);
+    ts_query_cursor_exec_with_options(scanner.cursor, QueryOf(query),
+                                      ts_tree_root_node(parsed.tree.get()),
+                                      &scanner.query_options);
+    TSQueryMatch match;
+    while (ts_query_cursor_next_match(scanner.cursor, &match)) {
+      if (!PredicatesHold(query, match, NodeTextIn, &text)) continue;
+      for (uint16_t i = 0; i < match.capture_count; ++i) {
+        const TSNode node = match.captures[i].node;
+        const uint32_t at = match.captures[i].index;
+        if (at >= names.size()) continue;
+        into.push_back(CaptureSpan{ts_node_start_byte(node), ts_node_end_byte(node), names[at]});
+      }
+    }
+  };
+
+  std::vector<CaptureSpan> ranges;
+  std::vector<CaptureSpan> named;
+  collect(*objects, ranges);
+  collect(*definitions, named);
+  std::erase_if(ranges, [](const CaptureSpan& one) { return one.name != "function.around"; });
+  if (ranges.empty()) return out;
+
+  // The earliest definitions capture inside a function's own span is that
+  // function's declarator -- anything nested starts after it. The same rule as
+  // navigate.cpp's DefinitionNameIn, which is what makes a name written here
+  // and a name written there the same string.
+  std::ranges::sort(named, [](const CaptureSpan& a, const CaptureSpan& b) {
+    return (a.from != b.from) ? (a.from < b.from) : (a.to < b.to);
+  });
+  const std::vector<std::size_t> starts = LineStarts(text);
+
+  out.reserve(ranges.size());
+  for (const CaptureSpan& range : ranges) {
+    const CaptureSpan* first = nullptr;
+    for (const CaptureSpan& one : named) {
+      if (one.from >= range.to) break;
+      if ((one.from < range.from) || (one.to > range.to)) continue;
+      first = &one;
+      break;
+    }
+    if (first == nullptr) continue;
+    std::string name = NormalizeAnchorLine(text.substr(first->from, first->to - first->from));
+    if (name.empty()) continue;
+    for (char& c : name) {
+      if ((c == '\n') || (c == '\r') || (c == '\t')) c = ' ';
+    }
+    DefinitionSpan span;
+    span.name = std::move(name);
+    span.from_line = LineOf(starts, range.from);
+    span.to_line = LineOf(starts, (range.to > range.from) ? (range.to - 1) : range.from);
+    out.push_back(std::move(span));
   }
   return out;
 }

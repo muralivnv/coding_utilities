@@ -7,12 +7,29 @@
 
 namespace koi {
 
+// anchor.cpp -- the resolve ladder, the heal job and the live-shift shadow
+void AnchorLineRules();
+void AnchorPatienceDiff();
+void AnchorEditDistance();
+void AnchorResolveLadder();
+void AnchorHealJobShapes();
+void AnchorHealWriteBack();
+void AnchorLiveShifting();
+void AnchorJumpBackwardFollowsEdits();
+void AnchorHealsThroughGit();
+void AnchorHealNamesTheSymbol();
+void AnchorHealCost();
+void AnchorHealsFromTheEditor();
+void AnchorHealAtFileEdges();
+void AnchorHealStaleness();
+
 // cli.cpp -- the non-interactive command line modes
 void CliModes();
 
 // commands.cpp -- the command registry and what each typable command does to a buffer
 void CommandRegistry();
 void EditingModel();
+void GotoLineCommand();
 void SetIndentAndLanguage();
 void TypableCommandList();
 void PromptCompletion();
@@ -73,6 +90,14 @@ void TrimOnSave();
 void AtomicWriteFollowsSymlinksAndKeepsHardLinks();
 void ConcurrentSavesNeitherBlendNorShareATemp();
 
+// fuzzy.cpp -- the smart-jump scorer: the DP, the bands, the blend
+void CompactMatchesBeatScatteredOnes();
+void CamelCaseCostsAndEarnsNothing();
+void BandsSeparateNameMatchesFromPathMatches();
+void TheBlendIsHandCheckable();
+void SpansAlwaysSpellTheNeedle();
+void ScoringAThousandRowsFitsTheKeystrokeBudget();
+
 // indent.cpp -- the tree-sitter indent engine and the newline path it feeds
 void TreeIndentEngine();
 void TreeIndentFallbacks();
@@ -87,6 +112,19 @@ void TreeIndentSaysNothingAboutAParseItNeverGot();
 void TreeIndentWarnsOncePerBrokenQuery();
 void TreeIndentBudgetsBoundTheKeystroke();
 void TreeIndentFuzz(Rng& rng);
+
+// smartjump.cpp -- the parser, the corpus snapshot, the pipeline and the landing
+void SmartJumpParsing();
+void SmartJumpPipeline();
+void SmartJumpBranchDiffPrior();
+void SmartJumpFeedbackText();
+void SmartJumpLanding();
+void SmartJumpAdaptiveLoop();
+void SmartJumpStepping();
+void SmartJumpAutoFire();
+void SmartJumpBounceRule();
+void SmartJumpArrivalRules();
+void SmartJumpSnapshotCost();
 
 // jumplist.cpp -- the jump list
 void JumpList();
@@ -126,11 +164,13 @@ void PickerCommands();
 void SelfIsRunnableByName();
 void PickerPipelines();
 void FilePickerRanking();
+void TheFilePickerLiftsFilesChangedOnThisBranch();
 void FileFilter();
 void BufferPickerRows();
 void PickerCommandShape();
 void FilePinsLandWhereYouLeft();
 void LastEditIsFoundAcrossFiles();
+void BoundaryRecording();
 
 // overview.cpp -- the overview mode
 void OverviewMarksTheSectionsItCouldNotFinish();
@@ -151,6 +191,7 @@ void PieceTreeArithmetic();
 // project.cpp -- the project store: state paths, the database, visits and symbols
 void ProjectState();
 void ProjectPaths();
+void LocationWrites();
 void ProjectStoreRobustness();
 void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites();
 void LegacyProjectStateIsSeededNotStolen();
@@ -161,6 +202,18 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory();
 void StorePathsResolveAgainstTheRootFromBelowIt();
 void VisitReadsAreBoundedAndTheTableIsPruned();
 void SymbolReadsAreBoundedAndTheTableIsPruned();
+void AV3StoreIsFoldedIntoOneDatabase();
+void TheJumpCursorBecomesARowId();
+void TheStoreKeepsOnlyPathsWorthKeeping();
+void TheBranchIsReadOffTheHeadFile();
+void FrecencyIsWeightTimesARecencyMultiplier();
+void TheStoreAgesItselfWhenItGetsHeavy();
+void TheVisitDebounceCountsFromTheLastCountedVisit();
+void TheLostJumpImportIsPutBack();
+void TwoOpensCannotMigrateTwice();
+void TheBranchARowWasMadeOnIsABonus();
+void TheBranchDiffIsReadOncePerBranch();
+void AConfirmedQueryEarnsItsPlaceAndDecaysOut();
 
 // query.cpp -- the file/query layer: whole-file reads, byte ranges, predicates and properties
 void ReadWholeFileContract();

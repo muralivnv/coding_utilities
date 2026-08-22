@@ -18,11 +18,15 @@ set(KOI_LIB_SOURCES
     src/textobject.cpp
     src/theme.cpp
     src/render.cpp
+    src/anchor.cpp
     src/jumplist.cpp
     src/keylog.cpp
     src/project.cpp
+    src/sha1.cpp
     src/navigate.cpp
-    src/error.cpp)
+    src/smartjump.cpp
+    src/error.cpp
+    src/fuzzy.cpp)
 
 add_library(koi_lib STATIC ${KOI_LIB_SOURCES})
 target_include_directories(koi_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -45,12 +49,14 @@ target_compile_options(koi PRIVATE ${ADDITIONAL_COMPILER_FLAGS})
 set(KOI_TEST_SOURCES
     src/tests/main.cpp
     src/tests/test_support.cpp
+    src/tests/anchor.cpp
     src/tests/cli.cpp
     src/tests/commands.cpp
     src/tests/crash.cpp
     src/tests/editor.cpp
     src/tests/excerpt.cpp
     src/tests/files.cpp
+    src/tests/fuzzy.cpp
     src/tests/indent.cpp
     src/tests/jumplist.cpp
     src/tests/keylog.cpp
@@ -66,6 +72,7 @@ set(KOI_TEST_SOURCES
     src/tests/search.cpp
     src/tests/selection.cpp
     src/tests/shell.cpp
+    src/tests/smartjump.cpp
     src/tests/sqlite.cpp
     src/tests/symbols.cpp
     src/tests/syntax.cpp

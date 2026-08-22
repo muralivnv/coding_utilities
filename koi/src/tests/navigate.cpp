@@ -145,6 +145,66 @@ void FilePickerRanking() {
   fs::current_path(previous);
 }
 
+// The last frecency term, and the only one the store cannot apply: a file
+// changed on this branch is likelier to be the one you want next. It is a
+// multiplier on the score, so it reorders inside the frecent set and never
+// lifts a file that has never been visited into it.
+void TheFilePickerLiftsFilesChangedOnThisBranch() {
+  TEST_CASE("pickers: a file changed on this branch outranks a slightly hotter one");
+
+  namespace fs = std::filesystem;
+  const Scratch scratch{"koi-branch-rank"};
+  const fs::path dir = scratch.dir;
+  scratch.Write("alpha.txt", "a\n");
+  scratch.Write("bravo.txt", "b\n");
+
+  Editor ed;
+  std::string err;
+  ed.project = ProjectStore::Open(dir / "state.db", err);
+  EXPECT_TRUE(ed.project != nullptr);
+  if (ed.project == nullptr) return;
+
+  ed.settings.file_filter = "find . -maxdepth 1 -name '*.txt' -printf '%P\n'";
+  const fs::path previous = fs::current_path();
+  fs::current_path(dir);
+  SetProjectRoot(dir);
+  struct Restore {
+    fs::path was;
+    ~Restore() {
+      SetProjectRoot({});
+      fs::current_path(was);
+    }
+  } restore{previous};
+
+  const auto first_row = [](const std::string& rows) {
+    std::string name = rows.substr(0, rows.find('\n'));
+    name = name.substr(0, name.find('\t'));
+    while (!name.empty() && (name.back() == ' ')) name.pop_back();
+    return name;
+  };
+
+  // 84 against 80, both in the same recency bucket, so alpha is ahead by more
+  // than a rounding wobble and by less than the 10% the bonus is worth.
+  for (int i = 0; i < 21; ++i) ed.project->RecordVisit("alpha.txt", 1, 0);
+  for (int i = 0; i < 20; ++i) ed.project->RecordVisit("bravo.txt", 1, 0);
+  EXPECT_EQ(first_row(RankedFileRows(ed)), std::string{"alpha.txt"});
+
+  // Gated on a git that runs; without one the assertion above is the whole
+  // contract, since the branch diff is empty and the ranking is unchanged.
+  if (std::system("git --version >/dev/null 2>&1") != 0) return;
+  const std::string at = "git -C '" + dir.string() + "' -c user.email=koi@test -c user.name=koi ";
+  if (std::system(("git -c init.defaultBranch=main init -q '" + dir.string() + "' >/dev/null 2>&1")
+                      .c_str()) != 0) {
+    return;
+  }
+  EXPECT_EQ(std::system((at + "add alpha.txt bravo.txt >/dev/null 2>&1").c_str()), 0);
+  EXPECT_EQ(std::system((at + "commit -q -m init >/dev/null 2>&1").c_str()), 0);
+  EXPECT_EQ(std::system((at + "checkout -q -b feature >/dev/null 2>&1").c_str()), 0);
+  scratch.Write("bravo.txt", "b changed\n");
+
+  EXPECT_EQ(first_row(RankedFileRows(ed)), std::string{"bravo.txt"});
+}
+
 void FileFilter() {
   TEST_CASE("pickers: file-filter feeds every project-wide pipeline");
 
@@ -394,6 +454,7 @@ void FilePinsLandWhereYouLeft() {
   TEST_CASE("pins: a jump lands where you last were, not where you pinned");
 
   const Scratch scratch{"koi-file-pins"};
+  const AsProjectRoot root{scratch.dir};
   const std::filesystem::path a = scratch.Write("fa.cpp", NumberedLines(40));
   const std::filesystem::path b = scratch.Write("fb.cpp", NumberedLines(40));
   Editor ed;
@@ -457,6 +518,8 @@ void LastEditIsFoundAcrossFiles() {
   TEST_CASE("goto_last_edit: the newest edit wins, whichever file it is in");
 
   const Scratch scratch{"koi-last-edit"};
+  // The store keeps the paths of its own project, so the fixture is one.
+  const AsProjectRoot root{scratch.dir};
   const std::filesystem::path a = scratch.Write("ea.cpp", NumberedLines(30));
   const std::filesystem::path b = scratch.Write("eb.cpp", NumberedLines(30));
   Editor ed;
@@ -510,7 +573,7 @@ void LastEditIsFoundAcrossFiles() {
     // It goes through the same door every cross-file move does, so `[[` comes
     // back from it -- which needs a jump store to have anywhere to record.
     std::string jump_error;
-    ed.jumps = JumpStore::Open(scratch.dir / "jumps.db", "pane-edit", jump_error);
+    ed.jumps = OpenJumpStore(scratch.dir / "jumps.db", "pane-edit", jump_error);
     EXPECT_TRUE(ed.jumps != nullptr);
     EXPECT_TRUE(OpenTarget(ed, a.string() + ":12"));
     RunCommands(ed, {"goto_last_edit"});
@@ -518,6 +581,357 @@ void LastEditIsFoundAcrossFiles() {
     RunCommands(ed, {"jump_backward"});
     EXPECT_EQ(ed.doc.file.filename().string(), std::string{"ea.cpp"});
     EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{11});
+  }
+}
+
+namespace {
+
+// A source file with two functions and a line that appears twice, which is
+// what the symbol, content and uniq assertions below are made of.
+// The two functions are more than kLocationMergeLines apart, so a record in
+// each is a record in two places.
+constexpr std::string_view kRecordSample =
+    "#include <cstdio>\n"    // 1
+    "\n"                     // 2
+    "int Alpha(int n) {\n"   // 3
+    "  int total = 0;\n"     // 4
+    "  total += n;\n"        // 5
+    "  return total;\n"      // 6
+    "}\n"                    // 7
+    "\n"                     // 8
+    "// filler 1\n"          // 9
+    "// filler 2\n"          // 10
+    "// filler 3\n"          // 11
+    "// filler 4\n"          // 12
+    "// filler 5\n"          // 13
+    "// filler 6\n"          // 14
+    "// filler 7\n"          // 15
+    "// filler 8\n"          // 16
+    "// filler 9\n"          // 17
+    "\n"                     // 18
+    "int Beta(int n) {\n"    // 19
+    "  int total = 0;\n"     // 20  -- the same line as 4
+    "  return total * 2;\n"  // 21
+    "}\n";                   // 22
+
+void PutCursorOnLine(Editor& ed, Index line) {
+  const Index at = LineStart(ed.doc.table, line - 1);
+  ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{at, at, -1}));
+}
+
+}
+
+void BoundaryRecording() {
+  TEST_CASE("recording: what a location row says about the place it was made at");
+
+  const Scratch scratch{"koi-record-boundary"};
+  const AsProjectRoot root{scratch.dir};
+  const std::filesystem::path source = scratch.Write("rec.cpp", kRecordSample);
+  const std::filesystem::path db = scratch.dir / "rec.db";
+
+  Editor ed;
+  ed.theme = BuiltinTheme();
+  std::string error;
+  ed.project = ProjectStore::Open(db, error);
+  EXPECT_TRUE(ed.project != nullptr);
+  if (ed.project == nullptr) return;
+  EXPECT_FALSE(static_cast<bool>(LoadDocument(source, ed.doc)));
+  ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
+  AttachSyntax(ed);
+  EXPECT_TRUE(ed.doc.syntax != nullptr);
+
+  {
+    // Inside Alpha: the enclosing definition comes off the live tree, and the
+    // duplicated line is not unique in this buffer.
+    PutCursorOnLine(ed, 4);
+    LocationRecord row;
+    EXPECT_TRUE(LocationHere(ed, row));
+    EXPECT_EQ(row.line, Index{4});
+    EXPECT_EQ(row.symbol, std::string{"Alpha"});
+    EXPECT_EQ(row.content, std::string{"int total = 0;"});
+    // Two lines either side, in order, and the blank one keeps its place.
+    EXPECT_EQ(row.context, std::string{"\nint Alpha(int n) {\ntotal += n;\nreturn total;"});
+    EXPECT_EQ(row.uniq, std::int64_t{2});
+
+    // The other function, and a line only it has.
+    PutCursorOnLine(ed, 21);
+    EXPECT_TRUE(LocationHere(ed, row));
+    EXPECT_EQ(row.symbol, std::string{"Beta"});
+    EXPECT_EQ(row.content, std::string{"return total * 2;"});
+    EXPECT_EQ(row.uniq, std::int64_t{1});
+
+    // Outside every function there is no enclosing definition to name.
+    PutCursorOnLine(ed, 1);
+    EXPECT_TRUE(LocationHere(ed, row));
+    EXPECT_EQ(row.symbol, std::string{});
+  }
+
+  TEST_CASE("recording: the blob is git's, and only for a buffer that is still the file");
+  {
+    // Computed by hand from the rule git uses -- sha1 of "blob <len>\0" and the
+    // bytes -- so this is checked against the definition rather than against
+    // this implementation of it.
+    EXPECT_EQ(GitBlobOid(""), std::string{"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"});
+    EXPECT_EQ(GitBlobOid("hello"), std::string{"b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0"});
+    EXPECT_EQ(GitBlobOid("what is up, doc?"),
+              std::string{"bd9dbf5aae1a3862dd1526723246b20206e5fc37"});
+
+    PutCursorOnLine(ed, 5);
+    LocationRecord row;
+    EXPECT_TRUE(LocationHere(ed, row));
+    EXPECT_EQ(row.blob, GitBlobOid(kRecordSample));
+
+    // Dirty against disk: the blob would name bytes this buffer no longer
+    // holds, so there is none.
+    ed.doc.modified = true;
+    EXPECT_TRUE(LocationHere(ed, row));
+    EXPECT_EQ(row.blob, std::string{});
+    ed.doc.modified = false;
+  }
+
+  TEST_CASE("recording: content and context are cut on a code point");
+  {
+    const std::filesystem::path wide = scratch.Write("wide.txt", "");
+    std::string line;
+    // Two hundred and one bytes of three-byte code points, so the cut lands
+    // inside one and has to walk back off it.
+    for (int i = 0; i < 67; ++i) line += "\xE4\xB8\xAD";
+    WriteFixtureFile(wide, "  " + line + "  \n" + line + "\ntail\n");
+
+    Editor other;
+    other.theme = BuiltinTheme();
+    other.project = ed.project;
+    EXPECT_FALSE(static_cast<bool>(LoadDocument(wide, other.doc)));
+    other.doc.selections.Set(MinWidth1(other.doc.table, Selection{0, 0, -1}));
+    PutCursorOnLine(other, 2);
+    LocationRecord row;
+    EXPECT_TRUE(LocationHere(other, row));
+    // Whitespace off both ends, 198 bytes kept of 201, and still valid UTF-8.
+    EXPECT_EQ(row.content.size(), std::size_t{198});
+    EXPECT_TRUE(IsWellFormedUtf8(row.content));
+    EXPECT_TRUE(IsWellFormedUtf8(row.context));
+    // Four entries, always: the slot off the top of the file, the line above
+    // cut the same way, the short one below, and the empty last line of the
+    // file after it. Positional, so empties and off-the-end slots both count.
+    EXPECT_EQ(row.context.size(), std::size_t{1 + 198 + 1 + 4 + 1});
+    // Both wide lines normalise to the same text, so neither is unique.
+    EXPECT_EQ(row.uniq, std::int64_t{2});
+
+    // And a cut that lands on a boundary keeps every byte it is allowed.
+    WriteFixtureFile(wide, std::string(250, 'x') + "\n");
+    EXPECT_FALSE(static_cast<bool>(LoadDocument(wide, other.doc)));
+    other.doc.selections.Set(MinWidth1(other.doc.table, Selection{0, 0, -1}));
+    EXPECT_TRUE(LocationHere(other, row));
+    EXPECT_EQ(row.content.size(), std::size_t{200});
+  }
+
+  TEST_CASE("recording: linger and edit boundaries, and what they debounce");
+  {
+    sqlite3* reader = nullptr;
+    EXPECT_EQ(sqlite3_open(db.c_str(), &reader), SQLITE_OK);
+    const auto scalar = [&reader](const char* sql) {
+      Stmt stmt{reader, sql};
+      return (stmt && stmt.Step()) ? stmt.Integer(0) : std::int64_t{-1};
+    };
+    const auto rows = [&scalar] { return scalar("SELECT COUNT(*) FROM locations;"); };
+
+    PutCursorOnLine(ed, 5);
+    NoteCommandBoundary(ed);
+    // Nothing yet: the cursor has only just arrived.
+    NoteInputBoundary(ed);
+    EXPECT_EQ(rows(), std::int64_t{0});
+
+    // Three seconds of sitting still, which the test reaches by ageing the
+    // arrival rather than by waiting for it.
+    ed.record.since -= kLingerSeconds + 1;
+    NoteInputBoundary(ed);
+    EXPECT_EQ(rows(), std::int64_t{1});
+    EXPECT_EQ(scalar("SELECT kind FROM locations;"), std::int64_t{0});
+    EXPECT_EQ(scalar("SELECT line FROM locations;"), std::int64_t{5});
+    EXPECT_EQ(scalar("SELECT uniq FROM locations;"), std::int64_t{1});
+
+    // And once only, however many events go by while it sits there.
+    ed.record.since -= kLingerSeconds + 1;
+    NoteInputBoundary(ed);
+    EXPECT_EQ(scalar("SELECT visits FROM locations;"), std::int64_t{1});
+
+    // The symbol the linger was inside is a visit to that symbol, which is the
+    // row `d <name>` reads and which nothing but a symbol jump used to write.
+    EXPECT_EQ(scalar("SELECT visits FROM symbols WHERE symbol='Alpha';"), std::int64_t{1});
+    EXPECT_EQ(scalar("SELECT COUNT(*) FROM symbols;"), std::int64_t{1});
+    // The line is where the definition starts, not where the cursor was in it.
+    EXPECT_EQ(scalar("SELECT line FROM symbols WHERE symbol='Alpha';"), std::int64_t{3});
+
+    // An edit is a boundary of its own, and this one is at the place the
+    // linger recorded: one row, which the edit takes over. A place edited is
+    // an edit row from then on -- the kind never walks back to visit.
+    TypeInto(ed, 'X');
+    NoteCommandBoundary(ed);
+    EXPECT_EQ(rows(), std::int64_t{1});
+    EXPECT_EQ(scalar("SELECT kind FROM locations;"), std::int64_t{1});
+    // The file's own row counts the burst, not the keystrokes -- and the edit
+    // is counted even though the linger's window has not run out, because a
+    // visit and an edit at one place are two different things to record.
+    EXPECT_EQ(scalar("SELECT edits FROM files;"), std::int64_t{1});
+
+    // Typing on: one burst, one record. Neither the row nor the file's edit
+    // count moves again inside the window.
+    for (int i = 0; i < 20; ++i) {
+      TypeInto(ed, 'y');
+      NoteCommandBoundary(ed);
+    }
+    EXPECT_EQ(rows(), std::int64_t{1});
+    EXPECT_EQ(scalar("SELECT visits FROM locations;"), std::int64_t{1});
+    EXPECT_EQ(scalar("SELECT edits FROM files;"), std::int64_t{1});
+
+    // Far enough away is a new place even inside the window, and a second
+    // symbol to have been in.
+    PutCursorOnLine(ed, 21);
+    NoteCommandBoundary(ed);
+    TypeInto(ed, 'Z');
+    NoteCommandBoundary(ed);
+    EXPECT_EQ(rows(), std::int64_t{2});
+    EXPECT_EQ(scalar("SELECT edits FROM files;"), std::int64_t{2});
+    EXPECT_EQ(scalar("SELECT COUNT(*) FROM symbols;"), std::int64_t{2});
+    EXPECT_EQ(scalar("SELECT visits FROM symbols WHERE symbol='Beta';"), std::int64_t{1});
+
+    sqlite3_close(reader);
+  }
+
+  TEST_CASE("recording: a cold buffer records no symbol rather than parsing for one");
+  {
+    // No syntax attached is the shape a record takes on a buffer nothing has
+    // painted yet. TextObjectRanges would parse the whole file to answer --
+    // 21 ms on the input loop -- so the answer is that there is no answer.
+    Editor cold;
+    cold.project = ed.project;
+    EXPECT_FALSE(static_cast<bool>(LoadDocument(source, cold.doc)));
+    cold.doc.selections.Set(MinWidth1(cold.doc.table, Selection{0, 0, -1}));
+    PutCursorOnLine(cold, 4);
+    EXPECT_TRUE(cold.doc.syntax == nullptr);
+    LocationRecord row;
+    EXPECT_TRUE(LocationHere(cold, row));
+    EXPECT_EQ(row.symbol, std::string{});
+    EXPECT_EQ(row.content, std::string{"int total = 0;"});
+
+    // And neither an excerpt view nor a buffer with no file is a place at all.
+    Editor view;
+    view.doc.view_name = "references: total";
+    EXPECT_FALSE(LocationHere(view, row));
+    Editor scratch_buffer;
+    EXPECT_FALSE(LocationHere(scratch_buffer, row));
+  }
+
+  TEST_CASE("recording: a nested definition names itself, not the one it is written in");
+  {
+    // Python nests named functions, which is what the enclosing-symbol cache
+    // has to survive. `inner`'s range is a strict subset of `outer`'s, so a
+    // cache kept on "the cursor is still inside the range we answered from"
+    // answers `outer` for every cursor in the body of `inner` -- a wrong name
+    // on the row, a wrong name credited in `symbols`, and rows inside `inner`
+    // merged onto the `outer` row whatever the distance between them.
+    const std::filesystem::path nested = scratch.Write("nest.py",
+                                                       "def outer(n):\n"          // 1
+                                                       "    total = 0\n"          // 2
+                                                       "    def inner(k):\n"      // 3
+                                                       "        return k * 2\n"   // 4
+                                                       "    total += inner(n)\n"  // 5
+                                                       "    return total\n");     // 6
+
+    Editor py;
+    py.theme = BuiltinTheme();
+    py.project = ed.project;
+    EXPECT_FALSE(static_cast<bool>(LoadDocument(nested, py.doc)));
+    py.doc.selections.Set(MinWidth1(py.doc.table, Selection{0, 0, -1}));
+    AttachSyntax(py);
+    EXPECT_TRUE(py.doc.syntax != nullptr);
+
+    // No edit anywhere below, so all three answers come out of one revision --
+    // which is the whole of the question being asked.
+    LocationRecord row;
+    PutCursorOnLine(py, 2);
+    EXPECT_TRUE(LocationHere(py, row));
+    EXPECT_EQ(row.symbol, std::string{"outer"});
+
+    PutCursorOnLine(py, 4);
+    EXPECT_TRUE(LocationHere(py, row));
+    EXPECT_EQ(row.symbol, std::string{"inner"});
+
+    // And back out of it again, in the same revision still.
+    PutCursorOnLine(py, 6);
+    EXPECT_TRUE(LocationHere(py, row));
+    EXPECT_EQ(row.symbol, std::string{"outer"});
+  }
+
+  TEST_CASE("recording: a debounced boundary does not read the buffer");
+  {
+    // Describing a place is a read of the whole document -- the uniq census --
+    // and an edit boundary is one record per revision by construction, so the
+    // per-revision cache behind that census never once hits on the typing path.
+    // The debounce therefore has to be decided before the place is described:
+    // otherwise every keystroke of a burst pays for a description that is
+    // thrown away, and what it pays scales with the file.
+    std::string big;
+    big.reserve(1900000);
+    for (int i = 0; big.size() < 1800000; ++i) {
+      big += "  const int value_" + std::to_string(i) + " = compute(" + std::to_string(i % 97) +
+             ");\n";
+    }
+    const std::filesystem::path large = scratch.Write("large.cpp", big);
+
+    Editor fat;
+    fat.theme = BuiltinTheme();
+    fat.project = ed.project;
+    EXPECT_FALSE(static_cast<bool>(LoadDocument(large, fat.doc)));
+    fat.doc.selections.Set(MinWidth1(fat.doc.table, Selection{0, 0, -1}));
+    // Under both of the census's own ceilings, so it is a buffer the census
+    // would run on if it were reached at all.
+    EXPECT_TRUE(DocLength(fat.doc.table) < Index{2 * 1024 * 1024});
+    EXPECT_TRUE(LineCount(fat.doc.table) < Index{100000});
+    PutCursorOnLine(fat, 200);
+
+    // The first two boundaries are the place arriving and then being edited:
+    // both write. Everything after is the same place inside the same window.
+    NoteCommandBoundary(fat);
+    TypeInto(fat, 'x');
+    NoteCommandBoundary(fat);
+
+    constexpr int kKeystrokes = 100;
+    long long best_us = -1;
+    // Three passes, best of: the suite runs alongside whatever else the machine
+    // is doing, and one descheduled run is not a regression.
+    for (int pass = 0; pass < 3; ++pass) {
+      const auto started = std::chrono::steady_clock::now();
+      for (int i = 0; i < kKeystrokes; ++i) {
+        TypeInto(fat, 'y');
+        NoteCommandBoundary(fat);
+      }
+      const long long us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - started)
+                               .count();
+      if ((best_us < 0) || (us < best_us)) best_us = us;
+    }
+    const long long per_us = best_us / kKeystrokes;
+    std::cout << "boundary bench: " << kKeystrokes << " debounced boundaries at "
+              << (DocLength(fat.doc.table) / 1024) << "KB in " << best_us << "us (" << per_us
+              << "us each)\n";
+    // The whole burst wrote one row and counted one edit burst, whatever it
+    // cost: the measurement above is of the path that does nothing.
+    EXPECT_EQ(fat.record.wrote_line, Index{200});
+
+    // What the bound separates is a boundary whose cost is the buffer's size
+    // from one whose cost is a handful of comparisons. Describing this place
+    // costs about 4 ms, so a hundred of them is four hundred thousand
+    // microseconds; deciding not to describe it is about two.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    // A sanitizer build is optimized and still several times slower; the number
+    // measures the instrumentation, not the design.
+    EXPECT_TRUE(best_us < 100000);
+#elif defined(__OPTIMIZE__)
+    EXPECT_TRUE(best_us < 5000);
+#else
+    EXPECT_TRUE(best_us < 100000);
+#endif
   }
 }
 }  // namespace koi

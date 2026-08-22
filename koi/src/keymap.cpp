@@ -480,6 +480,7 @@ void ReadSettings(const toml::table& root, Settings& settings, std::vector<std::
 
   ed.Flag("record", settings.record);
   ed.Flag("trim_trailing_whitespace_on_save", settings.trim_trailing_whitespace_on_save);
+  ed.Flag("smart-jump-auto", settings.smart_jump_auto);
 
   ed.Get<std::string>("line-number", "\"relative\" or \"absolute\"",
                       [&settings](const std::string& v) {
@@ -624,6 +625,9 @@ L = "extend_next_long_word_start"
 p = ["page_cursor_half_up", "align_view_center"]
 n = ["page_cursor_half_down", "align_view_center"]
 
+G = ["goto_line", "align_view_center"]
+"A-G" = ["extend_to_line", "align_view_center"]
+
 "," = ["goto_line_end", "move_char_right"]
 ";" = "goto_first_nonwhitespace"
 "<" = "extend_to_line_end"
@@ -702,6 +706,10 @@ pagedown = ["page_down", "align_view_center"]
 "+" = "increment_excerpt_context"
 "=" = "increment_excerpt_context"
 "-" = "decrement_excerpt_context"
+
+h = ["smart_jump", "align_view_center"]
+b = ["smart_jump_next", "align_view_center"]
+B = ["smart_jump_prev", "align_view_center"]
 
 [keys.normal."Z"]
 i = "scroll_up"

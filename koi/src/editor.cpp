@@ -21,6 +21,7 @@
 
 #include "commands.h"
 #include "query.h"
+#include "sha1.h"
 #include "unicode.h"
 
 namespace koi {
@@ -303,6 +304,7 @@ ErrorCtx LoadDocument(const fs::path& path, Document& doc) {
   doc.view_name.clear();
   doc.read_only = false;
   doc.disk_stamp = FileStamp{};
+  doc.disk_blob.clear();
   doc.saved_undo_serial = 0;
   // The one call site that wants a missing file to read as an empty document --
   // opening a path that is not there yet is how a new file is started. Said
@@ -331,6 +333,7 @@ ErrorCtx LoadDocument(const fs::path& path, Document& doc) {
   if (!IsWellFormedUtf8(text)) {
     return MakeErrorCtx(PieceTableErrorCode::kMalformedUtf8Input);
   }
+  doc.disk_blob = BlobOidOf(text);
   ResetToOriginal(doc.table, std::move(text));
   DetectIndentation(doc);
   doc.selections.Set(Selection{});
@@ -338,6 +341,11 @@ ErrorCtx LoadDocument(const fs::path& path, Document& doc) {
   doc.modified = false;
   if (stamped) doc.disk_stamp = std::move(stamp);
   return Success();
+}
+
+std::string BlobOidOf(std::string_view text) {
+  if (text.size() > kMaxBlobBytes) return {};
+  return GitBlobOid(text);
 }
 
 bool StampFile(const std::string& path, FileStamp& out) {
@@ -546,9 +554,12 @@ ErrorCtx AtomicWriteFile(const fs::path& path, std::string_view text) {
   return Success();
 }
 
-ErrorCtx SaveDocumentAs(Document& doc, const fs::path& path) {
-  const std::string text = ReadDocRange(doc.table, Interval(0, DocLength(doc.table)));
+ErrorCtx SaveDocumentAs(Document& doc, const fs::path& path, std::string* wrote) {
+  std::string text = ReadDocRange(doc.table, Interval(0, DocLength(doc.table)));
   if (const ErrorCtx err = AtomicWriteFile(path, text); err) return err;
+  // The bytes that just became the file's, so this is the one other place the
+  // blob is free -- and the record path never hashes a buffer of its own.
+  doc.disk_blob = BlobOidOf(text);
   doc.file = path;
   doc.view_name.clear();
   doc.modified = false;
@@ -559,6 +570,7 @@ ErrorCtx SaveDocumentAs(Document& doc, const fs::path& path) {
   std::ignore = StampFile(path.string(), doc.disk_stamp);
   std::error_code recover_ec;
   fs::remove(RecoveryPathFor(path.string()), recover_ec);
+  if (wrote != nullptr) *wrote = std::move(text);
   return Success();
 }
 
@@ -1440,7 +1452,17 @@ void ApplyModeInvariants(Editor& ed) {
 }
 
 std::vector<std::string>& PromptHistoryOf(Editor& ed) {
-  return (ed.prompt_kind == PromptKind::kCommand) ? ed.prompt_history : ed.search_history;
+  // Three histories, not two: a smart-jump query and a regex look nothing like
+  // each other, and up-arrow in one prompt offering the other's last line is a
+  // history that is no use in either.
+  switch (ed.prompt_kind) {
+    case PromptKind::kCommand: return ed.prompt_history;
+    case PromptKind::kSmartJump: return ed.jump_history;
+    case PromptKind::kSearch:
+    case PromptKind::kSelectRegex:
+    case PromptKind::kSearchExcerpts: break;
+  }
+  return ed.search_history;
 }
 
 std::string_view PromptSigil(const Editor& ed) {
@@ -1448,6 +1470,7 @@ std::string_view PromptSigil(const Editor& ed) {
     case PromptKind::kSearch: return "/";
     case PromptKind::kSelectRegex: return "select:";
     case PromptKind::kSearchExcerpts: return "search:";
+    case PromptKind::kSmartJump: return "jump:";
     case PromptKind::kCommand: break;
   }
   return ":";

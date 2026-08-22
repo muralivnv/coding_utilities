@@ -4,11 +4,13 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <optional>
 #include <span>
 
+#include "anchor.h"
 #include "indent.h"
 #include "jumplist.h"
 #include "keylog.h"
@@ -1881,6 +1883,29 @@ void FromCommandCancel(Editor& ed, std::string_view rest) {
   if (!CancelCommandJob(ed)) ed.status.Warn("no :from command is running");
 }
 
+// helix's `G`: the 1-based line the count names, clamped to the buffer; with no
+// count, the last line -- so `goto_line` with nothing typed is `goto_last_line`.
+//
+// The landing is the start of the line, like goto_file_start and goto_last_line
+// -- not the first non-blank, which is `;` and stays a separate keystroke.
+// "Last line" is Motion::kLastLine's: the trailing newline's empty line is not
+// a line you can land on, and the clamp uses the same one so a count past the
+// end and no count at all agree about where the end is.
+void GotoLine(Editor& ed, bool extend) {
+  RecordJump(ed);
+  Index last = std::max<Index>(0, LineCount(ed.doc.table) - 1);
+  if ((last > 0) && LineRange(ed.doc.table, last).empty()) --last;
+
+  const Index row =
+      (ed.pending_count == 0) ? last : std::clamp<Index>(ed.pending_count - 1, 0, last);
+  const Index pos = LineStart(ed.doc.table, row);
+  for (Selection& s : ed.doc.selections.MutableRanges()) {
+    s = PutCursor(ed.doc.table, s, pos, extend);
+    s.goal_column = -1;
+  }
+  ed.doc.selections.Normalize(ed.doc.table);
+}
+
 #define KOI_CMD(...) [](Editor& ed) __VA_ARGS__
 
 constexpr std::array kCommands = std::to_array<CommandDef>({
@@ -1937,6 +1962,7 @@ constexpr std::array kCommands = std::to_array<CommandDef>({
     {"extend_till_prev_char", KOI_CMD({ ArmFindChar(ed, PendingChar::kTillPrev, true); }), "extend back to after the previous occurrence"},
     {"extend_to_file_end", KOI_CMD({ DoMove(ed, Motion::kDocEnd, true); }), "extend to end of file"},
     {"extend_to_file_start", KOI_CMD({ DoMove(ed, Motion::kDocStart, true); }), "extend to start of file"},
+    {"extend_to_line", KOI_CMD({ GotoLine(ed, true); }), "extend to the line the count names, else the last line"},
     {"extend_to_line_bounds", KOI_CMD({ SelectWholeLines(ed, false); }), "grow the selection to whole lines"},
     {"extend_to_line_end", KOI_CMD({ DoMove(ed, Motion::kLineEnd, true); }), "extend to end of line"},
     {"extend_to_line_start", KOI_CMD({ DoMove(ed, Motion::kLineStart, true); }), "extend to start of line"},
@@ -1951,6 +1977,7 @@ constexpr std::array kCommands = std::to_array<CommandDef>({
     {"goto_first_nonwhitespace", KOI_CMD({ DoMove(ed, Motion::kLineFirstNonBlank, false); }), "go to the first non-blank"},
     {"goto_last_edit", KOI_CMD({ GoToLastEdit(ed); }), "go to the most recent edit, in whichever file it was"},
     {"goto_last_line", KOI_CMD({ RecordJump(ed); DoMove(ed, Motion::kLastLine, false); }), "go to the last line"},
+    {"goto_line", KOI_CMD({ GotoLine(ed, false); }), "go to the line the count names, else the last line"},
     {"goto_line_end", KOI_CMD({ DoMove(ed, Motion::kLineEnd, false); }), "go to the end of the line"},
     {"goto_line_start", KOI_CMD({ DoMove(ed, Motion::kLineStart, false); }), "go to the start of the line"},
     {"goto_next_buffer", KOI_CMD({ StepBuffer(ed, true); }), "go to the next buffer"},
@@ -2044,6 +2071,9 @@ constexpr std::array kCommands = std::to_array<CommandDef>({
     {"show_references", KOI_CMD({ ShowReferences(ed); }), "every use of the selection"},
     {"shrink_height", KOI_CMD({ ResizeFocusedPane(ed, ResizeAxis::kHeight, false); }), "make this window a tenth shorter"},
     {"shrink_width", KOI_CMD({ ResizeFocusedPane(ed, ResizeAxis::kWidth, false); }), "make this window a tenth narrower"},
+    {"smart_jump", KOI_CMD({ SmartJumpPrompt(ed); }), "jump to somewhere you have been, by any part of it"},
+    {"smart_jump_next", KOI_CMD({ SmartJumpStep(ed, true); }), "the next place the last smart jump found"},
+    {"smart_jump_prev", KOI_CMD({ SmartJumpStep(ed, false); }), "the previous place the last smart jump found"},
     {"split_selection", KOI_CMD({ ArmPendingChar(ed, PendingChar::kSplitOn, false, "split on char..."); }), "split every selection on a character"},
     {"split_selection_on_newline", KOI_CMD({ SplitOnNewlines(ed); }), "one cursor per selected line"},
     {"surround_add", KOI_CMD({ ArmPendingChar(ed, PendingChar::kSurroundAdd, false, "surround with..."); }), "wrap the selection in a pair"},
@@ -2529,6 +2559,16 @@ class Recording {
 
 }
 
+void SearchPreviewJump(Editor& ed);
+
+// What a keystroke in the prompt costs, for the two kinds that answer while you
+// type. Both are cheap and both decline unless their own prompt is the one
+// open, so the key path calls this rather than knowing which is which.
+void PromptTyped(Editor& ed) {
+  SearchPreviewJump(ed);
+  SmartJumpPreview(ed);
+}
+
 void SearchPreviewJump(Editor& ed) {
   if (!ed.prompt_active || (ed.prompt_kind != PromptKind::kSearch)) return;
   PromptRestoreSearchOrigin(ed);
@@ -2559,22 +2599,22 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
             PromptCancel(ed);
           } else {
             PromptBackspace(ed);
-            SearchPreviewJump(ed);
+            PromptTyped(ed);
           }
           return;
         case NamedKey::kDelete:
           PromptDeleteForward(ed);
-          SearchPreviewJump(ed);
+          PromptTyped(ed);
           return;
         case NamedKey::kLeft: PromptMoveLeft(ed); return;
         case NamedKey::kRight: PromptMoveRight(ed); return;
         case NamedKey::kUp:
           PromptHistory(ed, true);
-          SearchPreviewJump(ed);
+          PromptTyped(ed);
           return;
         case NamedKey::kDown:
           PromptHistory(ed, false);
-          SearchPreviewJump(ed);
+          PromptTyped(ed);
           return;
         case NamedKey::kHome: PromptHome(ed); return;
         case NamedKey::kEnd: PromptEnd(ed); return;
@@ -2584,21 +2624,26 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
     if ((key.named == NamedKey::kTab) && (key.mods == kModNone)) {
       if (ed.prompt_kind == PromptKind::kCommand) {
         PromptComplete(ed);
+      } else if (ed.prompt_kind == PromptKind::kSmartJump) {
+        // One key to the picker, with the terms. The corpus is places you have
+        // been; when the answer is not in it, the thing that searches the
+        // project is one keystroke away and takes the query with it.
+        SmartJumpToPicker(ed);
       } else {
         PromptInsert(ed, "\t");
-        SearchPreviewJump(ed);
+        PromptTyped(ed);
       }
       return;
     }
     if ((key.mods == kModCtrl) && (key.code == 'u')) {
       ed.prompt_input.erase(0, ed.prompt_cursor);
       ed.prompt_cursor = 0;
-      SearchPreviewJump(ed);
+      PromptTyped(ed);
       return;
     }
     if (IsSelfInsert(key)) {
       PromptInsert(ed, KeyText(key));
-      SearchPreviewJump(ed);
+      PromptTyped(ed);
     }
     return;
   }
@@ -3195,16 +3240,51 @@ void ApplyPendingChar(Editor& ed, std::string_view grapheme) {
   ApplyModeInvariants(ed);
 }
 
-bool OpenFile(Editor& ed, const std::filesystem::path& path, bool open_generated=false);
-
+// A jump motion is a boundary, and the place it leaves is the one worth
+// keeping: the described row goes in, not just its coordinates, so a row this
+// writes carries the same content, symbol and blob a linger or an edit would
+// have given it. An excerpt view has none of that -- there is no file under it
+// -- and goes in as a position, which is all the step back into one needs. So
+// does an arrival that has not earned its row yet: see below.
 void RecordJump(Editor& ed) {
   if (!ed.jumps) return;
+  const Index cursor = CursorOf(ed.doc.table, ed.doc.selections.Primary());
+  const Index line = LineAt(ed.doc.table, cursor);
+  // An unconfirmed smart-jump arrival is not a place yet, and jumping onward is
+  // exactly how a mis-jump is rejected: describing it here would put the
+  // rejected landing into the corpus with content, a symbol visit and a fresh
+  // recency, which is the one thing the bounce rule exists to prevent. The
+  // position still goes in -- that is what jump_backward steps to, and a row
+  // without content is invisible to the smart-jump corpus.
+  const bool unconfirmed = ed.record.pending && (ed.record.pending_document == ed.doc.id) &&
+                           (std::abs((line + 1) - ed.record.pending_line) <= kLocationMergeLines);
+  if (LocationRecord row; !unconfirmed && LocationHere(ed, row)) {
+    row.exact = true;
+    ed.jumps->Record(row);
+    NoteRecordedHere(ed, row);
+    return;
+  }
   const std::filesystem::path where =
       HasDiskFile(ed.doc) ? ed.doc.file : std::filesystem::path{ed.doc.view_name};
   if (where.empty()) return;
-  const Index cursor = CursorOf(ed.doc.table, ed.doc.selections.Primary());
-  const Index line = LineAt(ed.doc.table, cursor);
   ed.jumps->Record(where, line + 1, cursor - LineStart(ed.doc.table, line) + 1);
+}
+
+void ShutdownEditor(Editor& ed) {
+  KillAllCommandJobs(ed);
+  // Joins the workers, and the pool drains what it has already accepted before
+  // it lets them go -- so every heal queued by the last save is finished by the
+  // time this returns.
+  StopScanWorker();
+  // So the pump goes here rather than in the loop's last turn: the work has
+  // already been done and waited for, and without this the lines it computed
+  // are dropped and the same job runs again next session. Nothing blocks --
+  // every job is finished -- and it goes before the records below so a healed
+  // line is in the store when they write next to it.
+  std::ignore = PumpAnchorHeals(ed);
+  RecordJump(ed);
+  RecordVisitHere(ed);
+  if (ed.recorder) ed.recorder->Flush();
 }
 
 namespace {
@@ -3246,13 +3326,25 @@ void StepJump(Editor& ed, bool forward) {
   target.column = jump.col;
   target.has_column = true;
 
-  std::error_code ec;
-  const std::filesystem::path here = std::filesystem::weakly_canonical(ed.doc.file, ec);
-  const bool already_here = IsExcerptView(ed.doc)
-                                ? (ed.doc.view_name == jump.path)
-                                : (HasDiskFile(ed.doc) && ((ec ? ed.doc.file : here) == target.path));
+  // Both sides through CanonicalOf, not a string compare: a jump comes back
+  // out of the store keyed against the project root, so it is spelled from
+  // here rather than absolutely, and "koi/src/x.cpp" against the open buffer's
+  // absolute path says "a different file" about the file already open.
+  const bool already_here =
+      IsExcerptView(ed.doc)
+          ? (ed.doc.view_name == jump.path)
+          : (HasDiskFile(ed.doc) &&
+             (CanonicalOf(ed.doc.file) == CanonicalOf(std::filesystem::path{target.path})));
   if (!already_here) {
     if (!OpenFile(ed, target.path, true )) return;
+  }
+  // The stored line is a cache, and in an open buffer it is the stalest thing
+  // in the room: every insertion above it since the row was written has moved
+  // the text it names. The shadow has been carrying those shifts through the
+  // journal all along, so ask it before jumping -- this is what stops a step
+  // back after an edit above the target from landing on the wrong line.
+  if (Index live = target.line; AnchorShadowLine(ed, ed.doc, jump.id, live)) {
+    target.line = live;
   }
   GoToTarget(ed.doc, target);
   ed.status.clear();
@@ -3458,6 +3550,7 @@ void PromptSubmit(Editor& ed) {
     case PromptKind::kSearch: RunSearch(ed, line); return;
     case PromptKind::kSelectRegex: SelectRegex(ed, line); return;
     case PromptKind::kSearchExcerpts: SearchExcerpts(ed, line); return;
+    case PromptKind::kSmartJump: SmartJumpSubmit(ed, line); return;
   }
 }
 
@@ -3489,6 +3582,13 @@ bool OpenFile(Editor& ed, const std::filesystem::path& path, bool open_generated
   ed.mode = Mode::kNormal;
   ApplyModeInvariants(ed);
   AttachSyntax(ed);
+  // Two things, both about the rows this file already has. The shadow starts
+  // tracking them from this revision, so an edit made a moment from now shifts
+  // them instead of stranding them; and the heal checks whether the file is
+  // still what they were recorded against -- which, for a file nobody has
+  // touched, is one read and one hash and no writes at all.
+  AdoptAnchorRows(ed, ed.doc);
+  StartAnchorHeal(ed, ed.doc.file, {}, false);
   ed.status.clear();
   return true;
 }
@@ -3585,7 +3685,13 @@ bool SaveBuffer(Editor& ed, std::string_view rest, bool force, bool rerun_watche
   if (ed.settings.trim_trailing_whitespace_on_save) std::ignore = TrimTrailingWhitespace(ed);
 
   const bool was_view = IsExcerptView(ed.doc);
-  const ErrorCtx err = SaveDocumentAs(ed.doc, target);
+  // Kept from the write rather than read out of the document again below. The
+  // second copy was a whole document per save, built before the heal had the
+  // chance to decline it -- and it declines on every save into a file the store
+  // has no rows for, and on every save landing while the last one is still in
+  // flight.
+  std::string written;
+  const ErrorCtx err = SaveDocumentAs(ed.doc, target, &written);
   if (err) {
     ed.status.Fail("cannot write " + DisplayPath(target) + ": " + FormatErrorCtx(err) +
                    " -- :w <path> to save elsewhere");
@@ -3594,6 +3700,11 @@ bool SaveBuffer(Editor& ed, std::string_view rest, bool force, bool rerun_watche
   if (was_view) ed.doc.excerpts = ExcerptView{};
   if (LanguageForPath(ed.doc.file) != was) AttachSyntax(ed);
   RecordEditHere(ed);
+  // The cheap trigger: the text is already in hand, so the worker does not read
+  // the file back. It is also where a dirty anchor -- one an edit landed on --
+  // gets re-resolved by content, and where the rows the shadow has been
+  // shifting are written down.
+  StartAnchorHeal(ed, ed.doc.file, std::move(written), true);
   if (rerun_watched) std::ignore = RerunWatchedViews(ed);
   return true;
 }
@@ -3887,6 +3998,7 @@ ErrorCtx ReloadInto(Document& doc) {
   doc.insert_spaces = fresh.insert_spaces;
   doc.read_only = fresh.read_only;
   doc.disk_stamp = fresh.disk_stamp;
+  doc.disk_blob = fresh.disk_blob;
   MarkUndoSavePoint(doc.table);
   doc.saved_undo_serial = CurrentUndoSerial(doc.table);
   doc.modified = false;
@@ -3997,6 +4109,10 @@ void CheckDiskChange(Editor& ed) {
       continue;
     }
     took.push_back(DisplayPath(doc.file));
+    // Somebody else wrote this file: a branch switch, a rebase, a formatter.
+    // This is the moment the stored lines stopped being true, and the one
+    // trigger the design names first.
+    StartAnchorHeal(ed, doc.file, {}, false);
   }
 
   if (took.empty() && held.empty() && failed.empty()) return;

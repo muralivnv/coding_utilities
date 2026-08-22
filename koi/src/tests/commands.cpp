@@ -691,6 +691,154 @@ void EditingModel() {
   }
 }
 
+void GotoLineCommand() {
+  // "one\ntwo\nthree\nfour\nfive\nsix\n": line starts 0, 4, 8, 14, 19, 24.
+  constexpr std::string_view kSix = "one\ntwo\nthree\nfour\nfive\nsix\n";
+
+  const auto six = [&](Editor& ed) {
+    ResetToOriginal(ed.doc.table, std::string{kSix});
+    ed.doc.view.rows = 10;
+    ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
+    ApplyModeInvariants(ed);
+  };
+
+  TEST_CASE("goto_line: the count is the 1-based line, and the landing is its first column");
+  {
+    Editor ed;
+    six(ed);
+    ed.pending_count = 3;
+    RunCommands(ed, {"goto_line"});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{2});
+    EXPECT_EQ(Cur(ed), Index{8});
+    EXPECT_EQ(ed.doc.selections.Size(), std::size_t{1});
+
+    // Line 1 is the first line, not the second.
+    ed.pending_count = 1;
+    RunCommands(ed, {"goto_line"});
+    EXPECT_EQ(Cur(ed), Index{0});
+  }
+
+  TEST_CASE("goto_line: a count past the end and no count at all agree on the last line");
+  {
+    Editor ed;
+    six(ed);
+    ed.pending_count = 99;
+    RunCommands(ed, {"goto_line"});
+    const Index past_eof = Cur(ed);
+    EXPECT_EQ(LineAt(ed.doc.table, past_eof), Index{5});
+    EXPECT_EQ(past_eof, Index{24});
+
+    six(ed);
+    RunCommands(ed, {"goto_line"});
+    EXPECT_EQ(Cur(ed), past_eof);
+
+    // Which is where goto_last_line lands: the trailing newline's empty line is
+    // not a line either of them will sit on.
+    six(ed);
+    RunCommands(ed, {"goto_last_line"});
+    EXPECT_EQ(Cur(ed), past_eof);
+  }
+
+  TEST_CASE("goto_line: the count is spent, and the next command runs unprefixed");
+  {
+    Editor ed;
+    six(ed);
+    ed.pending_count = 4;
+    RunCommands(ed, {"goto_line"});
+    EXPECT_EQ(ed.pending_count, Index{0});
+    EXPECT_EQ(Cur(ed), Index{14});
+    RunCommands(ed, {"move_char_right"});
+    EXPECT_EQ(Cur(ed), Index{15});
+    RunCommands(ed, {"goto_line"});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{5});
+  }
+
+  TEST_CASE("goto_line: extend_to_line takes the selection with it");
+  {
+    Editor ed;
+    six(ed);
+    ed.pending_count = 3;
+    RunCommands(ed, {"extend_to_line"});
+    EXPECT_EQ(ed.doc.selections.Primary().From(), Index{0});
+    EXPECT_EQ(ed.doc.selections.Primary().To(), Index{9});
+    EXPECT_EQ(Cur(ed), Index{8});
+
+    // Backwards, from the end: the anchor stays where the cursor left it.
+    six(ed);
+    ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{24, 24, -1}));
+    ed.pending_count = 2;
+    RunCommands(ed, {"extend_to_line"});
+    EXPECT_EQ(Cur(ed), Index{4});
+    EXPECT_EQ(ed.doc.selections.Primary().From(), Index{4});
+    EXPECT_EQ(ed.doc.selections.Primary().To(), Index{25});
+  }
+
+  TEST_CASE("goto_line: typed digits reach it through the default binding");
+  {
+    // Not Presser: it drops the pending keys between presses, and half of what
+    // is under test here is what a digit does *inside* a sequence.
+    const KeyMaps maps = DefaultKeyMaps();
+    std::vector<Key> pending;
+    const auto press = [&maps, &pending](Editor& ed, std::string_view key) {
+      HandleKeyInput(ed, maps, K(key), pending);
+    };
+
+    Editor ed;
+    std::string text;
+    for (int i = 1; i <= 20; ++i) text += "line " + std::to_string(i) + "\n";
+    ResetToOriginal(ed.doc.table, text);
+    ed.doc.view.rows = 10;
+    ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
+    ApplyModeInvariants(ed);
+
+    press(ed, "1");
+    press(ed, "2");
+    EXPECT_EQ(ed.pending_count, Index{12});
+    press(ed, "G");
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{11});
+    EXPECT_EQ(ed.pending_count, Index{0});
+
+    // Bare `G` is the last line.
+    press(ed, "G");
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{19});
+
+    // A digit inside a sequence still belongs to the sequence: `space 1` is a
+    // pin jump, and no count is left behind by it.
+    press(ed, "space");
+    EXPECT_EQ(pending.size(), std::size_t{1});
+    press(ed, "1");
+    EXPECT_TRUE(pending.empty());
+    EXPECT_EQ(ed.pending_count, Index{0});
+    EXPECT_EQ(EditorInvariants(ed), std::string{});
+  }
+
+  TEST_CASE("goto_line: it is a jump, so jump_backward comes back");
+  {
+    const Scratch scratch{"koi-goto-line-jump"};
+    const AsProjectRoot root{scratch.dir};
+    std::string text;
+    for (int i = 1; i <= 60; ++i) text += "line " + std::to_string(i) + "\n";
+    const std::filesystem::path file = scratch.Write("gl.txt", text);
+
+    std::string error;
+    Editor ed;
+    ed.jumps = OpenJumpStore(scratch.dir / "jumps.db", "pane-goto-line", error);
+    EXPECT_TRUE(ed.jumps != nullptr);
+    ResetToOriginal(ed.doc.table, text);
+    ed.doc.file = std::filesystem::weakly_canonical(file);
+    ed.doc.view.rows = 10;
+    ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
+    ApplyModeInvariants(ed);
+
+    ed.pending_count = 40;
+    RunCommands(ed, {"goto_line"});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{39});
+    RunCommands(ed, {"jump_backward"});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{0});
+    EXPECT_EQ(EditorInvariants(ed), std::string{});
+  }
+}
+
 void SetIndentAndLanguage() {
   TEST_CASE("typable: :set-indent and :set-language");
 

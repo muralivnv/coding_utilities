@@ -36,12 +36,15 @@
 #include "query.h"
 #include "regex.h"
 #include "search.h"
+#include "sha1.h"
+#include "anchor.h"
 #include "cli.h"
 #include "symbols.h"
 #include "syntax.h"
 #include "textobject.h"
 #include "theme.h"
 #include "editor.h"
+#include "fuzzy.h"
 #include "keymap.h"
 #include "piece_doc.h"
 #include "selection.h"
@@ -135,6 +138,39 @@ struct Scratch {
   Scratch& operator=(const Scratch&) = delete;
   std::filesystem::path Write(std::string_view name, std::string_view contents) const;
 };
+
+// Points ProjectRoot() at a fixture directory for the length of a scope, and
+// puts back whatever was there.
+//
+// A fixture that records anything needs one. The store keys every path against
+// the root, and a path it would have to store absolute under the system temp
+// directory is dropped on the way in (StorablePath) -- which is every fixture
+// file, since fixtures live in /tmp. Standing the root up in the fixture makes
+// the keys relative, which is what a real project's rows look like.
+struct AsProjectRoot {
+  std::filesystem::path was;
+  explicit AsProjectRoot(const std::filesystem::path& root);
+  ~AsProjectRoot();
+  AsProjectRoot(const AsProjectRoot&) = delete;
+  AsProjectRoot& operator=(const AsProjectRoot&) = delete;
+};
+
+// Runs a scope with the process sitting in `dir`, and puts the working
+// directory back. Declare it after the fixture it names, so the cwd is out of
+// the way again before the fixture is removed.
+struct InDirectory {
+  std::filesystem::path was;
+  explicit InDirectory(const std::filesystem::path& dir);
+  ~InDirectory();
+  InDirectory(const InDirectory&) = delete;
+  InDirectory& operator=(const InDirectory&) = delete;
+};
+
+// A jump store standing on a project database of its own, for the fixtures
+// that want a jump list and nothing else. The JumpStore keeps the project store
+// alive, so the caller does not have to hold one.
+std::shared_ptr<JumpStore> OpenJumpStore(const std::filesystem::path& db, std::string pane,
+                                         std::string& error);
 
 Key K(std::string_view text);
 

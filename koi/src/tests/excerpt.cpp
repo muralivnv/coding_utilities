@@ -2365,6 +2365,9 @@ void ExcerptCommandModes() {
 void ExcerptViewSources() {
   namespace fs = std::filesystem;
   const Scratch scratch{"koi-excerpt-sources"};
+  // The pins views below read positions the store recorded, and the store only
+  // records paths it would keep: the fixture has to be the project.
+  const AsProjectRoot root{scratch.dir};
   const fs::path home = scratch.Write("home.txt", "somewhere to stand\n");
   const auto view = [](const Editor& ed) {
     return ReadDocRange(ed.doc.table, {0, DocLength(ed.doc.table)});
@@ -2501,7 +2504,9 @@ void ExcerptViewSources() {
 
     EXPECT_TRUE(OpenTarget(ed, fa.string()));
     RunTypableCommand(ed, "pin 1");
-    EXPECT_EQ(ed.project->Pins()[0].path, fa.string());
+    // The key, not the path handed in: inside the project the store spells a
+    // path relative to the root.
+    EXPECT_EQ(ed.project->Pins()[0].path, std::string{"live_a.txt"});
     RunTypableCommand(ed, "pins-excerpt");
     EXPECT_TRUE(IsExcerptView(ed.doc));
     EXPECT_TRUE(body(view(ed)).find("la1") != std::string::npos);
@@ -2511,7 +2516,7 @@ void ExcerptViewSources() {
     EXPECT_TRUE(OpenTarget(ed, fb.string()));
     RunCommands(ed, {"move_line_down"});
     RunTypableCommand(ed, "pin 2");
-    EXPECT_EQ(ed.project->Pins()[1].path, fb.string());
+    EXPECT_EQ(ed.project->Pins()[1].path, std::string{"live_b.txt"});
     EXPECT_TRUE(BufferAt(ed, pins_at).excerpts.rebuild_on_focus);
     EXPECT_TRUE(ReadDocRange(BufferAt(ed, pins_at).table,
                              {0, DocLength(BufferAt(ed, pins_at).table)})

@@ -308,6 +308,19 @@ tab = "→"
   }
   {
     KeyMaps maps;
+    Settings settings;
+    std::vector<std::string> errors;
+    // On by default, so the off case is the only one the parser has to carry.
+    EXPECT_TRUE(settings.smart_jump_auto);
+    EXPECT_FALSE(ParseKeyMapConfig(R"(
+[editor]
+smart-jump-auto = false
+)", maps, settings, errors));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_FALSE(settings.smart_jump_auto);
+  }
+  {
+    KeyMaps maps;
     std::vector<std::string> errors;
     std::ignore = ParseKeyMapConfig(R"(
 [keys.normal]
@@ -424,10 +437,22 @@ void KeymapErrors() {
         "x = \"no_op\"\n"
         "y = [\"collapse_selection\", \"insert_mode\"]\n"
         "g = { g = \"goto_file_start\", e = \"goto_line_end\" }\n"
+        "G = \"goto_line\"\n"
+        "\"A-G\" = \"extend_to_line\"\n"
         "\"C-w\" = { h = \"jump_view_left\" }\n",
         maps, errors);
     EXPECT_FALSE(static_cast<bool>(err));
     EXPECT_TRUE(errors.empty());
+  }
+
+  TEST_CASE("keymap: `G` reaches goto_line in the default map");
+  {
+    const KeyMaps maps = DefaultKeyMaps();
+    const std::vector<std::string>* out = nullptr;
+    EXPECT_TRUE(maps.normal.Find(Seq("G"), &out) == KeyMap::Lookup::kMatched);
+    EXPECT_EQ((*out)[0], std::string("goto_line"));
+    EXPECT_TRUE(maps.normal.Find(Seq("A-G"), &out) == KeyMap::Lookup::kMatched);
+    EXPECT_EQ((*out)[0], std::string("extend_to_line"));
   }
 
   TEST_CASE("keymap: one bad binding does not throw away the good ones");

@@ -4,30 +4,51 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iterator>
 #include <limits>
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 #include "sqlite.h"
+#include "subprocess.h"
 
 namespace koi {
 namespace {
 
 namespace fs = std::filesystem;
 
-#define KOI_DECAY_SQL          \
-  "CASE"                       \
-  " WHEN (?1 - last_ts) / 3600.0 < 1   THEN 1.0" \
-  " WHEN (?1 - last_ts) / 3600.0 < 6   THEN 0.8" \
-  " WHEN (?1 - last_ts) / 3600.0 < 24  THEN 0.6" \
-  " WHEN (?1 - last_ts) / 3600.0 < 168 THEN 0.4" \
-  " WHEN (?1 - last_ts) / 3600.0 < 720 THEN 0.2" \
-  " ELSE 0.1 END"
+// A multiplier on the weight, not a decay of it. `visits + 3*edits`
+// accumulates and never decays by the clock; how long ago the row was last
+// touched only multiplies what it has already earned (docs/smart-jump.md,
+// Frecency). A wall-clock half-life instead would cut a month-old row by a
+// thousand -- the rows most worth protecting -- and what does take weight away
+// is the event-driven aging below.
+//
+// ?1 is now. The timestamp column is an argument so one expression serves a
+// query that has joined `symbols` to `files` as well as one over `files`.
+#define KOI_MULT_SQL(ts)                        \
+  "CASE"                                        \
+  " WHEN (?1 - " ts ") / 3600.0 < 1   THEN 4.0" \
+  " WHEN (?1 - " ts ") / 3600.0 < 24  THEN 2.0" \
+  " WHEN (?1 - " ts ") / 3600.0 < 168 THEN 1.0" \
+  " WHEN (?1 - " ts ") / 3600.0 < 720 THEN 0.5" \
+  " ELSE 0.25 END"
+
+// Branch is a bonus, never a filter: a row from another branch is still a place
+// you have been, and a WHERE would rebuild the mode problem inside the ranking.
+//
+// ?3 is the branch koi is on, or NULL when there is no repository to ask -- and
+// `branch = NULL` is NULL rather than true, so the CASE never fires and a
+// project without git ranks exactly as it did before this existed. Same for a
+// row stamped before there was a branch to stamp it with.
+#define KOI_BRANCH_SQL(branch) "CASE WHEN " branch " = ?3 THEN 1.25 ELSE 1.0 END"
 
 constexpr int kMaxCoVisitFiles = 32;
 
@@ -92,6 +113,22 @@ constexpr const char* kPruneSymbols =
     " AND rowid NOT IN"
     " (SELECT rowid FROM symbols ORDER BY last_ts DESC LIMIT " KOI_MAX_SYMBOL_ROWS ");";
 
+// The jump list's own cap, carried over from the database it used to live in
+// (kKeepRows there). It bounds `locations` the same way the two above bound
+// their tables, and by `seq` rather than by timestamp: seq is the order the
+// jump list steps through, so "the newest 2000" and "the 2000 the user can
+// still step back to" are the same set.
+//
+// Rows are never dropped for naming a file that is missing right now. A branch
+// switch makes half a repository transiently missing, and a history that
+// deleted itself over one would be worth nothing on the way back.
+#define KOI_MAX_LOCATION_ROWS "2000"
+
+constexpr const char* kPruneLocations =
+    "DELETE FROM locations WHERE (SELECT COUNT(*) FROM locations) > " KOI_MAX_LOCATION_ROWS
+    " AND id NOT IN"
+    " (SELECT id FROM locations ORDER BY seq DESC LIMIT " KOI_MAX_LOCATION_ROWS ");";
+
 // `co_visits` is deliberately not pruned, and that is not an oversight.
 //
 // Both of its readers -- HotFiles and RankSymbols -- ask for one `from_file`,
@@ -106,18 +143,93 @@ constexpr const char* kPruneSymbols =
 // not the one it claims to be, and the one thing that must never happen to this
 // table is losing a pair the user made this session.
 
+// The one thing that ever takes weight away, and it is driven by the work done
+// rather than by the calendar: when a table gets heavy, every weight in that
+// table is scaled down at once. A two-week gap therefore costs a row nothing --
+// the clock only ticks while koi is being used -- and an old-but-heavy row
+// keeps its standing against shallow new visits.
+//
+// It is also the age-out. Nothing else expires a row by frecency: an unvisited
+// one drifts under the floor over enough aging passes and is deleted here.
+constexpr double kAgeThreshold = 10000.0;
+
+// The deletion floor, and it has to sit strictly below the weight a row is born
+// at (1 visit) or a pass deletes every row that has only ever been visited once
+// -- which is most of `locations` and `symbols`. With the scale below, a row
+// nothing touches again survives six passes and goes on the seventh.
+#define KOI_AGE_FLOOR "0.5"
+
+// The most one pass may take off. Enough of the threshold/total factor is kept
+// to stop a pass overshooting far under the gate, but never enough to put an
+// entry-weight row through the floor: `symbols` holds 20000 rows and half of
+// them can be at one visit, so total/threshold alone is a factor of 0.5 and
+// would empty the table in a single open.
+constexpr double kAgeScale = 0.9;
+
+// Each table is gated and scaled on its own weight, never on another's. `files`
+// carries every visit since schema v1 and is past the threshold on any real
+// store; gating `locations` and `symbols` on it scaled two tables that were
+// nowhere near heavy, and their single-visit rows fell straight through the
+// floor.
+//
+// The counts stay fractional, and that is the choice rather than an oversight.
+// `visits` and `edits` have INTEGER affinity, which stores the REAL that
+// `visits * factor` produces as it is, and the two whole-number spellings are
+// both wrong: rounded, a row at 1 visit stays at 1 for ever and can never age
+// out, which is the whole mechanism; truncated, every single-visit row dies on
+// the first pass however recently it was visited.
+struct AgeTable {
+  const char* total;  // the table's own weight
+  const char* scale;  // ?1 is the factor
+  const char* cull;   // may be more than one statement
+};
+
+constexpr AgeTable kAgeTables[] = {
+    {"SELECT COALESCE(SUM(visits + edits * 3), 0) FROM files;",
+     "UPDATE files SET visits = visits * ?1, edits = edits * ?1;",
+     "DELETE FROM files WHERE visits + edits * 3 < " KOI_AGE_FLOOR ";"},
+    {"SELECT COALESCE(SUM(visits), 0) FROM symbols;",
+     "UPDATE symbols SET visits = visits * ?1;",
+     "DELETE FROM symbols WHERE visits < " KOI_AGE_FLOOR ";"},
+    {"SELECT COALESCE(SUM(visits), 0) FROM locations;",
+     "UPDATE locations SET visits = visits * ?1;",
+     // A row a pane's jump cursor sits on ages like every other row and stops at
+     // the floor that would delete it. Losing one does not cost history, it
+     // moves the user's place in the list -- the next step back would start from
+     // somewhere they never were.
+     //
+     // Matched on `id`, which is what the cursor holds since v6. Matching on
+     // `seq` protected nobody: a merge gives the row a new seq, and only the
+     // merging pane's cursor moved with it.
+     "UPDATE locations SET visits = " KOI_AGE_FLOOR
+     " WHERE visits < " KOI_AGE_FLOOR " AND id IN (SELECT at FROM jump_cursor);"
+     "DELETE FROM locations WHERE visits < " KOI_AGE_FLOOR ";"},
+};
+
 // v1: paths were stored in whatever spelling the writer happened to have.
 // v2: every path is a ProjectKey -- relative to the project root, or absolute
 //     when the file lies outside it.
 // v3: a pin is a file, not a position in one. `pins` is gone; `file_pins` holds
 //     the slot and the path, and the position comes from `files`.
+// v4: one database. The jump list was a second one under ~/.local/share/koi
+//     with its own path spelling; its `jumps` are `locations` here, keyed like
+//     everything else. `queries` comes with it so the stamp moves once.
+// v5: `locations.counted_ts`. The visit debounce used to be measured against
+//     `last_ts`, which every touch refreshes, so it was a sliding window and
+//     `visits` never left 1.
+// v6: `jump_cursor.at` is a `locations.id`, not a seq, and `jump_cursor.walking`
+//     says whether the pane is part-way back through the list. A seq moves
+//     every time its row merges forward, so a cursor holding one named a row
+//     that was no longer there; and "mid-walk" used to be read off the
+//     store-wide seq counter, which every linger record advances without the
+//     list having moved at all.
 //
 // An upgraded database is refused by every older koi, and that is the intent
 // rather than an accident to route around: a v1 build would go on writing
 // cwd-relative paths into tables v2 has just made consistent, and a v2 build
 // would go on writing positions into a table v3 has removed. Refusing is the
 // only answer that does not corrupt meaning.
-constexpr std::int64_t kSchemaVersion = 3;
+constexpr std::int64_t kSchemaVersion = 6;
 
 constexpr const char* kSchema =
     "CREATE TABLE IF NOT EXISTS files ("
@@ -126,7 +238,12 @@ constexpr const char* kSchema =
     "  edits     INTEGER NOT NULL DEFAULT 0,"
     "  last_ts   REAL    NOT NULL DEFAULT 0,"
     "  last_line INTEGER NOT NULL DEFAULT 1,"
-    "  last_col  INTEGER NOT NULL DEFAULT 0);"
+    "  last_col  INTEGER NOT NULL DEFAULT 0,"
+    // The branch the last visit was made on. A bonus at ranking time, never a
+    // filter: a row from another branch is still a place you have been.
+    // Databases from v3 get this column from the migration, not from here --
+    // CREATE TABLE IF NOT EXISTS says nothing about a table that exists.
+    "  branch    TEXT);"
     "CREATE TABLE IF NOT EXISTS symbols ("
     "  file    TEXT    NOT NULL,"
     "  symbol  TEXT    NOT NULL,"
@@ -157,11 +274,73 @@ constexpr const char* kSchema =
     // that has it and behaves exactly as before. That is why it belongs in
     // kSchema, which every open replays, rather than behind a v3 stamp that
     // would lock older builds out for nothing.
-    "CREATE INDEX IF NOT EXISTS files_by_ts ON files(last_ts DESC);";
+    "CREATE INDEX IF NOT EXISTS files_by_ts ON files(last_ts DESC);"
+    // One row per place visited, and the jump list is a view over it. `line` is
+    // a cache that healing keeps true, not what the row is; `symbol`,
+    // `content`, `context`, `blob` and `uniq` are what will identify it once
+    // recording fills them, and stay null until then.
+    //
+    // `seq` is the store-wide order (see NextStoreSeq): every touch takes the
+    // next one, which is how a merge moves a place to the front of the jump
+    // list without the DELETE + INSERT that used to destroy its visit count.
+    "CREATE TABLE IF NOT EXISTS locations ("
+    "  id      INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  path    TEXT    NOT NULL,"
+    "  line    INTEGER NOT NULL,"
+    "  col     INTEGER NOT NULL DEFAULT 0,"
+    "  symbol  TEXT,"
+    "  content TEXT,"
+    "  context TEXT,"
+    "  blob    TEXT,"
+    "  uniq    INTEGER NOT NULL DEFAULT 0,"
+    "  kind    INTEGER NOT NULL DEFAULT 0,"  // 0 visit, 1 edit
+    "  visits  INTEGER NOT NULL DEFAULT 1,"
+    "  misses  INTEGER NOT NULL DEFAULT 0,"
+    "  last_ts REAL    NOT NULL DEFAULT 0,"
+    // When the visit counter last moved, which is what the 30 s debounce is
+    // measured against. `last_ts` cannot be: every touch refreshes it, so the
+    // window slides ahead of itself and no second visit is ever counted.
+    // Databases from v4 get this column from the migration, not from here.
+    "  counted_ts REAL NOT NULL DEFAULT 0,"
+    "  branch  TEXT,"
+    "  seq     INTEGER NOT NULL);"
+    // Where each pane sits in the jump list. `at` is a `locations.id`: it names
+    // the row itself, which a merge does not change, and the order the list
+    // walks in comes from that row's `seq` through a join. `walking` is whether
+    // the pane is part-way back through the list -- set by a step back, cleared
+    // by a record or by a step forward that reaches the front. Databases from v5
+    // get `walking` from the migration, not from here.
+    "CREATE TABLE IF NOT EXISTS jump_cursor ("
+    "  pane    TEXT PRIMARY KEY,"
+    "  at      INTEGER NOT NULL,"
+    "  walking INTEGER NOT NULL DEFAULT 0);"
+    // Unused until smart-jump has a prompt to type into. It is created now so
+    // that adding it later does not cost a second schema stamp, and every
+    // build in between refuse each other's databases for nothing.
+    "CREATE TABLE IF NOT EXISTS queries ("
+    "  prefix    TEXT NOT NULL,"
+    "  target    TEXT NOT NULL,"
+    "  use_count REAL NOT NULL DEFAULT 0,"
+    "  last_ts   REAL NOT NULL DEFAULT 0,"
+    "  PRIMARY KEY (prefix, target));"
+    "CREATE INDEX IF NOT EXISTS locations_by_path ON locations(path);"
+    "CREATE INDEX IF NOT EXISTS locations_by_seq ON locations(seq DESC);"
+    "CREATE INDEX IF NOT EXISTS queries_by_prefix ON queries(prefix);";
 
 double Now() {
   const auto since = std::chrono::system_clock::now().time_since_epoch();
   return std::chrono::duration<double>(since).count();
+}
+
+// Null rather than "" when there is no repository, so a row from outside one is
+// distinguishable from a row on a branch whose name was not read.
+void BindBranch(Stmt& stmt, int at) {
+  const std::string branch = GitBranch(ProjectRoot());
+  if (branch.empty()) {
+    stmt.Null(at);
+  } else {
+    stmt.Text(at, branch);
+  }
 }
 
 // The root is a parameter so a loop over rows can derive it once. It used to be
@@ -180,6 +359,8 @@ std::int64_t ScanLimit(int want) {
   if (want <= 0) return -1;
   if (want > (std::numeric_limits<int>::max() / kVisitOverFetch)) return -1;
   return std::max(kVisitScanFloor, want * kVisitOverFetch);
+}
+
 }
 
 // The one spelling every path in this database is stored under.
@@ -232,10 +413,315 @@ std::string ProjectKey(std::string_view path) {
   return rel.string();
 }
 
+namespace {
+
+// True when `path` is `dir` itself extended by at least one component.
+// Component-wise, not a string prefix: "/tmpfoo/x" is not under "/tmp".
+bool UnderDirectory(const fs::path& dir, const fs::path& path) {
+  if (dir.empty()) return false;
+  auto want = dir.begin();
+  auto have = path.begin();
+  for (; want != dir.end(); ++want, ++have) {
+    if ((have == path.end()) || (*have != *want)) return false;
+  }
+  return have != path.end();
+}
+
+// Derived once. TMPDIR is read from the environment koi was started in, and a
+// process that changes its own TMPDIR mid-session is not a case worth a getenv
+// per stored row -- the prune walks every path in three tables through here.
+const std::vector<fs::path>& TempRoots() {
+  static const std::vector<fs::path> roots = [] {
+    std::vector<fs::path> out{fs::path{"/tmp"}, fs::path{"/var/tmp"}};
+    if (const char* dir = std::getenv("TMPDIR"); (dir != nullptr) && (*dir != '\0')) {
+      std::string text{dir};
+      while ((text.size() > 1) && (text.back() == '/')) text.pop_back();
+      out.emplace_back(text);
+    }
+    return out;
+  }();
+  return roots;
+}
+
+}
+
+// The rules are the junk measured in the live store, and nothing beyond it.
+// Every one of them describes a file the editor can legitimately be sitting in
+// and whose history is worth nothing tomorrow: a scratch buffer under /tmp, a
+// prompt file, a commit message, an agent's copy of a file the repository
+// already holds under its own path.
+//
+// Only absolute keys are tested against the temp directories, and that is the
+// whole of why a project checked out under /tmp still records: inside the root
+// a key is relative, and outside it there is nothing here to remember.
+bool StorablePath(std::string_view key) {
+  if (key.empty()) return false;
+  const fs::path path{key};
+  bool after_claude = false;
+  for (const fs::path& part : path) {
+    const std::string component = part.string();
+    if (component == ".git") return false;
+    if (after_claude && (component == "worktrees")) return false;
+    after_claude = (component == ".claude");
+  }
+  const std::string name = path.filename().string();
+  if (name.starts_with("claude-prompt-") && name.ends_with(".md")) return false;
+  if (!path.is_absolute()) return true;
+  for (const fs::path& root : TempRoots()) {
+    if (UnderDirectory(root, path)) return false;
+  }
+  return true;
+}
+
+bool StorableSymbolName(std::string_view name) {
+  if (name.empty() || (name.size() > 200)) return false;
+  // `operator()` and friends are the one legitimate use of this punctuation.
+  if (name.starts_with("operator")) return true;
+  return name.find_first_of(" \t\n([{,;") == std::string_view::npos;
+}
+
+// The same test both ways round: a relative name that no file answers to is a
+// view name and goes in as it is, and everything else is a path and goes
+// through the one keying rule. It used to live in jumplist.cpp, which was the
+// only writer of `locations`; it is here now because it is a property of the
+// table rather than of the jump list.
+std::string LocationKey(std::string_view path) {
+  if (path.empty()) return {};
+  const fs::path as_path{path};
+  std::error_code ec;
+  if (!as_path.is_absolute() && !fs::exists(as_path, ec)) return std::string{path};
+  return ProjectKey(path);
+}
+
+namespace {
+
+// The first line of `<git>/HEAD`, turned into the name to store.
+std::string BranchFromHead(const fs::path& head) {
+  std::ifstream in{head, std::ios::binary};
+  if (!in) return {};
+  std::string line;
+  std::getline(in, line);
+  while (!line.empty() && ((line.back() == '\r') || (line.back() == ' '))) line.pop_back();
+  constexpr std::string_view kRef = "ref: ";
+  if (line.starts_with(kRef)) {
+    std::string name = line.substr(kRef.size());
+    constexpr std::string_view kHeads = "refs/heads/";
+    if (name.starts_with(kHeads)) name.erase(0, kHeads.size());
+    // A branch name may hold slashes (feature/x), so only the prefix is cut.
+    return name;
+  }
+  // Detached: HEAD is the object id itself. Twelve characters is what git
+  // shows and is past the point where a project has two objects sharing one.
+  constexpr std::size_t kAbbrev = 12;
+  if (line.size() < kAbbrev) return {};
+  for (const char c : line) {
+    const bool hex = ((c >= '0') && (c <= '9')) || ((c >= 'a') && (c <= 'f')) ||
+                     ((c >= 'A') && (c <= 'F'));
+    if (!hex) return {};
+  }
+  return line.substr(0, kAbbrev);
+}
+
+// `<root>/.git/HEAD`, or empty when there is no repository at `root`. The file
+// is not read here: what it names is both the branch and the stamp that says
+// when the branch last changed, and two callers want one each.
+fs::path GitHeadFile(const fs::path& root) {
+  if (root.empty()) return {};
+  std::error_code ec;
+  fs::path git = root / ".git";
+  if (fs::is_regular_file(git, ec)) {
+    // A worktree, a submodule: `.git` is a file naming the real directory.
+    // Followed one level and no further -- the file it points at is a real
+    // git directory, and a chain of them is not a shape git makes.
+    std::ifstream in{git, std::ios::binary};
+    std::string line;
+    std::getline(in, line);
+    while (!line.empty() && ((line.back() == '\r') || (line.back() == ' '))) line.pop_back();
+    constexpr std::string_view kGitDir = "gitdir: ";
+    if (!line.starts_with(kGitDir)) return {};
+    const fs::path named{line.substr(kGitDir.size())};
+    git = named.is_absolute() ? named : (root / named);
+  }
+  return git / "HEAD";
+}
+
+}
+
+std::string GitBranch(const fs::path& root) {
+  const fs::path head = GitHeadFile(root);
+  if (head.empty()) return {};
+  std::error_code ec;
+  const fs::file_time_type stamp = fs::last_write_time(head, ec);
+  if (ec) return {};
+
+  // One entry: koi has one project root for the life of the process, and the
+  // stamp is what makes a checkout visible without re-reading the file on
+  // every visit recorded. Plain statics -- this runs on the one UI thread.
+  static fs::path memo_head;
+  static fs::file_time_type memo_stamp;
+  static std::string memo_branch;
+  if ((memo_head == head) && (memo_stamp == stamp)) return memo_branch;
+  memo_branch = BranchFromHead(head);
+  memo_head = head;
+  memo_stamp = stamp;
+  return memo_branch;
+}
+
+namespace {
+
+// Single quotes, so the shell sees one word whatever is in the path.
+std::string Quoted(const std::string& text) {
+  std::string out{"'"};
+  for (const char c : text) {
+    if (c == '\'') {
+      out += "'\\''";
+    } else {
+      out += c;
+    }
+  }
+  out += '\'';
+  return out;
+}
+
+// One git command, output captured, diagnostics discarded. Every failure --
+// no git binary, no repository, a ref that does not resolve -- comes back the
+// same way, as no output, because none of them is worth a word on the status
+// line: the caller's answer is simply that it has no branch diff to offer.
+std::string GitOutput(const std::string& args) {
+  const common::CmdResult result = common::RunCmdWithCapture(
+      "git " + args, common::CaptureMode::kPipe, common::CaptureMode::kDevNull);
+  if (!result.output || (result.exit_status != 0)) return {};
+  std::string text{result.output->buffer, result.output->size};
+  while (!text.empty() && ((text.back() == '\n') || (text.back() == '\r'))) text.pop_back();
+  return text;
+}
+
+}
+
+// Not on any path that runs per keystroke or per record: this is up to four
+// subprocesses, and it is called when a picker opens and only then.
+//
+// Cached on the branch and on HEAD's timestamp together, which is exactly "once
+// per branch switch" -- a checkout rewrites HEAD, and nothing else the user does
+// changes which commit the diff is against. The cache also absorbs the case that
+// costs the most, a project with no repository: the key is the same every time
+// and the empty answer is handed straight back.
+const std::vector<std::string>& BranchDiffFiles() {
+  static std::string memo_key{"\1"};  // No real key starts with this.
+  static std::vector<std::string> memo;
+
+  const fs::path root = ProjectRoot();
+  const fs::path head = GitHeadFile(root);
+  std::error_code ec;
+  const fs::file_time_type stamp = fs::last_write_time(head, ec);
+  std::string key = head.string();
+  key += '\0';
+  if (!ec) key += std::to_string(stamp.time_since_epoch().count());
+  key += '\0';
+  key += GitBranch(root);
+  if (key == memo_key) return memo;
+  memo_key = std::move(key);
+  memo.clear();
+  if (head.empty() || ec) return memo;
+
+  // The first of the three that resolves wins. `merge-base` over all three at
+  // once would answer something else entirely -- the ancestor common to every
+  // one of them -- and a repository with no origin, or one whose default branch
+  // is master, has to come out the same as the usual case.
+  const std::string dir = Quoted(root.string());
+  std::string base;
+  for (const std::string_view against : {"origin/HEAD", "main", "master"}) {
+    base = GitOutput("-C " + dir + " merge-base HEAD " + std::string{against});
+    if (!base.empty()) break;
+  }
+  if (base.empty()) return memo;
+
+  // --relative, so the paths come back relative to the root koi keys against
+  // rather than to the top of the repository. The two differ whenever the
+  // project marker is below the git one, and then an unrelativised path matches
+  // no row in the store.
+  const std::string changed = GitOutput("-C " + dir + " diff --name-only --relative " + base);
+  for (std::size_t at = 0; at < changed.size();) {
+    const std::size_t eol = std::min(changed.find('\n', at), changed.size());
+    std::string_view line{changed.data() + at, eol - at};
+    while (!line.empty() && (line.back() == '\r')) line.remove_suffix(1);
+    if (!line.empty()) memo.emplace_back(line);
+    at = eol + 1;
+  }
+  return memo;
+}
+
+// `meta` is the authority and MAX(seq) is the floor. Either alone is enough in
+// the normal case and neither is enough alone: the counter has to survive a
+// prune that takes every row away, and it must never hand back a number a row
+// already holds if an older build or a failed write left `meta` behind.
+std::int64_t NextStoreSeq(sqlite3* db) {
+  std::int64_t next = 0;
+  {
+    Stmt read{db,
+              "SELECT MAX("
+              " COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'seq'), 0),"
+              " COALESCE((SELECT MAX(seq) FROM locations), 0));"};
+    if (!read || !read.Step()) return 0;
+    next = read.Integer(0) + 1;
+  }
+  Stmt put{db,
+           "INSERT INTO meta(key, value) VALUES('seq', ?1)"
+           " ON CONFLICT(key) DO UPDATE SET value = excluded.value;"};
+  if (!put) return 0;
+  put.Text(1, std::to_string(next));
+  return put.Run() ? next : 0;
+}
+
+// One entry per progressive prefix, each spelled as its terms joined by single
+// spaces so that the key a lookup builds is the key a write made. Whitespace
+// runs collapse and leading and trailing whitespace is dropped: "key  cpp " and
+// "key cpp" are the same query, and a table that thought otherwise would learn
+// each spelling separately and confirm neither.
+std::vector<std::string> QueryPrefixes(std::string_view typed_terms) {
+  const auto is_space = [](char c) {
+    return (c == ' ') || (c == '\t') || (c == '\n') || (c == '\v') || (c == '\f') || (c == '\r');
+  };
+  std::vector<std::string> out;
+  std::string joined;
+  std::size_t at = 0;
+  while (at < typed_terms.size()) {
+    while ((at < typed_terms.size()) && is_space(typed_terms[at])) ++at;
+    const std::size_t start = at;
+    while ((at < typed_terms.size()) && !is_space(typed_terms[at])) ++at;
+    if (at == start) break;
+    if (!joined.empty()) joined += ' ';
+    joined.append(typed_terms.substr(start, at - start));
+    out.push_back(joined);
+  }
+  return out;
+}
+
+namespace {
+
+// The decay, applied on read and never written back. A row is worth what it was
+// worth when it was last confirmed, times 0.975 for every day since -- which
+// halves it in a month and takes it under the drop threshold in about three.
+double DecayedUse(double use_count, double last_ts, double now) {
+  const double days = (now - last_ts) / 86400.0;
+  if (days <= 0.0) return use_count;
+  return use_count * std::pow(kQueryDecayPerDay, days);
+}
+
 struct SqliteProject final : ProjectStore {
   sqlite3* db{nullptr};
 
+  // The one statement worth keeping prepared. Every other read here runs once
+  // per user action; this one runs kSmartAdaptiveProbe times per keystroke, and
+  // prepare+finalize was most of what it cost. A prepared statement is not a
+  // snapshot -- each Step re-reads the table -- so a write landing between two
+  // calls is seen by the next one.
+  std::optional<Stmt> adaptive;
+
   ~SqliteProject() override {
+    // Before the close, not after: sqlite3_close refuses a connection that
+    // still owns a statement, and hands the handle back unclosed.
+    adaptive.reset();
     if (db != nullptr) sqlite3_close(db);
   }
 
@@ -243,13 +729,13 @@ struct SqliteProject final : ProjectStore {
 
   void BumpFile(std::string_view raw, Index line, Index column, bool edit) {
     const std::string path = ProjectKey(raw);
-    if (path.empty()) return;
-#define KOI_BUMP_SQL(field)                                          \
-  "INSERT INTO files(path, " field ", last_ts, last_line, last_col)" \
-  " VALUES(?1,1,?2,?3,?4)"                                           \
-  " ON CONFLICT(path) DO UPDATE SET " field " = " field " + 1,"      \
-  " last_ts = excluded.last_ts, last_line = excluded.last_line,"     \
-  " last_col = excluded.last_col;"
+    if (!StorablePath(path)) return;
+#define KOI_BUMP_SQL(field)                                                  \
+  "INSERT INTO files(path, " field ", last_ts, last_line, last_col, branch)" \
+  " VALUES(?1,1,?2,?3,?4,?5)"                                                \
+  " ON CONFLICT(path) DO UPDATE SET " field " = " field " + 1,"              \
+  " last_ts = excluded.last_ts, last_line = excluded.last_line,"             \
+  " last_col = excluded.last_col, branch = excluded.branch;"
     Stmt stmt{db, edit ? KOI_BUMP_SQL("edits") : KOI_BUMP_SQL("visits")};
 #undef KOI_BUMP_SQL
     if (!stmt) return;
@@ -257,6 +743,7 @@ struct SqliteProject final : ProjectStore {
     stmt.Real(2, Now());
     stmt.Int(3, std::max<Index>(1, line));
     stmt.Int(4, std::max<Index>(0, column));
+    BindBranch(stmt, 5);
     stmt.Run();
   }
 
@@ -270,7 +757,7 @@ struct SqliteProject final : ProjectStore {
 
   void RecordSymbolVisit(std::string_view symbol, std::string_view raw_file, Index line) override {
     const std::string file = ProjectKey(raw_file);
-    if (symbol.empty() || file.empty()) return;
+    if (!StorableSymbolName(symbol) || !StorablePath(file)) return;
     Stmt stmt{db,
               "INSERT INTO symbols(file, symbol, visits, last_ts, line) VALUES(?1,?2,1,?3,?4)"
               " ON CONFLICT(file, symbol) DO UPDATE SET visits = visits + 1,"
@@ -291,7 +778,7 @@ struct SqliteProject final : ProjectStore {
     // an `==` on the raw strings.
     const std::string from_file = ProjectKey(raw_from);
     const std::string to_file = ProjectKey(raw_to);
-    if (from_file.empty() || to_file.empty() || (from_file == to_file)) return;
+    if (!StorablePath(from_file) || !StorablePath(to_file) || (from_file == to_file)) return;
     Stmt stmt{db,
               "INSERT INTO co_visits(from_file, to_file, count) VALUES(?1,?2,1)"
               " ON CONFLICT(from_file, to_file) DO UPDATE SET count = count + 1;"};
@@ -301,15 +788,186 @@ struct SqliteProject final : ProjectStore {
     stmt.Run();
   }
 
-  // Both queries take the row cap as ?2, and only the frecency one references
-  // ?1. Binding an index the statement does not mention is fine -- SQLite sizes
-  // its parameter array by the largest index that appears, and ?2 puts 1 inside
-  // it -- so the two share one binder.
-  std::vector<FileVisit> Query(const char* sql, bool bind_now, int want) {
+  // The row this record belongs on, or 0 for none. Same path, and either the
+  // same enclosing symbol or a line close enough that the two are one place.
+  //
+  // Newest first, because a merge candidate is a place the user was recently in
+  // and because that is the row the jump list would step to next. There is
+  // normally at most one; a migrated database, or a record made before the
+  // symbol was resolvable, can leave two.
+  std::int64_t MergeTarget(const std::string& key, const LocationRecord& row, std::int64_t& seq,
+                           double& counted_ts) {
+    Stmt stmt{db,
+              row.exact
+                  // The jump list's rule: this line and no other. Symbol-merge
+                  // is off too -- it reaches across a whole function, and a
+                  // step target must stay distinct from the place it left.
+                  ? "SELECT id, seq, counted_ts FROM locations WHERE path=?1 AND line=?3"
+                    " ORDER BY seq DESC LIMIT 1;"
+                  : "SELECT id, seq, counted_ts FROM locations WHERE path=?1"
+                    " AND ((?2 IS NOT NULL AND symbol IS NOT NULL AND symbol=?2)"
+                    "      OR (line BETWEEN ?3 AND ?4))"
+                    " ORDER BY seq DESC LIMIT 1;"};
+    if (!stmt) return 0;
+    stmt.Text(1, key);
+    if (row.exact) {
+      stmt.Int(3, row.line);
+    } else {
+      if (row.symbol.empty()) {
+        stmt.Null(2);
+      } else {
+        stmt.Text(2, row.symbol);
+      }
+      stmt.Int(3, row.line - kLocationMergeLines);
+      stmt.Int(4, row.line + kLocationMergeLines);
+    }
+    if (!stmt.Step()) return 0;
+    seq = stmt.Integer(1);
+    counted_ts = stmt.Double(2);
+    return stmt.Integer(0);
+  }
+
+  // The text half of a row, bound the same way by the insert and the update.
+  // `has_text` is what decides whether it is said at all -- a record made
+  // without the buffer leaves the four columns alone rather than clearing them.
+  static void BindText(Stmt& stmt, int at, const LocationRecord& row) {
+    if (row.content.empty()) {
+      stmt.Null(at);
+    } else {
+      stmt.Text(at, row.content);
+    }
+    if (row.context.empty()) {
+      stmt.Null(at + 1);
+    } else {
+      stmt.Text(at + 1, row.context);
+    }
+    if (row.blob.empty()) {
+      stmt.Null(at + 2);
+    } else {
+      stmt.Text(at + 2, row.blob);
+    }
+    stmt.Int(at + 3, std::max<std::int64_t>(0, row.uniq));
+  }
+
+  std::int64_t WriteLocation(const LocationRecord& row) override {
+    if (db == nullptr) return 0;
+    const std::string key = LocationKey(row.path);
+    if (!StorablePath(key)) return 0;
+
+    // One transaction whichever way this is reached: the jump list opens its
+    // own around the write and the cursor move, and a boundary record has none
+    // to join. Nested BEGINs are an error in SQLite, so this asks.
+    const bool own = (sqlite3_get_autocommit(db) != 0);
+    if (own && !ExecSql(db, "BEGIN IMMEDIATE;")) return 0;
+    const std::int64_t seq = WriteLocationLocked(key, row);
+    if (own) {
+      if ((seq != 0) && ExecSql(db, "COMMIT;")) return seq;
+      ExecSql(db, "ROLLBACK;");
+      return 0;
+    }
+    return seq;
+  }
+
+  std::int64_t WriteLocationLocked(const std::string& key, const LocationRecord& row) {
+    const Index line = std::max<Index>(1, row.line);
+    const double now = Now();
+
+    std::int64_t at_seq = 0;
+    double counted_ts = 0;
+    const std::int64_t id = MergeTarget(key, row, at_seq, counted_ts);
+    if (id == 0) {
+      const std::int64_t next = NextStoreSeq(db);
+      if (next <= 0) return 0;
+      Stmt stmt{db,
+                "INSERT INTO locations(path,line,col,symbol,content,context,blob,uniq,kind,"
+                " visits,misses,last_ts,counted_ts,branch,seq)"
+                " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,0,?10,?10,?11,?12);"};
+      if (!stmt) return 0;
+      stmt.Text(1, key);
+      stmt.Int(2, line);
+      stmt.Int(3, std::max<Index>(0, row.col));
+      if (row.symbol.empty()) {
+        stmt.Null(4);
+      } else {
+        stmt.Text(4, row.symbol);
+      }
+      BindText(stmt, 5, row);
+      stmt.Int(9, row.kind);
+      stmt.Real(10, now);
+      BindBranch(stmt, 11);
+      stmt.Int(12, next);
+      return stmt.Run() ? next : 0;
+    }
+
+    // Already at the front: the row is where a move-to-front would put it, so
+    // the seq stands and the counter is not run for a place the user has not
+    // left. Everything else about the row still refreshes.
+    std::int64_t newest = 0;
+    {
+      Stmt stmt{db, "SELECT COALESCE(MAX(seq),0) FROM locations;"};
+      if (!stmt || !stmt.Step()) return 0;
+      newest = stmt.Integer(0);
+    }
+    std::int64_t next = at_seq;
+    if (at_seq < newest) {
+      next = NextStoreSeq(db);
+      if (next <= 0) return 0;
+    }
+    // The debounce: a row touched again within the window keeps its count. It
+    // is measured against the row rather than against the recorder so that two
+    // panes on one place cannot double-count it either -- and against the last
+    // visit that counted rather than the last touch, so an hour of work at one
+    // place is worth an hour rather than one visit. Read and written inside the
+    // caller's transaction, so the two cannot interleave.
+    const bool counts = ((now - counted_ts) >= kLocationVisitDebounce);
+    const std::int64_t visit = counts ? 1 : 0;
+
+    // `misses=0` because a record is by definition a hit: a row hidden at 3
+    // misses is out of the `c` corpus until a heal resolves it, and the user
+    // standing in it is the strongest evidence there is that it is still there.
+    Stmt stmt{db, row.has_text
+                      ? "UPDATE locations SET line=?1, col=?2, symbol=COALESCE(?3,symbol),"
+                        " content=?4, context=?5, blob=?6, uniq=?7, misses=0,"
+                        " kind=MAX(kind,?8), visits=visits+?9, last_ts=?10, branch=?11, seq=?12,"
+                        " counted_ts=?14"
+                        " WHERE id=?13;"
+                      : "UPDATE locations SET line=?1, col=?2, symbol=COALESCE(?3,symbol),"
+                        " misses=0,"
+                        " kind=MAX(kind,?8), visits=visits+?9, last_ts=?10, branch=?11, seq=?12,"
+                        " counted_ts=?14"
+                        " WHERE id=?13;"};
+    if (!stmt) return 0;
+    stmt.Int(1, line);
+    stmt.Int(2, std::max<Index>(0, row.col));
+    if (row.symbol.empty()) {
+      stmt.Null(3);
+    } else {
+      stmt.Text(3, row.symbol);
+    }
+    if (row.has_text) BindText(stmt, 4, row);
+    stmt.Int(8, row.kind);
+    stmt.Int(9, visit);
+    stmt.Real(10, now);
+    BindBranch(stmt, 11);
+    stmt.Int(12, next);
+    stmt.Int(13, id);
+    stmt.Real(14, counts ? now : counted_ts);
+    return stmt.Run() ? next : 0;
+  }
+
+  // Both queries take the row cap as ?2 and hand back five columns; only the
+  // frecency one references ?1 (now) and ?3 (the branch), and the recency one
+  // selects a literal 0 for the score it has none of. Binding an index the
+  // statement does not mention is fine -- SQLite sizes its parameter array by
+  // the largest index that appears -- so the two share one binder.
+  std::vector<FileVisit> Query(const char* sql, bool frecency, int want) {
     std::vector<FileVisit> out;
     Stmt stmt{db, sql};
     if (!stmt) return out;
-    if (bind_now) stmt.Real(1, Now());
+    if (frecency) {
+      stmt.Real(1, Now());
+      BindBranch(stmt, 3);
+    }
     stmt.Int(2, ScanLimit(want));
     if (want > 0) out.reserve(static_cast<std::size_t>(want));
     // Once, not once per row: see StillThere.
@@ -320,6 +978,7 @@ struct SqliteProject final : ProjectStore {
       entry.line = static_cast<Index>(stmt.Integer(1));
       entry.column = static_cast<Index>(stmt.Integer(2));
       entry.last_ts = stmt.Double(3);
+      entry.score = stmt.Double(4);
       if (!StillThere(root, entry.path)) continue;
       out.push_back(std::move(entry));
       // The SQL limit is the over-fetch; this is the cap the caller asked for.
@@ -331,7 +990,7 @@ struct SqliteProject final : ProjectStore {
   }
 
   std::vector<FileVisit> RecentFiles(int want) override {
-    return Query("SELECT path, last_line, last_col, last_ts FROM files"
+    return Query("SELECT path, last_line, last_col, last_ts, 0 FROM files"
                  " WHERE last_ts > 0 ORDER BY last_ts DESC LIMIT ?2;",
                  false, want);
   }
@@ -351,11 +1010,17 @@ struct SqliteProject final : ProjectStore {
   // The LIMIT still earns its place: the sorter keeps only that many rows, and
   // nothing past it is copied into a std::string or stat()ed. Bounding the
   // *scan* is the prune's job, not this query's.
+  //
+  // The score comes back with the row rather than only ordering it: the file
+  // picker has one more term of its own to apply -- the branch diff, which
+  // costs a subprocess and cannot go in here -- and an ordinal is not something
+  // a multiplier can be applied to.
   std::vector<FileVisit> FrecentFiles(int want) override {
-    return Query(
-        "SELECT path, last_line, last_col, last_ts FROM files"
-        " ORDER BY (visits + edits * 3) * (" KOI_DECAY_SQL ") DESC LIMIT ?2;",
-        true, want);
+    return Query("SELECT path, last_line, last_col, last_ts,"
+                 " (visits + edits * 3) * (" KOI_MULT_SQL("last_ts") ") *"
+                 " (" KOI_BRANCH_SQL("branch") ")"
+                 " FROM files ORDER BY 5 DESC LIMIT ?2;",
+                 true, want);
   }
 
   // The limit belongs in the SQL, not only in the loop below.
@@ -377,12 +1042,20 @@ struct SqliteProject final : ProjectStore {
   std::vector<SymbolVisit> HotSymbols(int limit) override {
     std::vector<SymbolVisit> out;
     if (limit <= 0) return out;
+    // `symbols` has no branch of its own -- a symbol is a place in a file, and
+    // the file is what was visited on a branch -- so the bonus is joined in
+    // from `files`. LEFT, because a symbol row can outlive the file row that
+    // named it, and then it simply gets no bonus: one primary-key seek per row,
+    // against a sorter this query was already paying for.
     Stmt stmt{db,
-              "SELECT symbol, file, line FROM symbols"
-              " WHERE line > 0 AND last_ts > 0 AND visits > 0"
-              " ORDER BY visits * (" KOI_DECAY_SQL ") DESC LIMIT ?2;"};
+              "SELECT s.symbol, s.file, s.line FROM symbols s"
+              " LEFT JOIN files f ON f.path = s.file"
+              " WHERE s.line > 0 AND s.last_ts > 0 AND s.visits > 0"
+              " ORDER BY s.visits * (" KOI_MULT_SQL("s.last_ts") ") *"
+              " (" KOI_BRANCH_SQL("f.branch") ") DESC LIMIT ?2;"};
     if (!stmt) return out;
     stmt.Real(1, Now());
+    BindBranch(stmt, 3);
     // Over-fetched for the same reason the file reads are: rows naming a file
     // that is gone are dropped here, and the query cannot know which those are.
     stmt.Int(2, ScanLimit(limit));
@@ -411,12 +1084,15 @@ struct SqliteProject final : ProjectStore {
 
     if (limit > 0) {
       Stmt stmt{db,
-                "SELECT file FROM symbols"
-                " WHERE visits > 0 AND last_ts > 0"
-                " ORDER BY visits * (" KOI_DECAY_SQL ") DESC LIMIT ?2;"};
+                "SELECT s.file FROM symbols s"
+                " LEFT JOIN files f ON f.path = s.file"
+                " WHERE s.visits > 0 AND s.last_ts > 0"
+                " ORDER BY s.visits * (" KOI_MULT_SQL("s.last_ts") ") *"
+                " (" KOI_BRANCH_SQL("f.branch") ") DESC LIMIT ?2;"};
       if (stmt) {
         stmt.Real(1, Now());
         stmt.Int(2, limit);
+        BindBranch(stmt, 3);
         while (stmt.Step()) add(stmt.Column(0));
       }
     }
@@ -474,7 +1150,10 @@ struct SqliteProject final : ProjectStore {
     // kMaxCoVisitFiles paths.
     std::unordered_map<std::string, double> scores;
     {
-      Stmt stmt{db, "SELECT symbol, visits * (" KOI_DECAY_SQL ") FROM symbols WHERE file = ?2;"};
+      Stmt stmt{db,
+                "SELECT s.symbol, s.visits * (" KOI_MULT_SQL("s.last_ts") ") *"
+                " (" KOI_BRANCH_SQL("f.branch") ")"
+                " FROM symbols s LEFT JOIN files f ON f.path = s.file WHERE s.file = ?2;"};
       if (stmt) {
         const double now = Now();
         std::string joined;
@@ -482,6 +1161,10 @@ struct SqliteProject final : ProjectStore {
           stmt.Reset();
           stmt.Real(1, now);
           stmt.Text(2, file);
+          // Reset() clears the bindings, so the branch goes back on per file.
+          // GitBranch answers from a memo keyed on HEAD's timestamp, so this is
+          // a stat and no more.
+          BindBranch(stmt, 3);
           while (stmt.Step()) {
             joined.assign(file).append(1, '\0').append(stmt.Column(0));
             scores[joined] = stmt.Double(1);
@@ -617,6 +1300,162 @@ struct SqliteProject final : ProjectStore {
     if (!stmt || !stmt.Step()) return 0;
     return static_cast<int>(stmt.Integer(0));
   }
+
+  std::vector<AnchorRow> AnchorsFor(std::string_view path) override {
+    std::vector<AnchorRow> out;
+    // No `uniq`: the ladder counts a line's occurrences in the file it is
+    // holding, which is the same number measured against the truth.
+    Stmt stmt{db, "SELECT id,seq,line,content,context,blob,symbol,misses FROM locations"
+                  " WHERE path=?1 ORDER BY id;"};
+    if (!stmt) return out;
+    stmt.Text(1, path);
+    while (stmt.Step()) {
+      AnchorRow row;
+      row.id = stmt.Integer(0);
+      row.seq = stmt.Integer(1);
+      row.line = stmt.Integer(2);
+      row.content = stmt.Column(3);
+      row.context = stmt.Column(4);
+      row.blob = stmt.Column(5);
+      row.symbol_null = (sqlite3_column_type(stmt.handle, 6) == SQLITE_NULL);
+      row.symbol = stmt.Column(6);
+      row.misses = stmt.Integer(7);
+      out.push_back(std::move(row));
+    }
+    return out;
+  }
+
+  std::vector<AnchorRow> AnchorPositionsFor(std::string_view path) override {
+    std::vector<AnchorRow> out;
+    Stmt stmt{db, "SELECT id,seq,line FROM locations WHERE path=?1 ORDER BY id;"};
+    if (!stmt) return out;
+    stmt.Text(1, path);
+    while (stmt.Step()) {
+      AnchorRow row;
+      row.id = stmt.Integer(0);
+      row.seq = stmt.Integer(1);
+      row.line = stmt.Integer(2);
+      out.push_back(row);
+    }
+    return out;
+  }
+
+  // One transaction for the file, and every statement finalised inside it --
+  // same shape as the jump list's Record. A heal that lands half written is a
+  // set of rows describing two different states of one file.
+  //
+  // Every statement is keyed on (id, seq), so a row the recorder has written
+  // since the job took its snapshot matches nothing and is left alone. That is
+  // a skip and not a failure: the batch is still coherent, and the true answer
+  // for that row is the one already in the store. True means the transaction
+  // committed, however many rows it turned out to touch.
+  bool ApplyHeals(const std::vector<AnchorHeal>& heals) override {
+    if ((db == nullptr) || heals.empty()) return false;
+    if (!ExecSql(db, "BEGIN IMMEDIATE;")) return false;
+    bool ok = true;
+    {
+      // A miss is a counter and nothing else: not the line, not the text, not
+      // the blob. Leaving the blob alone is what keeps the next heal from
+      // deciding through the blob gate that a row it could not find is true.
+      Stmt missed{db, "UPDATE locations SET misses=misses+1 WHERE id=?1 AND seq=?2;"};
+      Stmt moved{db, "UPDATE locations SET line=?2, misses=0, blob=?3"
+                     " WHERE id=?1 AND seq=?4;"};
+      Stmt retext{db, "UPDATE locations SET line=?2, misses=0, blob=?3,"
+                      " content=?4, context=?5 WHERE id=?1 AND seq=?6;"};
+      // COALESCE the other way round from the recorder's: this only ever fills
+      // a null in, and never replaces a name the recorder resolved from live
+      // syntax.
+      Stmt named{db, "UPDATE locations SET symbol=COALESCE(symbol,?2)"
+                     " WHERE id=?1 AND seq=?3;"};
+      for (const AnchorHeal& heal : heals) {
+        if (heal.miss) {
+          missed.Reset();
+          missed.Int(1, heal.id);
+          missed.Int(2, heal.seq);
+          ok = missed.Run() && ok;
+          continue;
+        }
+        Stmt& write = heal.refresh_text ? retext : moved;
+        write.Reset();
+        write.Int(1, heal.id);
+        write.Int(2, std::max<Index>(1, heal.line));
+        if (heal.blob.empty()) {
+          write.Null(3);
+        } else {
+          write.Text(3, heal.blob);
+        }
+        if (heal.refresh_text) {
+          write.Text(4, heal.content);
+          write.Text(5, heal.context);
+          write.Int(6, heal.seq);
+        } else {
+          write.Int(4, heal.seq);
+        }
+        ok = write.Run() && ok;
+        if (!heal.set_symbol || heal.symbol.empty()) continue;
+        named.Reset();
+        named.Int(1, heal.id);
+        named.Text(2, heal.symbol);
+        named.Int(3, heal.seq);
+        ok = named.Run() && ok;
+      }
+    }
+    if (ok && ExecSql(db, "COMMIT;")) return true;
+    ExecSql(db, "ROLLBACK;");
+    return false;
+  }
+
+  void RecordQueryAccept(std::string_view typed_terms, std::string_view target) override {
+    if ((db == nullptr) || target.empty()) return;
+    const std::vector<std::string> prefixes = QueryPrefixes(typed_terms);
+    if (prefixes.empty()) return;
+
+    // One transaction for the whole set, and it joins the caller's when there is
+    // one: an accept is a jump plus this, and the two should not be able to land
+    // half each.
+    const bool own = (sqlite3_get_autocommit(db) != 0);
+    if (own && !ExecSql(db, "BEGIN IMMEDIATE;")) return;
+    // One prepared statement, reset per prefix. The decay factor is bound rather
+    // than spelled into the SQL so the constant lives in exactly one place.
+    Stmt stmt{db,
+              "INSERT INTO queries(prefix, target, use_count, last_ts) VALUES(?1,?2,1,?3)"
+              " ON CONFLICT(prefix, target) DO UPDATE SET"
+              " use_count = use_count * ?4 + 1, last_ts = excluded.last_ts;"};
+    bool ok = static_cast<bool>(stmt);
+    const double now = Now();
+    for (const std::string& prefix : prefixes) {
+      if (!ok) break;
+      stmt.Reset();
+      stmt.Text(1, prefix);
+      stmt.Text(2, target);
+      stmt.Real(3, now);
+      stmt.Real(4, kQueryAcceptDecay);
+      ok = stmt.Run();
+    }
+    if (!own) return;
+    if (ok && ExecSql(db, "COMMIT;")) return;
+    ExecSql(db, "ROLLBACK;");
+  }
+
+  double AdaptiveUse(std::string_view prefix, std::string_view target) override {
+    if (db == nullptr) return 0.0;
+    if (!adaptive) {
+      adaptive.emplace(db,
+                       "SELECT use_count, last_ts FROM queries WHERE prefix = ?1 AND target = ?2;");
+    }
+    Stmt& stmt = *adaptive;
+    if (!stmt) return 0.0;
+    stmt.Text(1, prefix);
+    stmt.Text(2, target);
+    // Reset before returning, whichever way it went: a statement left standing
+    // on a row holds a read open on the connection, and the next write on it
+    // would be arguing with a cursor of its own.
+    const double use = stmt.Step() ? DecayedUse(stmt.Double(0), stmt.Double(1), Now()) : 0.0;
+    stmt.Reset();
+    return use;
+  }
+
+  sqlite3* Connection() override { return db; }
 };
 
 // One row per (file, symbol) once the file column has been re-keyed, and one
@@ -655,6 +1494,22 @@ bool LegacyKey(std::string_view stored, std::string& key) {
   return false;
 }
 
+// The stamp is read once, before any lock is taken, so two koi processes
+// opening the same project at the same moment both decide to migrate: the
+// second blocks on BEGIN IMMEDIATE, the first commits, and the second then
+// copies everything a second time into tables with no unique index to stop it.
+// Re-read the stamp under the write lock and bail.
+//
+// This works because each migration now stamps its own version inside its own
+// transaction (the COMMITs below), so the winner's stamp is visible to the loser
+// the instant the lock changes hands. Stamping per step is also what stops a v3
+// step that fails from making the v2 step run twice on the next open --
+// ProjectKey is not idempotent below the root.
+bool AlreadyMigrated(sqlite3* db, std::int64_t version) {
+  Stmt stmt{db, "PRAGMA user_version;"};
+  return stmt && stmt.Step() && (stmt.Integer(0) >= version);
+}
+
 // Rewrites every stored path into the one spelling ProjectKey defines, and
 // throws away what no longer resolves.
 //
@@ -673,6 +1528,10 @@ bool MigratePathsToProjectKeys(sqlite3* db, std::string& error) {
   if (!ExecSql(db, "BEGIN IMMEDIATE;", &why)) {
     error = "cannot migrate project database: " + why;
     return false;
+  }
+  if (AlreadyMigrated(db, 2)) {
+    ExecSql(db, "ROLLBACK;");
+    return true;
   }
   const auto fail = [db, &error](std::string what) {
     ExecSql(db, "ROLLBACK;");
@@ -750,7 +1609,7 @@ bool MigratePathsToProjectKeys(sqlite3* db, std::string& error) {
     }
   }
 
-  if (!ExecSql(db, "COMMIT;", &why)) return fail(std::move(why));
+  if (!ExecSql(db, "PRAGMA user_version = 2; COMMIT;", &why)) return fail(std::move(why));
   return true;
 }
 
@@ -772,6 +1631,10 @@ bool MigratePinsToFilePins(sqlite3* db, std::string& error) {
   if (!ExecSql(db, "BEGIN IMMEDIATE;", &why)) {
     error = "cannot migrate project database: " + why;
     return false;
+  }
+  if (AlreadyMigrated(db, 3)) {
+    ExecSql(db, "ROLLBACK;");
+    return true;
   }
   const auto fail = [db, &error](std::string what) {
     ExecSql(db, "ROLLBACK;");
@@ -805,8 +1668,498 @@ bool MigratePinsToFilePins(sqlite3* db, std::string& error) {
   }
 
   if (!ExecSql(db, "DROP TABLE IF EXISTS pins;", &why)) return fail(std::move(why));
-  if (!ExecSql(db, "COMMIT;", &why)) return fail(std::move(why));
+  if (!ExecSql(db, "PRAGMA user_version = 3; COMMIT;", &why)) return fail(std::move(why));
   return true;
+}
+
+// Whether a table already has a column, so an ALTER that has run once does not
+// run again. SQLite has no "ADD COLUMN IF NOT EXISTS", and a migration that
+// cannot be replayed is one bad open away from never completing.
+bool HasColumn(sqlite3* db, const char* table, std::string_view column) {
+  const std::string sql = "PRAGMA table_info(" + std::string{table} + ");";
+  Stmt stmt{db, sql.c_str()};
+  while (stmt.Step()) {
+    if (stmt.Column(1) == column) return true;
+  }
+  return false;
+}
+
+// ALTER TABLE ADD COLUMN, asked twice. Two koi processes opening the same
+// project can both find the column missing, and the loser's ALTER comes back
+// "duplicate column name" -- which is the answer it wanted, not a failure. The
+// second HasColumn is what tells the two apart.
+bool AddColumn(sqlite3* db, const char* table, std::string_view column, const char* sql,
+               std::string* why) {
+  if (HasColumn(db, table, column)) return true;
+  if (ExecSql(db, sql, why)) return true;
+  return HasColumn(db, table, column);
+}
+
+// v5's column, added here as well as by the v5 step: a v3 database whose
+// `locations` was created by an older v4 build has the table without it, and
+// the v4 import below writes to it. ADD COLUMN with a default is transactional
+// in SQLite, so this may run either side of a BEGIN.
+bool AddCountedTs(sqlite3* db, std::string* why) {
+  return AddColumn(db, "locations", "counted_ts",
+                   "ALTER TABLE locations ADD COLUMN counted_ts REAL NOT NULL DEFAULT 0;", why);
+}
+
+// One row per place, newest wins: two absolute paths (a symlink, a directory
+// renamed under koi) can key to one, and "one row per place" is what the merge
+// rule downstream assumes. `seq` is the old `id`, so the order the list steps
+// through is exactly the order it had.
+struct Copied {
+  std::string path;
+  std::int64_t seq{0};  // the old id
+  std::int64_t line{0};
+  std::int64_t col{0};
+  double ts{0};
+};
+
+// ATTACH is not allowed inside a transaction, so it brackets one. A jump
+// database that will not attach -- corrupt, gone between the stat and the open,
+// from a newer build -- is not a reason to refuse the project store: there is
+// simply no jump history to carry over.
+bool AttachLegacyJumps(sqlite3* db, const fs::path& legacy) {
+  Stmt attach{db, "ATTACH DATABASE ?1 AS jumpdb;"};
+  if (!attach) return false;
+  attach.Text(1, legacy.string());
+  return attach.Run();
+}
+
+// Reads the attached v3 jump list into the keyed, deduped form both the v4
+// import and the re-import insert. Read first, write second: the dedup needs the
+// whole table before it knows which row for a place is the newest.
+std::vector<Copied> ReadLegacyJumps(sqlite3* db) {
+  std::vector<Copied> rows;
+  Stmt read{db, "SELECT id, ts, path, line, col FROM jumpdb.jumps ORDER BY id;"};
+  if (!read) return rows;
+  std::unordered_map<std::string, std::size_t> newest;
+  while (read.Step()) {
+    const std::string key = ProjectKey(read.Column(2));
+    if (!StorablePath(key)) continue;
+    const std::int64_t line = read.Integer(3);
+    const std::string place = key + '\0' + std::to_string(line);
+    const auto found = newest.find(place);
+    const std::size_t at = (found != newest.end()) ? found->second : rows.size();
+    if (found == newest.end()) {
+      newest.emplace(place, at);
+      rows.push_back(Copied{.path = key});
+    }
+    rows[at].seq = read.Integer(0);
+    rows[at].line = line;
+    rows[at].col = read.Integer(4);
+    rows[at].ts = read.Double(1);
+  }
+  return rows;
+}
+
+// v3 kept the jump list in a second database -- ~/.local/share/koi/<project>/
+// state.db -- with absolute paths, its own dedup rule and no idea what a
+// project key was. v4 folds it into `locations` here.
+//
+// What changes on the way in: the path is keyed like every other path in this
+// database, and a row whose path is not worth storing is dropped rather than
+// carried. What does not: `seq` is the old `id`, and `jump_cursor.at` -- which
+// named an id -- names the same number as a seq without being touched. The v6
+// step below turns those seqs back into ids, so this one leaves them as they
+// are rather than trying to write a row id that is not assigned yet.
+//
+// The old file is left where it is. It is the only copy of that history, and a
+// rename buys nothing a backup does not. ReimportLostJumps below is what that
+// copy turned out to be for.
+bool MigrateJumpsToLocations(sqlite3* db, std::string& error) {
+  std::string why;
+  // Before the ATTACH, because a v3 `files` has no `branch` to write to and
+  // because the insert below names a column v5 added.
+  if (!AddColumn(db, "files", "branch", "ALTER TABLE files ADD COLUMN branch TEXT;", &why) ||
+      !AddCountedTs(db, &why)) {
+    error = "cannot migrate project database: " + why;
+    return false;
+  }
+
+  const fs::path legacy = LegacyJumpDbPath();
+  std::error_code ec;
+  if (legacy.empty() || !fs::is_regular_file(legacy, ec)) return true;
+  if (!AttachLegacyJumps(db, legacy)) return true;
+  const auto detach = [db] { ExecSql(db, "DETACH DATABASE jumpdb;"); };
+
+  const std::vector<Copied> rows = ReadLegacyJumps(db);
+
+  std::vector<std::pair<std::string, std::int64_t>> cursors;
+  {
+    Stmt read{db, "SELECT pane, at FROM jumpdb.jump_cursor;"};
+    while (read.Step()) cursors.emplace_back(read.Column(0), read.Integer(1));
+  }
+
+  if (!ExecSql(db, "BEGIN IMMEDIATE;", &why)) {
+    detach();
+    error = "cannot migrate project database: " + why;
+    return false;
+  }
+  const auto fail = [db, &detach, &error](std::string what) {
+    ExecSql(db, "ROLLBACK;");
+    detach();
+    error = "cannot migrate project database: " + std::move(what);
+    return false;
+  };
+  // The stamp was read before the lock: another koi may have done all of this
+  // while this one waited here. `locations` has no unique index to stop a second
+  // copy, so the check has to be this one.
+  if (AlreadyMigrated(db, 4)) {
+    ExecSql(db, "ROLLBACK;");
+    detach();
+    return true;
+  }
+
+  {
+    Stmt write{db,
+               "INSERT INTO locations(path, line, col, kind, visits, misses, last_ts,"
+               " counted_ts, seq) VALUES(?1,?2,?3,0,1,0,?4,?4,?5);"};
+    if (!write && !rows.empty()) return fail("cannot write locations");
+    for (const Copied& row : rows) {
+      write.Reset();
+      write.Text(1, row.path);
+      write.Int(2, row.line);
+      write.Int(3, row.col);
+      write.Real(4, row.ts);
+      write.Int(5, row.seq);
+      if (!write.Run()) return fail("cannot write locations");
+    }
+  }
+  {
+    Stmt write{db, "INSERT OR REPLACE INTO jump_cursor(pane, at) VALUES(?1,?2);"};
+    if (!write && !cursors.empty()) return fail("cannot write jump_cursor");
+    for (const auto& [pane, at] : cursors) {
+      if (pane.empty()) continue;
+      write.Reset();
+      write.Text(1, pane);
+      write.Int(2, at);
+      if (!write.Run()) return fail("cannot write jump_cursor");
+    }
+  }
+
+  if (!ExecSql(db, "PRAGMA user_version = 4; COMMIT;", &why)) return fail(std::move(why));
+  detach();
+  return true;
+}
+
+// v4 measured the visit debounce against `last_ts`, which every touch refreshes,
+// so the window slid ahead of itself and no second visit was ever counted. v5
+// gives `locations` a column only a counted visit moves.
+bool MigrateLocationsCountedTs(sqlite3* db, std::string& error) {
+  std::string why;
+  if (!ExecSql(db, "BEGIN IMMEDIATE;", &why)) {
+    error = "cannot migrate project database: " + why;
+    return false;
+  }
+  if (AlreadyMigrated(db, 5)) {
+    ExecSql(db, "ROLLBACK;");
+    return true;
+  }
+  if (!AddCountedTs(db, &why) || !ExecSql(db, "PRAGMA user_version = 5; COMMIT;", &why)) {
+    ExecSql(db, "ROLLBACK;");
+    error = "cannot migrate project database: " + why;
+    return false;
+  }
+  return true;
+}
+
+// v5 kept the jump cursor as a seq and read "am I part-way back through the
+// list?" off the store-wide seq counter. Both are wrong once `locations` is
+// shared: a merge gives a row a new seq and leaves every other pane's cursor
+// naming a number nothing holds (11 of the 23 cursors in the live store), and
+// every linger record advances the counter without the list having moved.
+//
+// v6 keys the cursor by `locations.id`, which a merge does not touch, and gives
+// each pane a `walking` flag the jump list owns.
+//
+// The old seqs are converted where the row is still there. The ones that are
+// not are deleted rather than kept: a stale seq is a plausible `id` -- both are
+// small integers out of the same table -- so leaving one would silently point
+// the pane at whatever row happens to hold that id. A pane with no cursor row
+// starts from the front, which is where a pane that lost its place should be.
+// The delete therefore has to run before the conversion, or a converted cursor
+// looks the same as a stale one.
+bool MigrateJumpCursorToIds(sqlite3* db, std::string& error) {
+  std::string why;
+  if (!ExecSql(db, "BEGIN IMMEDIATE;", &why)) {
+    error = "cannot migrate project database: " + why;
+    return false;
+  }
+  if (AlreadyMigrated(db, 6)) {
+    ExecSql(db, "ROLLBACK;");
+    return true;
+  }
+  const bool ok =
+      AddColumn(db, "jump_cursor", "walking",
+                "ALTER TABLE jump_cursor ADD COLUMN walking INTEGER NOT NULL DEFAULT 0;", &why) &&
+      ExecSql(db,
+              "DELETE FROM jump_cursor WHERE at NOT IN (SELECT seq FROM locations);"
+              "UPDATE jump_cursor SET at ="
+              " (SELECT id FROM locations WHERE locations.seq = jump_cursor.at);"
+              "PRAGMA user_version = 6; COMMIT;",
+              &why);
+  if (!ok) {
+    ExecSql(db, "ROLLBACK;");
+    error = "cannot migrate project database: " + why;
+    return false;
+  }
+  return true;
+}
+
+// How empty the migrated range has to be before the rows are considered lost:
+// fewer than half the places the old list held still present under the highest
+// migrated seq. A store that kept its import is left alone.
+constexpr std::int64_t kReimportShare = 2;
+
+// The imported jump list used to be deleted by the aging pass in the same open
+// that wrote it -- every row arrives at 1 visit, and the pass culled everything
+// under 1. The old database is still on disk, so the rows can be put back.
+//
+// Not gated on the schema stamp: a store that lost them is already v4 or later,
+// so `found < 4` will never fire for it again. The gates are a `meta` flag,
+// which makes this one-shot, and the migrated seq range being nearly empty,
+// which is what the loss looks like from here.
+//
+// Nothing is inserted twice. A place whose row survived -- a jump cursor stood
+// on it, or the user has been back since -- is matched either by its seq or by
+// its (path, line), and the insert says so itself rather than trusting a count.
+void ReimportLostJumps(sqlite3* db) {
+  const auto reimported = [db] {
+    Stmt flag{db, "SELECT COUNT(*) FROM meta WHERE key = 'jumps_reimported';"};
+    return !flag || !flag.Step() || (flag.Integer(0) > 0);
+  };
+  if (reimported()) return;
+
+  const fs::path legacy = LegacyJumpDbPath();
+  std::error_code ec;
+  if (legacy.empty() || !fs::is_regular_file(legacy, ec)) return;
+  if (!AttachLegacyJumps(db, legacy)) return;
+  const auto detach = [db] { ExecSql(db, "DETACH DATABASE jumpdb;"); };
+
+  const std::vector<Copied> rows = ReadLegacyJumps(db);
+  if (rows.empty()) {
+    detach();
+    return;
+  }
+  std::int64_t high = 0;
+  for (const Copied& row : rows) high = std::max(high, row.seq);
+
+  if (!ExecSql(db, "BEGIN IMMEDIATE;")) {
+    detach();
+    return;
+  }
+  const auto give_up = [db, &detach] {
+    ExecSql(db, "ROLLBACK;");
+    detach();
+  };
+  // Re-read under the lock, the same shape the migrations use: two panes
+  // opening at once both arrive here, and the second must find the flag set.
+  if (reimported()) {
+    give_up();
+    return;
+  }
+
+  std::int64_t present = 0;
+  {
+    Stmt count{db, "SELECT COUNT(*) FROM locations WHERE seq <= ?1;"};
+    if (!count) {
+      give_up();
+      return;
+    }
+    count.Int(1, high);
+    if (!count.Step()) {
+      give_up();
+      return;
+    }
+    present = count.Integer(0);
+  }
+
+  if ((present * kReimportShare) < static_cast<std::int64_t>(rows.size())) {
+    Stmt write{db,
+               "INSERT INTO locations(path, line, col, kind, visits, misses, last_ts,"
+               " counted_ts, seq) SELECT ?1,?2,?3,0,1,0,?4,?4,?5"
+               " WHERE NOT EXISTS (SELECT 1 FROM locations WHERE seq = ?5)"
+               "   AND NOT EXISTS (SELECT 1 FROM locations WHERE path = ?1 AND line = ?2);"};
+    if (!write) {
+      give_up();
+      return;
+    }
+    for (const Copied& row : rows) {
+      write.Reset();
+      write.Text(1, row.path);
+      write.Int(2, row.line);
+      write.Int(3, row.col);
+      write.Real(4, row.ts);
+      write.Int(5, row.seq);
+      if (!write.Run()) {
+        give_up();
+        return;
+      }
+    }
+  }
+
+  // Set whichever way the decision went: the answer does not change on the next
+  // open, and the flag is what keeps this off the open path for ever after.
+  {
+    Stmt flag{db,
+              "INSERT INTO meta(key, value) VALUES('jumps_reimported', '1')"
+              " ON CONFLICT(key) DO UPDATE SET value = excluded.value;"};
+    if (!flag || !flag.Run()) {
+      give_up();
+      return;
+    }
+  }
+  if (!ExecSql(db, "COMMIT;")) ExecSql(db, "ROLLBACK;");
+  detach();
+}
+
+// Rows written before the gate existed -- ~70% of the live `files` table, and
+// every worktree copy in `symbols`. Deleted by what they name, never by whether
+// the file is on disk this second: a branch switch makes half a repository
+// missing, and history that deletes itself over one is worth nothing on the way
+// back.
+void PruneUnstorablePaths(sqlite3* db) {
+  struct Table {
+    const char* read;
+    const char* drop;
+  };
+  static constexpr Table kTables[] = {
+      {"SELECT DISTINCT path FROM files;", "DELETE FROM files WHERE path = ?1;"},
+      {"SELECT DISTINCT file FROM symbols;", "DELETE FROM symbols WHERE file = ?1;"},
+      {"SELECT DISTINCT path FROM locations;", "DELETE FROM locations WHERE path = ?1;"},
+  };
+  std::vector<std::pair<const char*, std::string>> bad;
+  for (const Table& table : kTables) {
+    Stmt read{db, table.read};
+    while (read.Step()) {
+      std::string path = read.Column(0);
+      if (!StorablePath(path)) bad.emplace_back(table.drop, std::move(path));
+    }
+  }
+  // Names the gate above would refuse today: rows the old recorder wrote.
+  // Symbol rows die with the name; a location only loses the name, because the
+  // place is still real and healable.
+  {
+    Stmt read{db, "SELECT DISTINCT symbol FROM symbols;"};
+    while (read.Step()) {
+      std::string name = read.Column(0);
+      if (!StorableSymbolName(name)) {
+        bad.emplace_back("DELETE FROM symbols WHERE symbol = ?1;", std::move(name));
+      }
+    }
+  }
+  {
+    Stmt read{db, "SELECT DISTINCT symbol FROM locations WHERE symbol IS NOT NULL;"};
+    while (read.Step()) {
+      std::string name = read.Column(0);
+      if (!StorableSymbolName(name)) {
+        bad.emplace_back("UPDATE locations SET symbol = NULL WHERE symbol = ?1;", std::move(name));
+      }
+    }
+  }
+  if (bad.empty()) return;
+  // One transaction for the lot. Unchecked like the other prunes: a store that
+  // cannot delete is still a store worth having.
+  if (!ExecSql(db, "BEGIN IMMEDIATE;")) return;
+  for (const auto& [sql, path] : bad) {
+    Stmt drop{db, sql};
+    if (!drop) continue;
+    drop.Text(1, path);
+    drop.Run();
+  }
+  if (!ExecSql(db, "COMMIT;")) ExecSql(db, "ROLLBACK;");
+}
+
+// A confirmed pair drops out of `queries` once its decayed count falls under
+// 0.1 -- the design's threshold, and the reason nothing here needs an expiry of
+// its own.
+//
+// Not one DELETE, because the decay is a read-time rule and the SQL for it wants
+// pow(), which SQLite has only when it was built with the math functions. The
+// table is small enough that reading it costs nothing.
+//
+// The WHERE is a sufficient prefilter rather than the rule itself. A write
+// leaves `use_count` at 1 or above (0 * 0.9 + 1), so the fastest a row can reach
+// 0.1 is log(0.1)/log(0.975) ~ 91 days; anything newer cannot qualify and is
+// never looked at. In the steady state this reads no rows at all.
+void PruneQueries(sqlite3* db) {
+  constexpr double kEarliestDrop = 90.0 * 86400.0;
+  const double now = Now();
+  std::vector<std::pair<std::string, std::string>> dead;
+  {
+    Stmt read{db, "SELECT prefix, target, use_count, last_ts FROM queries WHERE last_ts < ?1;"};
+    if (!read) return;
+    read.Real(1, now - kEarliestDrop);
+    while (read.Step()) {
+      if (DecayedUse(read.Double(2), read.Double(3), now) >= kQueryDropBelow) continue;
+      dead.emplace_back(read.Column(0), read.Column(1));
+    }
+  }
+  if (dead.empty()) return;
+  // Unchecked like the prunes beside it, and the ROLLBACK is not optional: a
+  // statement that fails partway leaves the write lock held for the session.
+  if (!ExecSql(db, "BEGIN IMMEDIATE;")) return;
+  Stmt drop{db, "DELETE FROM queries WHERE prefix = ?1 AND target = ?2;"};
+  for (const auto& [prefix, target] : dead) {
+    if (!drop) break;
+    drop.Reset();
+    drop.Text(1, prefix);
+    drop.Text(2, target);
+    drop.Run();
+  }
+  if (!ExecSql(db, "COMMIT;")) ExecSql(db, "ROLLBACK;");
+}
+
+// The event that drives the aging is an open, which is the only moment the
+// whole store is in hand and nothing is reading it. The gate is read first
+// rather than written into the UPDATE's WHERE: the sum it tests is the very
+// thing the first row updated would change.
+//
+// Unchecked, like the prunes beside it -- a store that cannot age is still a
+// store. The ROLLBACK is not optional though: a statement that fails partway
+// leaves the transaction open, and a connection sitting on the write lock for
+// the rest of the session locks out every other pane.
+void AgeStore(sqlite3* db) {
+  // Unlocked first pass: the common open has nothing to age, and taking the
+  // write lock to find that out would block every other pane for the length of
+  // three SUMs.
+  bool heavy = false;
+  for (const AgeTable& table : kAgeTables) {
+    Stmt weight{db, table.total};
+    if (weight && weight.Step() && (weight.Double(0) > kAgeThreshold)) heavy = true;
+  }
+  if (!heavy) return;
+
+  if (!ExecSql(db, "BEGIN IMMEDIATE;")) return;
+  for (const AgeTable& table : kAgeTables) {
+    // Re-read under the lock: another pane may have aged this table between the
+    // pass above and here, and scaling twice on one open is the thing the
+    // single-pass factor exists to avoid.
+    //
+    // Scoped, so the read is finalised before the write begins: a statement that
+    // has stepped and not been reset is still walking the table the UPDATE below
+    // rewrites.
+    double total = 0;
+    {
+      Stmt weight{db, table.total};
+      if (!weight || !weight.Step()) continue;
+      total = weight.Double(0);
+    }
+    if (total <= kAgeThreshold) continue;
+    {
+      Stmt scale{db, table.scale};
+      if (!scale) continue;
+      // Land on the threshold when that costs less than kAgeScale, so a table
+      // barely over is not taken 10% under for nothing; otherwise take the
+      // fixed step and let the next open take another.
+      scale.Real(1, std::max(kAgeThreshold / total, kAgeScale));
+      if (!scale.Run()) continue;
+    }
+    ExecSql(db, table.cull);
+  }
+  if (!ExecSql(db, "COMMIT;")) ExecSql(db, "ROLLBACK;");
 }
 
 fs::path DataHome() {
@@ -1065,6 +2418,21 @@ fs::path BesideDatabase(const char* name) {
 
 }
 
+// Derived here rather than in jumplist.cpp, which no longer opens a database at
+// all. The rule is the one the jump list used: the project *root*, not the
+// working directory, and ProjectDirName rather than a bare flatten -- keying on
+// the cwd gave one project a jump list per directory koi was started from, and
+// the bare flatten is the non-injective name that had /w/a-b and /w/a/b sharing
+// a state directory.
+fs::path LegacyJumpDbPath() {
+  const fs::path home = DataHome();
+  const fs::path root = ProjectRoot();
+  if (home.empty() || root.empty()) return {};
+  const std::string project = ProjectDirName(root);
+  if (project.empty()) return {};
+  return home / "koi" / project / "state.db";
+}
+
 fs::path LastPickerStatePath() { return BesideDatabase("koi-last-picker.txt"); }
 
 fs::path KeyLogDbPath() { return BesideDatabase("keylog.db"); }
@@ -1095,9 +2463,14 @@ std::shared_ptr<ProjectStore> ProjectStore::Open(const fs::path& path, std::stri
   }
   // v1 stored two spellings of the same path: root-relative from the editor,
   // cwd-relative from the file filter. v2 stores one. v3 replaced pinned
-  // positions with pinned files. Both rewrites run once, gated on the stamp
-  // below, and only after the DDL -- a database that was empty a moment ago has
-  // the tables the migrations read.
+  // positions with pinned files. v4 takes in the jump list that used to live in
+  // a database of its own. Each rewrite runs once, gated on the stamp below,
+  // and only after the DDL -- a database that was empty a moment ago has the
+  // tables the migrations read.
+  //
+  // The v4 step runs for a database this build just created, too, and that is
+  // deliberate: a project with jump history and no project store yet is the
+  // same import, and it is the only chance to make it.
   //
   // The v1 rewrite leaves `files` and the pins alone. Both were only ever
   // written from the editor's own root-relative spelling, so they are already
@@ -1115,7 +2488,15 @@ std::shared_ptr<ProjectStore> ProjectStore::Open(const fs::path& path, std::stri
   // every row it touched.
   if ((found < 2) && !MigratePathsToProjectKeys(store->db, error)) return nullptr;
   if ((found < 3) && !MigratePinsToFilePins(store->db, error)) return nullptr;
+  if ((found < 4) && !MigrateJumpsToLocations(store->db, error)) return nullptr;
+  if ((found < 5) && !MigrateLocationsCountedTs(store->db, error)) return nullptr;
+  if ((found < 6) && !MigrateJumpCursorToIds(store->db, error)) return nullptr;
   if (!StampSchemaVersion(store->db, kSchemaVersion, error)) return nullptr;
+  // Repair, not migration, and gated on its own flag rather than on the stamp:
+  // the stores that need it are already stamped past the import that lost their
+  // rows. Before the prunes and the aging below, so the restored rows are held
+  // to the same rules as any other.
+  ReimportLostJumps(store->db);
   // The only thing that ever bounded `files` and `symbols` was how much the
   // user had done, and that only goes up. Once per open, not per write: a
   // session's worth of visits cannot outgrow either cap by more than a session,
@@ -1129,11 +2510,23 @@ std::shared_ptr<ProjectStore> ProjectStore::Open(const fs::path& path, std::stri
   // does and what the next open reuses.
   store->Exec(kPruneFiles);
   store->Exec(kPruneSymbols);
+  store->Exec(kPruneLocations);
+  // `queries` prunes by what a row is worth rather than by how many there are:
+  // its decay is the expiry, and this is where it is collected.
+  PruneQueries(store->db);
+  // Aging is the other half of "prune on open", and the one that is about
+  // weight rather than about row counts. Same unchecked contract.
+  AgeStore(store->db);
+  // Last, so it also sees whatever the migration above just copied in.
+  PruneUnstorablePaths(store->db);
   return store;
 }
 
 }
 
-#undef KOI_DECAY_SQL
+#undef KOI_MULT_SQL
+#undef KOI_BRANCH_SQL
 #undef KOI_MAX_FILE_ROWS
 #undef KOI_MAX_SYMBOL_ROWS
+#undef KOI_MAX_LOCATION_ROWS
+#undef KOI_AGE_FLOOR

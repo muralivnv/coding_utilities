@@ -6,11 +6,17 @@
 #include <vector>
 
 #include "editor.h"
+#include "project.h"
+#include "smartjump.h"
 #include "symbols.h"
 
 namespace koi {
 
 void FilePicker(Editor& ed, std::string_view query = "");
+
+// Which picker pipeline a smart-jump dead end opens -- a name PickerCommand
+// knows, so the terms travel through the ordinary picker command.
+std::string_view SmartPickerPipeline(SmartPicker picker);
 
 void BufferPicker(Editor& ed, std::string_view query = "");
 
@@ -82,11 +88,87 @@ void JumpToPin(Editor& ed, int slot);
 
 void GoToLastEdit(Editor& ed);
 
+// -- smart jump ---------------------------------------------------------------
+//
+// The prompt half of docs/smart-jump.md: the parser and the pipeline are in
+// smartjump.h, and these are what drive them from the editor. No prompt of its
+// own -- the existing one, with the parse's answer on the status line, so that
+// what Enter will do is visible before it is pressed.
+
+// Opens the prompt and takes the corpus snapshot. One store read and one stat
+// sweep; nothing after this touches disk until Enter.
+void SmartJumpPrompt(Editor& ed);
+
+// One keystroke: re-score the whole snapshot and say what Enter would do. Does
+// nothing unless the smart-jump prompt is the one that is open. Also arms or
+// disarms the auto-jump, which is a lone match plus silence.
+void SmartJumpPreview(Editor& ed);
+
+// Whether the open prompt is sitting on a lone match waiting out
+// kSmartAutoJumpSettle. The input loop asks so that it polls with a timeout
+// instead of blocking: nothing else would wake it, and the settle is time
+// passing rather than anything the user does.
+bool SmartJumpSettling(const Editor& ed);
+
+// The settle, checked. Fires the lone match the way Enter would once the prompt
+// has been quiet for kSmartAutoJumpSettle, and does nothing before then.
+void CheckSmartJumpAutoFire(Editor& ed);
+
+// Enter. Lands on the best match, always -- stepping is the disambiguator, not
+// a list view. Nothing found says so and hands the query to the picker; this
+// never widens on its own.
+void SmartJumpSubmit(Editor& ed, std::string_view line);
+
+// Tab: close the prompt and hand what is typed to the picker the deciding
+// clause names -- the same handoff the dead end makes, one keystroke earlier.
+// Never a silent widening: the user asked for it.
+void SmartJumpToPicker(Editor& ed);
+
+// The last query's ranked list, one row at a time, wrapping like search does.
+void SmartJumpStep(Editor& ed, bool forward);
+
+// How long a smart-jump arrival has to be stood in before it is recorded. An
+// abandoned mis-jump that records itself is zoxide's documented trust-killer,
+// so this one records nothing at all (docs/smart-jump.md, Recording).
+inline constexpr double kBounceSeconds = 2.0;
 
 void JumpToHotSymbol(Editor& ed, int index);
 
+// Bumps the file's own row: this is where the buffer was last left, and one
+// more visit to it. The jump-motion call sites are where a place is worth
+// counting -- everything else the recorder learns, it learns at a boundary.
 void RecordVisitHere(Editor& ed);
+
+// One edit boundary at the current place: a `locations` row of kind edit, the
+// `files` bump behind it, the enclosing symbol. Debounced, so a burst of typing
+// is one record and not one per keystroke.
 void RecordEditHere(Editor& ed);
+
+// How long the cursor has to sit still before where it is sitting counts as a
+// place visited. Three seconds is the design's; it is long enough that passing
+// through a file does not record every line of it, and short enough that
+// stopping to read something records it.
+inline constexpr double kLingerSeconds = 3.0;
+
+// Everything a `locations` row says about where the primary cursor is: the
+// position, the enclosing symbol from live syntax only, the line's text and its
+// neighbours, how unique that text is in the buffer, and the disk blob when the
+// buffer is clean against its file. False -- and `out` untouched -- for an
+// excerpt view and for a buffer with no file, which are not places in the
+// corpus.
+bool LocationHere(Editor& ed, LocationRecord& out);
+
+// That a row for the current place has just been written by somebody else --
+// the jump list, which owns its own transaction and the pane's cursor. Stops
+// the linger recording the same place again, and bumps the symbol.
+void NoteRecordedHere(Editor& ed, const LocationRecord& row);
+
+// The two halves of boundary recording, called from the input loop around the
+// command an event turns into. Before: the linger check, which needs the place
+// as it was while the user was sitting in it. After: whether the command edited
+// the buffer, and where the cursor has ended up.
+void NoteInputBoundary(Editor& ed);
+void NoteCommandBoundary(Editor& ed);
 
 void RestoreLastPosition(Editor& ed);
 

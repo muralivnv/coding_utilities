@@ -47,13 +47,25 @@ void LeapJumpsToATypedPair() {
   TEST_CASE("leap: `y` arms it, and a pair only one place answers to jumps straight there");
   {
     const Scratch scratch{"koi-leap-jump"};
-    const std::filesystem::path file = scratch.Write("a.txt", "alpha\nbravo\ncharlie\n");
+    // A jump is only recorded for a path the store would keep, and a fixture
+    // under the system temp directory is one only when it is the project.
+    const AsProjectRoot root{scratch.dir};
+    // Twelve lines of filler between the caret and the pair, and no `r` in any
+    // of them. The distance is what makes this a jump to somewhere else: a
+    // record within kLocationMergeLines of the place it left merges onto that
+    // row instead of taking one of its own, and then there is nothing behind
+    // the cursor to step back to.
+    std::string text = "alpha\n";
+    for (int i = 0; i < 12; ++i) text += "one two\n";
+    text += "bravo\ncharlie\n";
+    const auto pair_at = static_cast<Index>(text.find("bravo")) + 1;
+    const std::filesystem::path file = scratch.Write("a.txt", text);
     std::string error;
 
     Editor ed;
-    ed.jumps = JumpStore::Open(scratch.dir / "jumps.db", "pane-leap", error);
+    ed.jumps = OpenJumpStore(scratch.dir / "jumps.db", "pane-leap", error);
     EXPECT_TRUE(ed.jumps != nullptr);
-    LeapDocument(ed, "alpha\nbravo\ncharlie\n");
+    LeapDocument(ed, text);
     ed.doc.file = std::filesystem::weakly_canonical(file);
     PlaceCaret(ed, 0, 0);
 
@@ -72,8 +84,8 @@ void LeapJumpsToATypedPair() {
     press(ed, "a");
     EXPECT_TRUE(ed.pending_char == PendingChar::kNone);
     EXPECT_TRUE(ed.leap.stage == LeapState::Stage::kOff);
-    EXPECT_EQ(Cur(ed), Index{7});
-    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{1});
+    EXPECT_EQ(Cur(ed), pair_at);
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{13});
     // The caret lands on the pair's first grapheme, and one cursor holds it.
     EXPECT_EQ(ed.doc.selections.Size(), std::size_t{1});
 
@@ -1410,20 +1422,27 @@ void LeapPicksGrowIntoCursors() {
   Presser press;
   // Three matches: 'a' at bytes 9, 16, 23, nearest-first from a caret at 0 in
   // exactly that order, so the labels are a/s/d on 9/16/23. The first line has
-  // no match, so the primary lands on a different line than the origin -- the
-  // jumplist dedups by line, and a same-line jump leaves nothing to step back
-  // to.
+  // no match, so the primary lands on a different line than the origin.
   const std::string text = "......\n..ab..\n..ab..\n..ab..\n";
 
   TEST_CASE("leap: * puts a cursor on every match, nearest primary");
   {
     const Scratch scratch{"koi-leap-star"};
-    const std::filesystem::path file = scratch.Write("a.txt", text);
+    const AsProjectRoot root{scratch.dir};
+    // The matches pushed eleven lines further down than the shared fixture, and
+    // for the same reason as the single-jump case: a jump shorter than
+    // kLocationMergeLines merges onto the row it left, and stepping back then
+    // has nowhere to go.
+    std::string tall = "......\n";
+    for (int i = 0; i < 11; ++i) tall += "......\n";
+    tall += "..ab..\n..ab..\n..ab..\n";
+    const auto first = static_cast<Index>(tall.find("ab"));
+    const std::filesystem::path file = scratch.Write("a.txt", tall);
     std::string error;
     Editor ed;
-    ed.jumps = JumpStore::Open(scratch.dir / "jumps.db", "pane-leap-star", error);
+    ed.jumps = OpenJumpStore(scratch.dir / "jumps.db", "pane-leap-star", error);
     EXPECT_TRUE(ed.jumps != nullptr);
-    LeapDocument(ed, text, 30, 90);
+    LeapDocument(ed, tall, 30, 90);
     ed.doc.file = std::filesystem::weakly_canonical(file);
     PlaceCaret(ed, 0, 0);
     press(ed, "y");
@@ -1433,10 +1452,10 @@ void LeapPicksGrowIntoCursors() {
     EXPECT_TRUE(ed.leap.stage == LeapState::Stage::kOff);
     const auto& all = ed.doc.selections.Ranges();
     EXPECT_EQ(all.size(), std::size_t{3});
-    EXPECT_EQ(all[0].From(), Index{9});
-    EXPECT_EQ(all[1].From(), Index{16});
-    EXPECT_EQ(all[2].From(), Index{23});
-    EXPECT_EQ(ed.doc.selections.Primary().From(), Index{9});
+    EXPECT_EQ(all[0].From(), first);
+    EXPECT_EQ(all[1].From(), first + 7);
+    EXPECT_EQ(all[2].From(), first + 14);
+    EXPECT_EQ(ed.doc.selections.Primary().From(), first);
     // One jumplist entry for the whole spawn, like the single jump.
     RunCommands(ed, {"jump_backward"});
     EXPECT_EQ(Cur(ed), Index{0});

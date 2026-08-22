@@ -43,6 +43,29 @@ std::generator<Symbol> ScanSymbols(std::filesystem::path path, SymbolKind kind,
 std::vector<Symbol> CollectSymbols(std::span<const std::string> paths, SymbolKind kind,
                                    std::string& error, std::string_view containing_word = {});
 
+// One definition and the lines it owns: the `function.around` text objects of
+// `text`, each named the way the recorder names an enclosing symbol -- the
+// earliest definitions.scm capture inside the object's own span.
+//
+// For the heal ladder's rungs 5 and 7, and for refilling a location row whose
+// `symbol` the recorder had no live tree to resolve. Innermost last is not
+// promised; the caller picks by span.
+//
+// One parse, two query runs over the tree it produced -- which is the whole
+// budget a heal is allowed to spend on syntax. `text` rather than a path
+// because the caller has already read the file and hashed it, and reading it
+// twice is the thing this is careful not to do. Empty, with a reason, for a
+// file no grammar or textobjects query covers.
+struct DefinitionSpan {
+  std::string name;
+  // 1-based, inclusive, the way a location row counts lines.
+  Index from_line{1};
+  Index to_line{1};
+};
+
+std::vector<DefinitionSpan> ScanDefinitionSpans(const std::filesystem::path& path,
+                                                std::string_view text, std::string& error);
+
 bool ContainsWord(std::string_view haystack, std::string_view needle);
 
 std::string FormatSymbolRow(const Symbol& symbol);

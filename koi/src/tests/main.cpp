@@ -45,6 +45,7 @@ void RunUnicodeTests(Rng& rng) {
   ConfigParsing();
   CommandRegistry();
   EditingModel();
+  GotoLineCommand();
   TypableCommandList();
   SetIndentAndLanguage();
   CommandExecution();
@@ -59,6 +60,20 @@ void RunUnicodeTests(Rng& rng) {
   RegexSearch();
   SearchLandsOnGraphemeBoundaries();
   JumpList();
+  AnchorLineRules();
+  AnchorPatienceDiff();
+  AnchorEditDistance();
+  AnchorResolveLadder();
+  AnchorHealJobShapes();
+  AnchorHealWriteBack();
+  AnchorLiveShifting();
+  AnchorJumpBackwardFollowsEdits();
+  AnchorHealsThroughGit();
+  AnchorHealNamesTheSymbol();
+  AnchorHealCost();
+  AnchorHealsFromTheEditor();
+  AnchorHealAtFileEdges();
+  AnchorHealStaleness();
   SearchHighlightDismissal();
   SelectRegexIsInteractive();
   SyntaxLanguages();
@@ -99,6 +114,7 @@ void RunUnicodeTests(Rng& rng) {
   ShippedConfigsLoad();
   ProjectState();
   ProjectPaths();
+  LocationWrites();
   Themes();
   EditDescriptors(rng);
   DisplayWidths();
@@ -187,6 +203,7 @@ int main() {
   koi::PickerCommandShape();
   koi::FilePinsLandWhereYouLeft();
   koi::LastEditIsFoundAcrossFiles();
+  koi::BoundaryRecording();
   koi::KeymapErrors();
   koi::ProjectStoreRobustness();
   koi::ReloadEveryBufferSuite();
@@ -270,6 +287,40 @@ int main() {
   koi::SymbolReadsAreBoundedAndTheTableIsPruned();
   koi::ProjectPathsAreKeyedTheSameFromEveryDirectory();
   koi::StorePathsResolveAgainstTheRootFromBelowIt();
+  koi::AV3StoreIsFoldedIntoOneDatabase();
+  koi::TheJumpCursorBecomesARowId();
+  koi::TheStoreKeepsOnlyPathsWorthKeeping();
+  koi::TheBranchIsReadOffTheHeadFile();
+  koi::FrecencyIsWeightTimesARecencyMultiplier();
+  koi::TheStoreAgesItselfWhenItGetsHeavy();
+  koi::TheVisitDebounceCountsFromTheLastCountedVisit();
+  koi::TheLostJumpImportIsPutBack();
+  koi::TwoOpensCannotMigrateTwice();
+  koi::TheBranchARowWasMadeOnIsABonus();
+  koi::TheBranchDiffIsReadOncePerBranch();
+  koi::TheFilePickerLiftsFilesChangedOnThisBranch();
+
+  // Step 5: the scorer, the blend and the queries table under them.
+  koi::CompactMatchesBeatScatteredOnes();
+  koi::CamelCaseCostsAndEarnsNothing();
+  koi::BandsSeparateNameMatchesFromPathMatches();
+  koi::TheBlendIsHandCheckable();
+  koi::SpansAlwaysSpellTheNeedle();
+  koi::ScoringAThousandRowsFitsTheKeystrokeBudget();
+  koi::AConfirmedQueryEarnsItsPlaceAndDecaysOut();
+
+  // Step 6: the parser, the prompt, the landing and the bounce.
+  koi::SmartJumpParsing();
+  koi::SmartJumpPipeline();
+  koi::SmartJumpBranchDiffPrior();
+  koi::SmartJumpFeedbackText();
+  koi::SmartJumpLanding();
+  koi::SmartJumpAdaptiveLoop();
+  koi::SmartJumpStepping();
+  koi::SmartJumpAutoFire();
+  koi::SmartJumpBounceRule();
+  koi::SmartJumpArrivalRules();
+  koi::SmartJumpSnapshotCost();
 
   // Round 8.
   koi::QueryMatchesAreBoundedLikeQueryTime();

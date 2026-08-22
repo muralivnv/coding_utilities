@@ -517,6 +517,7 @@ void SymbolLookupSaysWhyThePickerIsEmpty() {
   TEST_CASE("go-to-definition: the scan's diagnostic reaches the status line");
 
   const Scratch scratch{"koi-lookup-diagnostic"};
+  const AsProjectRoot root{scratch.dir};
   const std::filesystem::path caller = scratch.Write("caller.cpp", "void Use() { Widget w; }\n");
   const std::filesystem::path defs = scratch.Write("defs.cpp", "struct Widget { int size; };\n");
   const std::filesystem::path probe = scratch.dir / "probe.cpp";
@@ -612,6 +613,13 @@ void HotFirstOrdering() {
   TEST_CASE("symbols: the ranked head is the ranked list");
 
   const Scratch scratch{"koi-hotfirst-test"};
+  const AsProjectRoot root{scratch.dir};
+  // Standing in the project, which is where koi runs, and what makes the head
+  // and the scan agree on a spelling: the store hands its rows back from here
+  // (ResolveStorePath) and the scan is handed the same paths. An absolute
+  // `paths` against a relative store row is two files to the dedup, and every
+  // hot symbol prints twice.
+  const InDirectory here{scratch.dir};
   const std::string a =
       scratch.Write("a.cpp", "int Alpha() { return 0; }\nint Aleph() { return 1; }\n").string();
   const std::string b =
@@ -620,7 +628,7 @@ void HotFirstOrdering() {
       scratch.Write("c.cpp", "int Gamma() { return 0; }\nint Delta() { return 1; }\n").string();
   const std::string d =
       scratch.Write("d.cpp", "int Echo() { return 0; }\nint Foxtrot() { return 1; }\n").string();
-  const std::vector<std::string> paths{a, b, c, d};
+  const std::vector<std::string> paths{"a.cpp", "b.cpp", "c.cpp", "d.cpp"};
 
   SetProjectDbPath(scratch.dir / "state.db");
 
@@ -636,7 +644,7 @@ void HotFirstOrdering() {
   SymbolModeOptions options;
   options.kind = SymbolKind::kDefinitions;
   options.order = SymbolOrder::kHotFirst;
-  options.from = a;
+  options.from = "a.cpp";
 
   std::string error;
   const std::vector<std::string> got = SplitLines(SymbolModeOutput(paths, options, error));
@@ -693,7 +701,7 @@ void HotFirstOrdering() {
   // its symbols were written once -- the raw-string keys they used to compare
   // by said two different files, and every hot symbol of b.cpp printed twice.
   {
-    const std::string dotted = (scratch.dir / "." / "b.cpp").string();
+    const std::string dotted{"./b.cpp"};
     std::vector<std::string> spelled = paths;
     spelled[1] = dotted;
     std::string spelled_error;

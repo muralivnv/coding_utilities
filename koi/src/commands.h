@@ -117,6 +117,12 @@ Index MatchingBracket(const PieceTable& table, Index at, Index window = 128 * 10
 
 void RecordJump(Editor& ed);
 
+// The tail of the run loop: kill the command jobs, join the scan pool, apply
+// the heals it just finished, and write down where the session ended. Quit is
+// the only caller, and it is here rather than inline in it so a test can run
+// the same sequence.
+void ShutdownEditor(Editor& ed);
+
 void StepJump(Editor& ed, bool forward);
 
 void RunTypableCommand(Editor& ed, std::string_view line);
@@ -128,6 +134,12 @@ void ReloadEveryBuffer(Editor& ed, bool force = false);
 void CheckDiskChange(Editor& ed);
 
 bool OpenTarget(Editor& ed, std::string_view spec);
+
+// Opens the file into the focused pane and nothing more: no target, and no
+// visit recorded. The callers that want the visit counted go through OpenAt or
+// OpenTarget; the ones that do not -- the jump list, smart jump -- are the ones
+// that have their own idea of when an arrival counts.
+bool OpenFile(Editor& ed, const std::filesystem::path& path, bool open_generated = false);
 
 void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector<Key>& pending);
 

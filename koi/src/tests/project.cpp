@@ -11,9 +11,14 @@ void ProjectState() {
   TEST_CASE("project: frecency, pins and recent files");
 
   const Scratch scratch{"koi-project-test"};
+  // The fixture is the project: every path below is keyed against it, so what
+  // the store holds is "a.cpp" and what it is handed is the path from here.
+  const AsProjectRoot root{scratch.dir};
   const std::string a = scratch.Write("a.cpp", "int a;\n").string();
   const std::string b = scratch.Write("b.cpp", "int b;\n").string();
   const std::string gone = (scratch.dir / "gone.cpp").string();
+  const std::string a_key{"a.cpp"};
+  const std::string b_key{"b.cpp"};
 
   std::string error;
   const auto store = ProjectStore::Open(scratch.dir / "state.db", error);
@@ -85,7 +90,7 @@ void ProjectState() {
 
   const std::vector<FileVisit> frecent = store->FrecentFiles(0);
   EXPECT_EQ(frecent.size(), 2u);
-  EXPECT_EQ(frecent.front().path, b);
+  EXPECT_EQ(frecent.front().path, b_key);
   EXPECT_EQ(frecent.front().line, 20);
   EXPECT_EQ(frecent.front().column, 5);
 
@@ -99,7 +104,7 @@ void ProjectState() {
   store->SetPin(2, b);
   std::vector<Pin> pins = store->Pins();
   EXPECT_EQ(pins.size(), static_cast<size_t>(kPinSlots));
-  EXPECT_EQ(pins[0].path, a);
+  EXPECT_EQ(pins[0].path, a_key);
   EXPECT_EQ(pins[0].line, 10);
   EXPECT_EQ(pins[0].column, 3);
   EXPECT_EQ(pins[1].line, 20);
@@ -110,7 +115,7 @@ void ProjectState() {
   store->SetPin(3, a);
   pins = store->Pins();
   EXPECT_TRUE(pins[0].path.empty());
-  EXPECT_EQ(pins[2].path, a);
+  EXPECT_EQ(pins[2].path, a_key);
 
   // The whole difference from a pinned position: nothing was re-pinned, and the
   // pin moved anyway -- for an edit and for a plain visit alike. A second pin
@@ -135,7 +140,7 @@ void ProjectState() {
   EXPECT_TRUE(store->Pins()[1].path.empty());
   store->SetPin(9, a);
   EXPECT_EQ(store->Pins().size(), static_cast<size_t>(kPinSlots));
-  EXPECT_EQ(store->Pins()[2].path, a);
+  EXPECT_EQ(store->Pins()[2].path, a_key);
 
   store->RecordSymbolVisit("Widget", a, 12);
   store->RecordSymbolVisit("Widget", a, 12);
@@ -153,7 +158,7 @@ void ProjectState() {
       {a, 12, 1, "Widget"}, {b, 3, 1, "Gadget"}, {b, 9, 1, "Unseen"},
   };
   store->RankSymbols(rows, b);
-  EXPECT_EQ(rows.front().path, b);
+  EXPECT_EQ(rows.front().path, b);  // the rows are the caller's, and stay as they came
   EXPECT_EQ(rows.front().name, std::string{"Gadget"});
 
   store->RankSymbols(rows, "");
@@ -168,7 +173,7 @@ void ProjectPaths() {
   EXPECT_EQ(FlattenPathComponent("///a..b///"), std::string{"a-b"});
   EXPECT_EQ(FlattenPathComponent(""), std::string{});
 
-  EXPECT_TRUE(ProjectDbPath() != JumpDbPath());
+  EXPECT_TRUE(ProjectDbPath() != LegacyJumpDbPath());
   EXPECT_EQ(LastPickerStatePath().parent_path(), ProjectDbPath().parent_path());
   EXPECT_EQ(KeyLogDbPath().parent_path(), ProjectDbPath().parent_path());
 
@@ -196,14 +201,14 @@ void ProjectPaths() {
     std::filesystem::create_directories(deep, ec);
 
     SetProjectRoot(root);
-    const std::filesystem::path from_root = JumpDbPath();
+    const std::filesystem::path from_root = LegacyJumpDbPath();
     // Same project, and koi started from a subdirectory of it: one jump list,
     // not one per directory. This is what keying on the cwd broke.
     SetProjectRoot(deep);
-    const std::filesystem::path from_deep = JumpDbPath();
+    const std::filesystem::path from_deep = LegacyJumpDbPath();
     SetProjectRoot(root);
     EXPECT_TRUE(from_deep != from_root);  // different roots stay different
-    EXPECT_EQ(JumpDbPath(), from_root);   // and the same root is stable
+    EXPECT_EQ(LegacyJumpDbPath(), from_root);   // and the same root is stable
 
     // Two roots whose flattened names collide must not share a database.
     const std::filesystem::path a_slash = scratch.dir / "w" / "a" / "b";
@@ -211,9 +216,9 @@ void ProjectPaths() {
     std::filesystem::create_directories(a_slash, ec);
     std::filesystem::create_directories(a_dash, ec);
     SetProjectRoot(a_slash);
-    const std::filesystem::path db_slash = JumpDbPath();
+    const std::filesystem::path db_slash = LegacyJumpDbPath();
     SetProjectRoot(a_dash);
-    const std::filesystem::path db_dash = JumpDbPath();
+    const std::filesystem::path db_dash = LegacyJumpDbPath();
     EXPECT_TRUE(db_slash != db_dash);
     EXPECT_TRUE(FlattenPathComponent(a_slash.string()) ==
                 FlattenPathComponent(a_dash.string()));  // the names really do collide
@@ -415,7 +420,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
 
     // And what stands in its place is a real, stamped, writable database.
     EXPECT_TRUE(std::filesystem::exists(junk));
-    EXPECT_EQ(user_version(junk), std::int64_t{3});
+    EXPECT_EQ(user_version(junk), std::int64_t{6});
     if (store != nullptr) {
       // Pinned by its full path, read back by its key: the store keys every
       // path it is handed against the project root (schema v2), so a file
@@ -498,7 +503,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       EXPECT_TRUE(!error.empty());
       EXPECT_TRUE(std::filesystem::exists(junk_ro));
       EXPECT_TRUE(bytes_of(beside(junk_ro, ".corrupt")) == junk_ro_bytes);
-      EXPECT_EQ(user_version(junk_ro), std::int64_t{3});
+      EXPECT_EQ(user_version(junk_ro), std::int64_t{6});
 
       // SQLite gives the write-ahead log and its index the mode of the database
       // they belong to, so the read-only open left 0400 siblings behind; a
@@ -547,7 +552,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
     }
     // Stamped only after the tables exist: a database claiming v2 with nothing
     // in it would be refused by no one and work for no one.
-    EXPECT_EQ(user_version(fresh), std::int64_t{3});
+    EXPECT_EQ(user_version(fresh), std::int64_t{6});
   }
 
   TEST_CASE("project store: reopening a healthy database still works");
@@ -563,7 +568,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
       again->SetPin(3, (scratch.dir / "later.cpp").string());
       EXPECT_EQ(again->Pins()[2].path, std::string{"later.cpp"});
     }
-    EXPECT_EQ(user_version(fresh), std::int64_t{3});
+    EXPECT_EQ(user_version(fresh), std::int64_t{6});
   }
 
   TEST_CASE("project store: a pin is one transaction, and no path leaves one open");
@@ -776,7 +781,7 @@ void AnUnusableProjectDatabaseIsRefusedInsteadOfSwallowingWrites() {
     const std::shared_ptr<ProjectStore> store = ProjectStore::Open(current, ok_error);
     EXPECT_TRUE(store != nullptr);
     EXPECT_TRUE(ok_error.empty());
-    EXPECT_EQ(user_version(current), std::int64_t{3});
+    EXPECT_EQ(user_version(current), std::int64_t{6});
     {
       sqlite3* db = nullptr;
       EXPECT_EQ(sqlite3_open(current.c_str(), &db), SQLITE_OK);
@@ -1439,7 +1444,7 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
     EXPECT_TRUE(store != nullptr);
     EXPECT_TRUE(error.empty());
     if (store == nullptr) return;
-    EXPECT_EQ(scalar(v2, "PRAGMA user_version;"), std::int64_t{3});
+    EXPECT_EQ(scalar(v2, "PRAGMA user_version;"), std::int64_t{6});
 
     // The two pins in one file collapse to the lower slot; the higher is left
     // empty rather than backfilled with a guess.
@@ -1543,7 +1548,7 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
     EXPECT_TRUE(error.empty());
     if (store == nullptr) return;
 
-    EXPECT_EQ(scalar(legacy, "PRAGMA user_version;"), std::int64_t{3});
+    EXPECT_EQ(scalar(legacy, "PRAGMA user_version;"), std::int64_t{6});
 
     EXPECT_EQ(scalar(legacy, "SELECT COUNT(*) FROM symbols;"), std::int64_t{2});
     EXPECT_EQ(scalar(legacy, "SELECT COUNT(*) FROM symbols WHERE symbol = 'Ghost';"),
@@ -1598,7 +1603,7 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
       const std::shared_ptr<ProjectStore> again = ProjectStore::Open(legacy, again_error);
       EXPECT_TRUE(again != nullptr);
       EXPECT_TRUE(again_error.empty());
-      EXPECT_EQ(scalar(legacy, "PRAGMA user_version;"), std::int64_t{3});
+      EXPECT_EQ(scalar(legacy, "PRAGMA user_version;"), std::int64_t{6});
       EXPECT_EQ(scalar(legacy, "SELECT COUNT(*) FROM symbols;"), std::int64_t{2});
       EXPECT_EQ(text_of(legacy, "SELECT file FROM symbols WHERE symbol = 'Sym';"),
                 std::string{"sub/file.cpp"});
@@ -1619,14 +1624,16 @@ void ProjectPathsAreKeyedTheSameFromEveryDirectory() {
       std::string why{"unset"};
       std::int64_t found = -1;
       EXPECT_TRUE(CheckSchemaVersion(reader, 1, why, &found) == Schema::kTooNew);
-      EXPECT_EQ(found, std::int64_t{3});
+      EXPECT_EQ(found, std::int64_t{6});
       EXPECT_TRUE(!why.empty());
       why = "unset";
-      EXPECT_TRUE(CheckSchemaVersion(reader, 2, why, &found) == Schema::kTooNew);
+      EXPECT_TRUE(CheckSchemaVersion(reader, 4, why, &found) == Schema::kTooNew);
       EXPECT_TRUE(!why.empty());
-      // And v3 itself reads it, which is the other half of the same statement.
+      // And v6 itself reads it, which is the other half of the same statement.
       why = "unset";
-      EXPECT_TRUE(CheckSchemaVersion(reader, 3, why, &found) == Schema::kUsable);
+      EXPECT_TRUE(CheckSchemaVersion(reader, 5, why, &found) == Schema::kTooNew);
+      why = "unset";
+      EXPECT_TRUE(CheckSchemaVersion(reader, 6, why, &found) == Schema::kUsable);
       sqlite3_close(reader);
     }
   }
@@ -2000,7 +2007,7 @@ void VisitReadsAreBoundedAndTheTableIsPruned() {
     EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'"
                          " AND name = 'files_by_ts';"),
               std::int64_t{1});
-    EXPECT_EQ(scalar(db, "PRAGMA user_version;"), std::int64_t{3});
+    EXPECT_EQ(scalar(db, "PRAGMA user_version;"), std::int64_t{6});
   }
 }
 
@@ -2335,8 +2342,1222 @@ void SymbolReadsAreBoundedAndTheTableIsPruned() {
     EXPECT_EQ(scalar(prune_db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'"
                                " AND tbl_name = 'symbols' AND name NOT LIKE 'sqlite_%';"),
               std::int64_t{0});
-    EXPECT_EQ(scalar(prune_db, "PRAGMA user_version;"), std::int64_t{3});
+    EXPECT_EQ(scalar(prune_db, "PRAGMA user_version;"), std::int64_t{6});
   }
+}
+
+// v4 folded the jump list into the project database. What has to survive the
+// move is the history: the same places in the same order, keyed the one way,
+// with the junk the old list had no gate against left behind.
+void AV3StoreIsFoldedIntoOneDatabase() {
+  const Scratch scratch{"koi-v4-fold"};
+  const AsProjectRoot root{scratch.dir};
+
+  const auto exec = [](const std::filesystem::path& path, const char* sql) {
+    sqlite3* db = nullptr;
+    EXPECT_EQ(sqlite3_open(path.c_str(), &db), SQLITE_OK);
+    const bool ok = ExecSql(db, sql);
+    sqlite3_close(db);
+    return ok;
+  };
+  const auto scalar = [](const std::filesystem::path& path, const std::string& sql) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open(path.c_str(), &db) != SQLITE_OK) {
+      sqlite3_close(db);
+      return std::int64_t{-1};
+    }
+    std::int64_t got = -1;
+    {
+      // Scoped: a Stmt alive across sqlite3_close leaves the close returning
+      // BUSY and the handle leaked.
+      Stmt stmt{db, sql.c_str()};
+      if (stmt && stmt.Step()) got = stmt.Integer(0);
+    }
+    sqlite3_close(db);
+    return got;
+  };
+  const auto text = [](const std::filesystem::path& path, const std::string& sql) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open(path.c_str(), &db) != SQLITE_OK) {
+      sqlite3_close(db);
+      return std::string{"<no database>"};
+    }
+    std::string got{"<no row>"};
+    {
+      Stmt stmt{db, sql.c_str()};
+      if (stmt && stmt.Step()) got = stmt.Column(0);
+    }
+    sqlite3_close(db);
+    return got;
+  };
+
+  // A v3 project database, by hand: `files` without the branch column the
+  // migration adds, and rows the gate did not exist to refuse when they were
+  // written.
+  const std::filesystem::path db = scratch.dir / "state.db";
+  EXPECT_TRUE(exec(db,
+                   "PRAGMA user_version = 3;"
+                   "CREATE TABLE files (path TEXT PRIMARY KEY, visits INTEGER NOT NULL DEFAULT 0,"
+                   " edits INTEGER NOT NULL DEFAULT 0, last_ts REAL NOT NULL DEFAULT 0,"
+                   " last_line INTEGER NOT NULL DEFAULT 1, last_col INTEGER NOT NULL DEFAULT 0);"
+                   "CREATE TABLE symbols (file TEXT NOT NULL, symbol TEXT NOT NULL,"
+                   " visits INTEGER NOT NULL DEFAULT 0, last_ts REAL NOT NULL DEFAULT 0,"
+                   " line INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (file, symbol));"
+                   "INSERT INTO files(path, visits, last_ts, last_line) VALUES"
+                   " ('src/main.cpp', 4, 1000, 12),"
+                   " ('.git/COMMIT_EDITMSG', 1, 1001, 1),"
+                   " ('/tmp/claude-prompt-9182.md', 1, 1002, 1);"
+                   "INSERT INTO symbols(file, symbol, visits, last_ts, line) VALUES"
+                   " ('src/main.cpp', 'Widget', 2, 1000, 30),"
+                   " ('.claude/worktrees/agent-af5/src/main.cpp', 'Widget', 2, 1001, 30);"));
+
+  // And the jump list beside it, in the database v3 kept it in -- derived the
+  // way the migration derives it, from $HOME and the project root.
+  const std::filesystem::path legacy = LegacyJumpDbPath();
+  EXPECT_TRUE(!legacy.empty());
+  std::error_code ec;
+  std::filesystem::create_directories(legacy.parent_path(), ec);
+  const std::string inside = (scratch.dir / "src" / "main.cpp").string();
+  const std::string beside = (scratch.dir / "src" / "other.cpp").string();
+  const std::string dotgit = (scratch.dir / ".git" / "COMMIT_EDITMSG").string();
+  {
+    sqlite3* jumps = nullptr;
+    EXPECT_EQ(sqlite3_open(legacy.c_str(), &jumps), SQLITE_OK);
+    EXPECT_TRUE(ExecSql(jumps,
+                        "PRAGMA user_version = 1;"
+                        "CREATE TABLE jumps(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT"
+                        " NULL, pane TEXT NOT NULL, path TEXT NOT NULL, line INTEGER NOT NULL,"
+                        " col INTEGER NOT NULL);"
+                        "CREATE TABLE jump_cursor(pane TEXT PRIMARY KEY, at INTEGER NOT NULL);"));
+    // Scoped below so the Stmt finalises before sqlite3_close -- a handle
+    // closed under a live statement stays open, silently.
+    const struct Row {
+      std::int64_t id;
+      std::int64_t ts;
+      std::string path;
+      std::int64_t line;
+      std::int64_t col;
+    } rows[] = {
+        {1, 500, inside, 12, 3},
+        {2, 600, beside, 40, 1},
+        {3, 700, "/tmp/scratch-notes.txt", 2, 1},
+        {4, 800, dotgit, 1, 1},
+    };
+    {
+      Stmt put{jumps,
+               "INSERT INTO jumps(id, ts, pane, path, line, col) VALUES(?1,?2,'pane-a',?3,?4,?5);"};
+      EXPECT_TRUE(static_cast<bool>(put));
+      for (const Row& row : rows) {
+        put.Reset();
+        put.Int(1, row.id);
+        put.Int(2, row.ts);
+        put.Text(3, row.path);
+        put.Int(4, row.line);
+        put.Int(5, row.col);
+        EXPECT_TRUE(put.Run());
+      }
+    }
+    EXPECT_TRUE(ExecSql(jumps, "INSERT INTO jump_cursor(pane, at) VALUES('pane-a', 2);"));
+    sqlite3_close(jumps);
+  }
+
+  TEST_CASE("project store: a v3 database and its jump list become one v4 store");
+  {
+    std::string error{"unset"};
+    const std::shared_ptr<ProjectStore> store = ProjectStore::Open(db, error);
+    EXPECT_TRUE(store != nullptr);
+    EXPECT_TRUE(error.empty());
+    if (store == nullptr) return;
+  }
+
+  EXPECT_EQ(scalar(db, "PRAGMA user_version;"), std::int64_t{6});
+  // The column the migration adds, and the tables it creates.
+  EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'branch';"),
+            std::int64_t{1});
+  EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'"
+                       " AND name IN ('locations','queries','jump_cursor');"),
+            std::int64_t{3});
+  EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'"
+                       " AND name IN ('locations_by_path','locations_by_seq','queries_by_prefix');"),
+            std::int64_t{3});
+
+  TEST_CASE("project store: the jumps worth keeping are copied, keyed and in order");
+  {
+    // Two of the four: the /tmp scratch file and the one inside .git are what
+    // the gate is for.
+    EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM locations;"), std::int64_t{2});
+    EXPECT_EQ(text(db, "SELECT path FROM locations ORDER BY seq;"), std::string{"src/main.cpp"});
+    EXPECT_EQ(text(db, "SELECT path FROM locations ORDER BY seq DESC;"), std::string{"src/other.cpp"});
+    // seq is the old id, which is what keeps the order the list had -- and what
+    // makes the copied cursor name the same row it named before.
+    EXPECT_EQ(scalar(db, "SELECT seq FROM locations WHERE path = 'src/main.cpp';"), std::int64_t{1});
+    EXPECT_EQ(scalar(db, "SELECT seq FROM locations WHERE path = 'src/other.cpp';"), std::int64_t{2});
+    EXPECT_EQ(scalar(db, "SELECT line FROM locations WHERE path = 'src/main.cpp';"), std::int64_t{12});
+    EXPECT_EQ(scalar(db, "SELECT col FROM locations WHERE path = 'src/main.cpp';"), std::int64_t{3});
+    EXPECT_EQ(scalar(db, "SELECT CAST(last_ts AS INTEGER) FROM locations WHERE seq = 1;"),
+              std::int64_t{500});
+    EXPECT_EQ(scalar(db, "SELECT visits FROM locations WHERE seq = 1;"), std::int64_t{1});
+    EXPECT_EQ(scalar(db, "SELECT kind FROM locations WHERE seq = 1;"), std::int64_t{0});
+    // The copied cursor still names the row it named before -- as a row id,
+    // which the v6 step converted the imported seq into.
+    EXPECT_EQ(scalar(db, "SELECT at FROM jump_cursor WHERE pane = 'pane-a';"),
+              scalar(db, "SELECT id FROM locations WHERE path = 'src/other.cpp';"));
+    EXPECT_EQ(scalar(db, "SELECT walking FROM jump_cursor WHERE pane = 'pane-a';"),
+              std::int64_t{0});
+    // Every rung of the old list is still on disk: this is the backup.
+    EXPECT_TRUE(std::filesystem::exists(legacy));
+    EXPECT_EQ(scalar(legacy, "SELECT COUNT(*) FROM jumps;"), std::int64_t{4});
+  }
+
+  TEST_CASE("project store: the open that migrates also drops what it may not store");
+  {
+    EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM files;"), std::int64_t{1});
+    EXPECT_EQ(text(db, "SELECT path FROM files;"), std::string{"src/main.cpp"});
+    EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM symbols;"), std::int64_t{1});
+    EXPECT_EQ(text(db, "SELECT file FROM symbols;"), std::string{"src/main.cpp"});
+  }
+
+  TEST_CASE("project store: a database already at v4 is not migrated again");
+  {
+    std::string again{"unset"};
+    const std::shared_ptr<ProjectStore> reopened = ProjectStore::Open(db, again);
+    EXPECT_TRUE(reopened != nullptr);
+    EXPECT_TRUE(again.empty());
+    EXPECT_EQ(scalar(db, "SELECT COUNT(*) FROM locations;"), std::int64_t{2});
+    EXPECT_EQ(scalar(db, "SELECT at FROM jump_cursor WHERE pane = 'pane-a';"),
+              scalar(db, "SELECT id FROM locations WHERE path = 'src/other.cpp';"));
+  }
+}
+
+// The gate itself. Every rule is one of the shapes measured in the live store,
+// and the accepting half matters as much: a rule that also drops real rows is
+// worse than no rule.
+void TheStoreKeepsOnlyPathsWorthKeeping() {
+  TEST_CASE("project store: what a path has to be to be stored");
+
+  const std::pair<const char*, bool> cases[] = {
+      {"", false},
+      {"koi/src/project.cpp", true},
+      {"README.md", true},
+      // Not a path at all: an excerpt view's name, which the jump list stores
+      // as it is so the step back finds the buffer.
+      {"references: SetPinHere", true},
+      {".git/COMMIT_EDITMSG", false},
+      {".git/rebase-merge/done", false},
+      {"koi/.git/HEAD", false},
+      // The directory itself is fine -- it is the worktrees under it that are
+      // second copies of paths the repository already holds.
+      {".claude/settings.json", true},
+      {".claude/worktrees/agent-af5/koi/src/project.cpp", false},
+      {"docs/claude-prompt-4f21a9.md", false},
+      {"docs/claude-prompts.md", true},
+      {"/tmp/scratch.cpp", false},
+      {"/tmp/deep/er/still.cpp", false},
+      {"/var/tmp/scratch.cpp", false},
+      // Not a string prefix: /tmpfiles is not under /tmp.
+      {"/tmpfiles/real.cpp", true},
+      {"/home/user/project/koi/src/project.cpp", true},
+  };
+  // Compared as sentences so a failure names the path it disagreed about, not
+  // just "false != true".
+  const auto verdict = [](const char* key, bool storable) {
+    return std::string{key} + (storable ? " -> stored" : " -> dropped");
+  };
+  for (const auto& [key, want] : cases) {
+    EXPECT_EQ(verdict(key, StorablePath(key)), verdict(key, want));
+  }
+
+  // Whatever this run's TMPDIR is, and it is not /tmp under nix-shell.
+  if (const char* tmp = std::getenv("TMPDIR"); (tmp != nullptr) && (*tmp != '\0')) {
+    EXPECT_FALSE(StorablePath(std::string{tmp} + "/koi-scratch.cpp"));
+  } else {
+    EXPECT_TRUE(true);
+  }
+}
+
+// The branch stamp on a row, read straight out of .git rather than out of a
+// subprocess: this runs on every visit recorded.
+void TheBranchIsReadOffTheHeadFile() {
+  TEST_CASE("project: the branch a row is stamped with");
+
+  const Scratch scratch{"koi-git-branch"};
+  const std::filesystem::path repo = scratch.dir / "repo";
+  const std::filesystem::path git = repo / ".git";
+  std::error_code ec;
+  std::filesystem::create_directories(git, ec);
+
+  EXPECT_EQ(GitBranch({}), std::string{});
+  EXPECT_EQ(GitBranch(scratch.dir / "nowhere"), std::string{});
+  // A .git with no HEAD in it is not an answer either.
+  EXPECT_EQ(GitBranch(repo), std::string{});
+
+  WriteFixtureFile(git / "HEAD", "ref: refs/heads/main\n");
+  EXPECT_EQ(GitBranch(repo), std::string{"main"});
+
+  // A name with slashes in it keeps them: only the refs/heads/ prefix is cut.
+  WriteFixtureFile(git / "HEAD", "ref: refs/heads/koi/smart-jump\n");
+  EXPECT_EQ(GitBranch(repo), std::string{"koi/smart-jump"});
+
+  // Detached: HEAD is the object id, and twelve characters of it is what git
+  // itself shows.
+  WriteFixtureFile(git / "HEAD", "9f2a1c4b7d3e5a6b8c0d1e2f3a4b5c6d7e8f9a0b\n");
+  EXPECT_EQ(GitBranch(repo), std::string{"9f2a1c4b7d3e"});
+
+  // Neither a ref nor an object id.
+  WriteFixtureFile(git / "HEAD", "something else entirely\n");
+  EXPECT_EQ(GitBranch(repo), std::string{});
+
+  // A worktree: `.git` is a file naming the directory the real HEAD is in.
+  const std::filesystem::path tree = scratch.dir / "tree";
+  const std::filesystem::path real = scratch.dir / "worktrees" / "one";
+  std::filesystem::create_directories(tree, ec);
+  std::filesystem::create_directories(real, ec);
+  WriteFixtureFile(real / "HEAD", "ref: refs/heads/side\n");
+  WriteFixtureFile(tree / ".git", "gitdir: " + real.string() + "\n");
+  EXPECT_EQ(GitBranch(tree), std::string{"side"});
+  // And relative to the worktree, which is how git spells it inside a repo.
+  WriteFixtureFile(tree / ".git", "gitdir: ../worktrees/one\n");
+  EXPECT_EQ(GitBranch(tree), std::string{"side"});
+  // A .git file that names nothing is no branch, not a crash.
+  WriteFixtureFile(tree / ".git", "not a gitdir line\n");
+  EXPECT_EQ(GitBranch(tree), std::string{});
+
+  // The answer is memoised on the HEAD file's timestamp, so a checkout has to
+  // be visible: the same root, a rewritten HEAD, a different branch.
+  WriteFixtureFile(git / "HEAD", "ref: refs/heads/main\n");
+  EXPECT_EQ(GitBranch(repo), std::string{"main"});
+  WriteFixtureFile(git / "HEAD", "ref: refs/heads/other\n");
+  EXPECT_EQ(GitBranch(repo), std::string{"other"});
+}
+
+namespace {
+
+// A raw connection onto a store the schema has already been created in. These
+// tests write `last_ts` and `branch` straight into the table: neither can be
+// reached through the store -- the timestamp is always Now() and the branch is
+// always the one koi is on -- so no test going the other way can pin down the
+// numbers the ranking is built on. Nothing here sleeps.
+bool SeedStore(const std::filesystem::path& db, const std::string& sql) {
+  sqlite3* handle = nullptr;
+  bool ok = false;
+  if (sqlite3_open(db.c_str(), &handle) == SQLITE_OK) ok = ExecSql(handle, sql.c_str());
+  sqlite3_close(handle);
+  return ok;
+}
+
+double StoreDouble(const std::filesystem::path& db, const char* sql) {
+  sqlite3* handle = nullptr;
+  double value = -1;
+  if (sqlite3_open(db.c_str(), &handle) == SQLITE_OK) {
+    Stmt stmt{handle, sql};
+    if (stmt && stmt.Step()) value = stmt.Double(0);
+  }
+  sqlite3_close(handle);
+  return value;
+}
+
+bool Near(double got, double want) { return std::abs(got - want) < 1e-6; }
+
+}
+
+// The cursor used to hold a seq, and a seq moves every time its row merges
+// forward: on the live store 11 of the 23 cursors named a number no row held.
+// v6 keys it by row id, which nothing moves, and adds the flag the jump list
+// reads to know whether the pane is part-way back through the list.
+void TheJumpCursorBecomesARowId() {
+  TEST_CASE("project store: a v5 jump cursor is rekeyed onto the row it named");
+
+  const Scratch scratch{"koi-v6-cursor"};
+  const AsProjectRoot root{scratch.dir};
+  const std::filesystem::path db = scratch.dir / "state.db";
+  {
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(db, error) != nullptr);
+  }
+
+  // Back to the shape v5 left behind: no `walking`, and cursors holding seqs.
+  // The ids and the seqs are deliberately different numbers -- they run
+  // together on a store nothing has merged in, which is the case that hides
+  // every seq-for-id mistake.
+  EXPECT_TRUE(SeedStore(db,
+                        "ALTER TABLE jump_cursor DROP COLUMN walking;"
+                        "INSERT INTO locations(id, path, line, col, kind, visits, misses,"
+                        " last_ts, counted_ts, seq) VALUES"
+                        "(1,'a.cpp',10,0,0,1,0,1,1,10),(2,'b.cpp',20,0,0,1,0,1,1,20);"
+                        // One cursor on a row that is still there, one holding a
+                        // seq nothing holds -- and holding a number that is a
+                        // live row id, which is why a stale cursor has to be
+                        // dropped rather than carried across as it stands.
+                        "INSERT INTO jump_cursor(pane, at) VALUES('pane-live',20),('pane-stale',1);"
+                        "PRAGMA user_version = 5;"));
+
+  std::string error{"unset"};
+  EXPECT_TRUE(ProjectStore::Open(db, error) != nullptr);
+  EXPECT_TRUE(error.empty());
+  EXPECT_TRUE(Near(StoreDouble(db, "PRAGMA user_version;"), 6));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM pragma_table_info('jump_cursor')"
+                                   " WHERE name = 'walking';"),
+                   1));
+  // The cursor names the same place it named before, by id now.
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT at FROM jump_cursor WHERE pane = 'pane-live';"), 2));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT walking FROM jump_cursor WHERE pane = 'pane-live';"), 0));
+  // And the one whose row is gone is gone: a pane with no cursor starts from
+  // the front, which is where a pane that lost its place belongs.
+  EXPECT_TRUE(
+      Near(StoreDouble(db, "SELECT COUNT(*) FROM jump_cursor WHERE pane = 'pane-stale';"), 0));
+
+  // Idempotent: a second open finds the stamp and leaves the cursor alone.
+  {
+    std::string again{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(db, again) != nullptr);
+    EXPECT_TRUE(Near(StoreDouble(db, "SELECT at FROM jump_cursor WHERE pane = 'pane-live';"), 2));
+    EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM jump_cursor;"), 1));
+  }
+}
+
+// weight = visits + 3*edits, and the age of the row multiplies it. Not a decay
+// of it: the multiplier is a step function with a floor, so a row that took a
+// month to earn its weight still outranks a shallow new one.
+void FrecencyIsWeightTimesARecencyMultiplier() {
+  TEST_CASE("project: frecency is weight times a recency multiplier");
+
+  const Scratch scratch{"koi-frecency-mult"};
+  const AsProjectRoot root{scratch.dir};
+  const std::filesystem::path db = scratch.dir / "state.db";
+
+  // Every boundary of the CASE, from both sides, and one row well inside each
+  // bucket. The near-boundary hours are a minute clear of the edge so that the
+  // seconds this test takes to run cannot move a row across one.
+  const struct Row {
+    const char* name;
+    double hours;
+    double mult;
+  } kRows[] = {
+      {"h00.cpp", 0.5, 4.0},     {"h01.cpp", 59.0 / 60, 4.0},  {"h02.cpp", 61.0 / 60, 2.0},
+      {"h03.cpp", 2.0, 2.0},     {"h04.cpp", 23.0, 2.0},       {"h05.cpp", 25.0, 1.0},
+      {"h06.cpp", 48.0, 1.0},    {"h07.cpp", 167.0, 1.0},      {"h08.cpp", 169.0, 0.5},
+      {"h09.cpp", 336.0, 0.5},   {"h10.cpp", 719.0, 0.5},      {"h11.cpp", 721.0, 0.25},
+      {"h12.cpp", 1440.0, 0.25},
+  };
+
+  {
+    std::string error{"unset"};
+    const auto store = ProjectStore::Open(db, error);
+    EXPECT_TRUE(store != nullptr);
+    EXPECT_TRUE(error.empty());
+    if (store == nullptr) return;
+  }
+
+  const double now =
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+  // visits 2 and edits 1, so the multiplicand is 2 + 3*1 = 5 and a test that
+  // only counted visits would come out five-fold wrong rather than passing.
+  std::string sql = "BEGIN;";
+  for (const Row& row : kRows) {
+    scratch.Write(row.name, "int x;\n");
+    sql += "INSERT INTO files(path, visits, edits, last_ts, last_line, last_col) VALUES('" +
+           std::string{row.name} + "',2,1," + std::to_string(now - (row.hours * 3600.0)) +
+           ",1,0);";
+  }
+  sql += "COMMIT;";
+  EXPECT_TRUE(SeedStore(db, sql));
+
+  std::string error{"unset"};
+  const auto store = ProjectStore::Open(db, error);
+  EXPECT_TRUE(store != nullptr);
+  if (store == nullptr) return;
+
+  const std::vector<FileVisit> frecent = store->FrecentFiles(0);
+  EXPECT_EQ(frecent.size(), std::size(kRows));
+  if (frecent.size() != std::size(kRows)) return;
+
+  // The score each row carries is the multiplier exactly, times the weight.
+  std::unordered_map<std::string, double> scored;
+  for (const FileVisit& one : frecent) scored[one.path] = one.score;
+  for (const Row& row : kRows) {
+    const auto found = scored.find(row.name);
+    EXPECT_TRUE(found != scored.end());
+    if (found == scored.end()) continue;
+    EXPECT_TRUE(Near(found->second, 5.0 * row.mult));
+  }
+
+  // And the read comes back in that order -- 30 minutes ahead of 2 hours ahead
+  // of 2 days ahead of 2 weeks ahead of 2 months. Written as "never rises"
+  // rather than as one expected list, because rows inside a bucket score the
+  // same and nothing here should depend on how the sorter breaks that tie.
+  std::string order;
+  for (std::size_t i = 0; i < frecent.size(); ++i) {
+    if (i != 0) {
+      order += ' ';
+      EXPECT_TRUE(frecent[i].score <= frecent[i - 1].score);
+    }
+    order += frecent[i].path;
+  }
+  // The five the design names, in the order it names them.
+  EXPECT_TRUE(order.find("h00.cpp") < order.find("h03.cpp"));
+  EXPECT_TRUE(order.find("h03.cpp") < order.find("h06.cpp"));
+  EXPECT_TRUE(order.find("h06.cpp") < order.find("h09.cpp"));
+  EXPECT_TRUE(order.find("h09.cpp") < order.find("h12.cpp"));
+}
+
+// Aging is event-driven: the clock only ticks while the store is being used, so
+// a two-week gap costs a row nothing, and what takes weight away is a table
+// getting heavy -- that table, on its own weight and nobody else's.
+void TheStoreAgesItselfWhenItGetsHeavy() {
+  TEST_CASE("project: a heavy table ages its own weights and drops what falls under the floor");
+
+  const Scratch scratch{"koi-store-aging"};
+  const AsProjectRoot root{scratch.dir};
+
+  TEST_CASE("project: a store under the threshold is not aged at all");
+  {
+    const std::filesystem::path light = scratch.dir / "light.db";
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(light, error) != nullptr);
+    EXPECT_TRUE(SeedStore(light,
+                          "INSERT INTO files(path, visits, edits, last_ts) VALUES"
+                          "('a.cpp',100,0,1),('b.cpp',1,0,1);"));
+    std::string again{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(light, again) != nullptr);
+    EXPECT_TRUE(Near(StoreDouble(light, "SELECT visits FROM files WHERE path='a.cpp';"), 100));
+    EXPECT_TRUE(Near(StoreDouble(light, "SELECT visits FROM files WHERE path='b.cpp';"), 1));
+  }
+
+  TEST_CASE("project: each table is gated on its own weight, never on `files`");
+  {
+    // `files` carries every visit since schema v1 and is over the threshold on
+    // any store that has been used. `locations` and `symbols` are not, and
+    // scaling them on its weight deleted every row born at one visit -- which
+    // is every jump the list holds.
+    const std::filesystem::path own = scratch.dir / "own.db";
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(own, error) != nullptr);
+    EXPECT_TRUE(SeedStore(own,
+                          "BEGIN;"
+                          "INSERT INTO files(path, visits, edits, last_ts) VALUES"
+                          "('heavy.cpp',12000,0,1);"
+                          "INSERT INTO symbols(file, symbol, visits, last_ts, line) VALUES"
+                          "('heavy.cpp','One',1,1,3);"
+                          "INSERT INTO locations(path, line, visits, last_ts, seq) VALUES"
+                          "('heavy.cpp',10,1,1,1);"
+                          "COMMIT;"));
+    std::string again{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(own, again) != nullptr);
+    EXPECT_TRUE(Near(StoreDouble(own, "SELECT visits FROM files WHERE path='heavy.cpp';"), 10800));
+    EXPECT_TRUE(Near(StoreDouble(own, "SELECT visits FROM symbols WHERE symbol='One';"), 1));
+    EXPECT_TRUE(Near(StoreDouble(own, "SELECT visits FROM locations WHERE seq=1;"), 1));
+  }
+
+  TEST_CASE("project: a heavy table scales, and a row at one visit survives the pass");
+  const std::filesystem::path db = scratch.dir / "heavy.db";
+  {
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(db, error) != nullptr);
+  }
+  // 12000 of weight in one row of each table, which is past the 10000 threshold
+  // on its own. The rest are the interesting sizes: one born at a single visit,
+  // one already under the floor, one whose weight is edits rather than visits,
+  // and the row a pane's jump cursor stands on.
+  EXPECT_TRUE(SeedStore(
+      db,
+      "BEGIN;"
+      "INSERT INTO files(path, visits, edits, last_ts) VALUES"
+      "('heavy.cpp',12000,0,1),('mid.cpp',2,0,1),('thin.cpp',1,0,1),('edited.cpp',0,4,1),"
+      "('gone.cpp',0.4,0,1);"
+      "INSERT INTO symbols(file, symbol, visits, last_ts, line) VALUES"
+      "('heavy.cpp','Heavy',12000,1,2),('heavy.cpp','Kept',5,1,3),('heavy.cpp','One',1,1,4),"
+      "('heavy.cpp','Gone',0.4,1,5);"
+      // Ids that are not the seqs: on a store where nothing has merged the two
+      // run together, which is what hid a cursor guard that matched on seq.
+      "INSERT INTO locations(id, path, line, visits, last_ts, seq) VALUES"
+      "(101,'heavy.cpp',10,12000,1,1),(102,'heavy.cpp',40,1,1,2),"
+      "(103,'heavy.cpp',80,0.4,1,3),(104,'heavy.cpp',120,0.4,1,4);"
+      "INSERT INTO jump_cursor(pane, at) VALUES('pane-a',104);"
+      "COMMIT;"));
+
+  std::string error{"unset"};
+  const auto store = ProjectStore::Open(db, error);
+  EXPECT_TRUE(store != nullptr);
+  EXPECT_TRUE(error.empty());
+  if (store == nullptr) return;
+
+  // x0.9, kept fractional: the columns have INTEGER affinity and SQLite stores
+  // the REAL as it is, which is what lets a row at 2 visits age to 1.8 instead
+  // of being rounded back to 2 for ever or truncated to 1 straight away.
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT visits FROM files WHERE path='heavy.cpp';"), 10800));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT visits FROM files WHERE path='mid.cpp';"), 1.8));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT edits FROM files WHERE path='edited.cpp';"), 3.6));
+  // Weight, not visits: 3.6 edits is 10.8 of weight, and the row stays.
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM files WHERE path='edited.cpp';"), 1));
+  // The entry weight is 1 and the floor is 0.5, so one pass never takes a row
+  // that has been visited once: 0.9 stands, and it takes seven passes with
+  // nothing touching the row to put it under.
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT visits FROM files WHERE path='thin.cpp';"), 0.9));
+  // Already under the floor before the pass, and that is the age-out.
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM files WHERE path='gone.cpp';"), 0));
+
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT visits FROM symbols WHERE symbol='Kept';"), 4.5));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT visits FROM symbols WHERE symbol='One';"), 0.9));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM symbols WHERE symbol='Gone';"), 0));
+
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT visits FROM locations WHERE seq=1;"), 10800));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT visits FROM locations WHERE seq=2;"), 0.9));
+  // seq 3 has nothing standing on it and goes; seq 4 is where a pane's jump
+  // cursor sits, so it stops at the floor instead of being deleted out from
+  // under the user's place in the list.
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM locations WHERE seq=3;"), 0));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT visits FROM locations WHERE seq=4;"), 0.5));
+
+  TEST_CASE("project: a table barely over the threshold lands on it in one pass");
+  {
+    // The factor is threshold/total when that costs less than the fixed step,
+    // so a table 5% over comes back to exactly the threshold and the next open
+    // does not age it again.
+    const std::filesystem::path edge = scratch.dir / "edge.db";
+    std::string first{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(edge, first) != nullptr);
+    EXPECT_TRUE(SeedStore(edge,
+                          "INSERT INTO locations(path, line, visits, last_ts, seq) VALUES"
+                          "('heavy.cpp',10,10499,1,1),('heavy.cpp',40,1,1,2);"));
+    std::string again{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(edge, again) != nullptr);
+    EXPECT_TRUE(Near(StoreDouble(edge, "SELECT SUM(visits) FROM locations;"), 10000));
+    const double survived = StoreDouble(edge, "SELECT visits FROM locations WHERE seq=2;");
+    EXPECT_TRUE(Near(survived, 10000.0 / 10500.0));
+    std::string third{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(edge, third) != nullptr);
+    EXPECT_TRUE(Near(StoreDouble(edge, "SELECT SUM(visits) FROM locations;"), 10000));
+    EXPECT_TRUE(Near(StoreDouble(edge, "SELECT visits FROM locations WHERE seq=2;"), survived));
+  }
+}
+
+// The debounce is measured from the last visit that counted, not from the last
+// touch. From the touch it is a sliding window: ordinary work writes a record
+// every few seconds -- linger, edit, linger -- and each one pushed the window
+// out again, so `visits` never left 1 however long the user stayed.
+void TheVisitDebounceCountsFromTheLastCountedVisit() {
+  TEST_CASE("locations: work at one place counts a visit every 30s, not once ever");
+
+  const Scratch scratch{"koi-visit-debounce"};
+  const AsProjectRoot root{scratch.dir};
+  const std::string file = scratch.Write("a.cpp", "int a;\n").string();
+  const std::filesystem::path db = scratch.dir / "state.db";
+
+  std::string error;
+  const auto store = ProjectStore::Open(db, error);
+  EXPECT_TRUE(store != nullptr);
+  if (store == nullptr) return;
+
+  sqlite3* reader = nullptr;
+  EXPECT_EQ(sqlite3_open(db.c_str(), &reader), SQLITE_OK);
+  const auto scalar = [&reader](const char* sql) {
+    Stmt stmt{reader, sql};
+    return (stmt && stmt.Step()) ? stmt.Integer(0) : std::int64_t{-1};
+  };
+  // The test's clock. Moving every stored stamp back is the same thing as the
+  // wall clock moving forward, and nothing here sleeps.
+  const auto tick = [&reader](int seconds) {
+    const std::string sql = "UPDATE locations SET last_ts = last_ts - " + std::to_string(seconds) +
+                            ", counted_ts = counted_ts - " + std::to_string(seconds) + ";";
+    return ExecSql(reader, sql.c_str());
+  };
+  const auto record = [&store, &file] {
+    LocationRecord row;
+    row.path = file;
+    row.line = 100;
+    return store->WriteLocation(row);
+  };
+
+  EXPECT_TRUE(record() > 0);
+  EXPECT_EQ(scalar("SELECT visits FROM locations;"), std::int64_t{1});
+  // The insert counts as the first visit, so the window starts closed.
+  EXPECT_TRUE(record() > 0);
+  EXPECT_EQ(scalar("SELECT visits FROM locations;"), std::int64_t{1});
+
+  // Ten minutes at one place, touched every 20 s. The window is 30 s, so every
+  // second touch is 40 s from the last counted visit and counts: 15 of the 30.
+  // Measured from `last_ts` -- which every one of them refreshes -- none would.
+  for (int i = 0; i < 30; ++i) {
+    EXPECT_TRUE(tick(20));
+    EXPECT_TRUE(record() > 0);
+  }
+  EXPECT_EQ(scalar("SELECT visits FROM locations;"), std::int64_t{16});
+  EXPECT_EQ(scalar("SELECT COUNT(*) FROM locations;"), std::int64_t{1});
+
+  // And the window still holds inside itself: a touch 20 s after the last
+  // counted visit refreshes the row and counts nothing.
+  EXPECT_TRUE(tick(20));
+  EXPECT_TRUE(record() > 0);
+  EXPECT_EQ(scalar("SELECT visits FROM locations;"), std::int64_t{16});
+  sqlite3_close(reader);
+}
+
+namespace {
+
+// The v3 jump list, written where the migration and the re-import both look for
+// it. `places` rows, ids 1..places, one place each, all inside the project.
+bool WriteLegacyJumps(const Scratch& scratch, int places) {
+  const std::filesystem::path legacy = LegacyJumpDbPath();
+  if (legacy.empty()) return false;
+  std::error_code ec;
+  std::filesystem::create_directories(legacy.parent_path(), ec);
+  std::filesystem::remove(legacy, ec);
+  sqlite3* jumps = nullptr;
+  bool ok = false;
+  if (sqlite3_open(legacy.c_str(), &jumps) == SQLITE_OK) {
+    std::string sql =
+        "CREATE TABLE jumps(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,"
+        " pane TEXT NOT NULL, path TEXT NOT NULL, line INTEGER NOT NULL, col INTEGER NOT NULL);"
+        "CREATE TABLE jump_cursor(pane TEXT PRIMARY KEY, at INTEGER NOT NULL);"
+        "BEGIN;";
+    for (int i = 1; i <= places; ++i) {
+      const std::string name = "f" + std::to_string(i) + ".cpp";
+      sql += "INSERT INTO jumps(id, ts, pane, path, line, col) VALUES(" + std::to_string(i) +
+             ",500,'pane-a','" + (scratch.dir / name).string() + "'," + std::to_string(10 * i) +
+             ",1);";
+    }
+    sql += "COMMIT;";
+    ok = ExecSql(jumps, sql.c_str());
+  }
+  sqlite3_close(jumps);
+  return ok;
+}
+
+}
+
+// The other half of the aging bug: the rows it ate are still in the database
+// they were imported out of, so they can be put back. One shot, keyed on the
+// migrated seq range being nearly empty, and never a duplicate of a row that
+// lived through it.
+void TheLostJumpImportIsPutBack() {
+  TEST_CASE("project store: an imported jump list that was aged away is restored once");
+
+  const Scratch scratch{"koi-jump-reimport"};
+  const AsProjectRoot root{scratch.dir};
+  for (int i = 1; i <= 4; ++i) scratch.Write("f" + std::to_string(i) + ".cpp", "int x;\n");
+  EXPECT_TRUE(WriteLegacyJumps(scratch, 4));
+
+  const auto imported = [](const std::filesystem::path& where) {
+    std::string error{"unset"};
+    const bool ok = (ProjectStore::Open(where, error) != nullptr) && error.empty();
+    return ok && Near(StoreDouble(where, "SELECT COUNT(*) FROM locations;"), 4);
+  };
+
+  TEST_CASE("project store: a range the aging pass emptied is refilled from the v3 database");
+  const std::filesystem::path db = scratch.dir / "state.db";
+  EXPECT_TRUE(imported(db));
+  // What the aging pass did to those rows, and the flag a build without the
+  // repair never wrote. The heavy row is there so that the open which restores
+  // them also ages `locations`: they arrive at one visit and have to live
+  // through the pass that used to delete them.
+  EXPECT_TRUE(SeedStore(db,
+                        "DELETE FROM locations;"
+                        "DELETE FROM meta WHERE key = 'jumps_reimported';"
+                        "INSERT INTO locations(path, line, visits, last_ts, seq)"
+                        " VALUES('f1.cpp',900,12000,1,50);"));
+  {
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(db, error) != nullptr);
+  }
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM locations;"), 5));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT visits FROM locations WHERE seq=1;"), 0.9));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT line FROM locations WHERE seq=2;"), 20));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT CAST(last_ts AS INTEGER) FROM locations WHERE seq=3;"),
+                   500));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM meta WHERE key='jumps_reimported';"), 1));
+
+  TEST_CASE("project store: the repair runs once, however many times the store is opened");
+  {
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(db, error) != nullptr);
+  }
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM locations;"), 5));
+
+  TEST_CASE("project store: a row that lived through it is not restored a second time");
+  {
+    const std::filesystem::path partial = scratch.dir / "partial.db";
+    EXPECT_TRUE(imported(partial));
+    // Two survivors: one still at the seq it was imported at -- a jump cursor
+    // stood on it -- and one that has been recorded since and carries a seq
+    // from the store-wide counter instead.
+    EXPECT_TRUE(SeedStore(partial,
+                          "DELETE FROM locations WHERE seq IN (1,3);"
+                          "UPDATE locations SET seq = 60 WHERE seq = 4;"
+                          "DELETE FROM meta WHERE key = 'jumps_reimported';"));
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(partial, error) != nullptr);
+    EXPECT_TRUE(Near(StoreDouble(partial, "SELECT COUNT(*) FROM locations;"), 4));
+    for (int i = 1; i <= 4; ++i) {
+      const std::string sql =
+          "SELECT COUNT(*) FROM locations WHERE path = 'f" + std::to_string(i) + ".cpp';";
+      EXPECT_TRUE(Near(StoreDouble(partial, sql.c_str()), 1));
+    }
+    EXPECT_TRUE(Near(StoreDouble(partial, "SELECT seq FROM locations WHERE path='f4.cpp';"), 60));
+  }
+
+  TEST_CASE("project store: a store that still holds its import is left alone");
+  {
+    const std::filesystem::path full = scratch.dir / "full.db";
+    EXPECT_TRUE(imported(full));
+    // Three of the four still there is not the near-empty range the repair is
+    // for -- a store loses rows to the row cap and to the age-out too, and
+    // neither is a reason to put a year-old jump back.
+    EXPECT_TRUE(SeedStore(full,
+                          "DELETE FROM locations WHERE seq = 1;"
+                          "DELETE FROM meta WHERE key = 'jumps_reimported';"));
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(full, error) != nullptr);
+    EXPECT_TRUE(Near(StoreDouble(full, "SELECT COUNT(*) FROM locations;"), 3));
+    EXPECT_TRUE(Near(StoreDouble(full, "SELECT COUNT(*) FROM meta WHERE key='jumps_reimported';"),
+                     1));
+  }
+}
+
+// Two panes are two processes, and both read the schema stamp before either
+// takes the write lock. `locations` has no unique index to stop the loser
+// copying the same jump list a second time, so the stamp has to be re-read
+// under the lock -- and written under it, or there is a window where it is not
+// there to be read.
+void TwoOpensCannotMigrateTwice() {
+  TEST_CASE("project store: two opens racing one v3 migration copy the jump list once");
+
+  const Scratch scratch{"koi-migrate-race"};
+  const AsProjectRoot root{scratch.dir};
+  for (int i = 1; i <= 6; ++i) scratch.Write("f" + std::to_string(i) + ".cpp", "int x;\n");
+  EXPECT_TRUE(WriteLegacyJumps(scratch, 6));
+
+  const std::filesystem::path db = scratch.dir / "state.db";
+  EXPECT_TRUE(SeedStore(db,
+                        "PRAGMA user_version = 3;"
+                        "CREATE TABLE files (path TEXT PRIMARY KEY, visits INTEGER NOT NULL"
+                        " DEFAULT 0, edits INTEGER NOT NULL DEFAULT 0, last_ts REAL NOT NULL"
+                        " DEFAULT 0, last_line INTEGER NOT NULL DEFAULT 1, last_col INTEGER NOT"
+                        " NULL DEFAULT 0);"));
+
+  // The memos every path answer is built on, filled before the threads start:
+  // two of them racing to fill one is a data race, and not the one under test.
+  EXPECT_TRUE(!ProjectRoot().empty());
+  EXPECT_TRUE(!LegacyJumpDbPath().empty());
+
+  std::string left_error{"unset"};
+  std::string right_error{"unset"};
+  std::shared_ptr<ProjectStore> left;
+  std::shared_ptr<ProjectStore> right;
+  std::thread other{[&] { right = ProjectStore::Open(db, right_error); }};
+  left = ProjectStore::Open(db, left_error);
+  other.join();
+
+  EXPECT_TRUE(left != nullptr);
+  EXPECT_TRUE(right != nullptr);
+  EXPECT_TRUE(left_error.empty());
+  EXPECT_TRUE(right_error.empty());
+  // One copy, whichever order the two got the lock in.
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM locations;"), 6));
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM"
+                                   " (SELECT seq FROM locations GROUP BY seq HAVING COUNT(*) > 1);"),
+                   0));
+  EXPECT_TRUE(Near(StoreDouble(db, "PRAGMA user_version;"), 6));
+}
+
+// The branch a row was made on is worth x1.25, and nothing at all when there is
+// no repository to compare against.
+void TheBranchARowWasMadeOnIsABonus() {
+  TEST_CASE("project: a row from this branch outranks the same row from another");
+
+  const Scratch scratch{"koi-branch-bonus"};
+  const std::filesystem::path repo = scratch.dir / "repo";
+  std::error_code ec;
+  std::filesystem::create_directories(repo / ".git", ec);
+  WriteFixtureFile(repo / ".git" / "HEAD", "ref: refs/heads/feature\n");
+  WriteFixtureFile(repo / "here.cpp", "int a;\n");
+  WriteFixtureFile(repo / "there.cpp", "int b;\n");
+
+  // Identical rows but for the stamp: same weight, same timestamp, so the
+  // branch is the only thing that can separate them.
+  const std::string rows =
+      "BEGIN;"
+      "INSERT INTO files(path, visits, edits, last_ts, branch) VALUES"
+      "('here.cpp',4,0,?,'feature'),('there.cpp',4,0,?,'main');"
+      "INSERT INTO symbols(file, symbol, visits, last_ts, line) VALUES"
+      "('here.cpp','Here',4,?,1),('there.cpp','There',4,?,1);"
+      "COMMIT;";
+
+  const double now =
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+  const auto seeded = [&rows, now](const std::filesystem::path& db) {
+    std::string sql;
+    for (const char c : rows) {
+      if (c == '?') {
+        sql += std::to_string(now);
+      } else {
+        sql += c;
+      }
+    }
+    return SeedStore(db, sql);
+  };
+
+  {
+    const AsProjectRoot root{repo};
+    EXPECT_EQ(GitBranch(repo), std::string{"feature"});
+    const std::filesystem::path db = repo / "state.db";
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(db, error) != nullptr);
+    EXPECT_TRUE(seeded(db));
+
+    std::string again{"unset"};
+    const auto store = ProjectStore::Open(db, again);
+    EXPECT_TRUE(store != nullptr);
+    if (store == nullptr) return;
+
+    const std::vector<FileVisit> frecent = store->FrecentFiles(0);
+    EXPECT_EQ(frecent.size(), 2u);
+    if (frecent.size() != 2u) return;
+    EXPECT_EQ(frecent.front().path, std::string{"here.cpp"});
+    // Exactly the bonus, not merely "ahead": 4 x 4 x 1.25 against 4 x 4.
+    EXPECT_TRUE(Near(frecent.front().score, 20.0));
+    EXPECT_TRUE(Near(frecent.back().score, 16.0));
+
+    // `symbols` has no branch of its own; the bonus is joined in from the file.
+    const std::vector<SymbolVisit> hot = store->HotSymbols(10);
+    EXPECT_EQ(hot.size(), 2u);
+    if (hot.size() == 2u) EXPECT_EQ(hot.front().symbol, std::string{"Here"});
+  }
+
+  TEST_CASE("project: with no repository the branch bonus is not a tie-breaker either");
+  {
+    // The same two rows, the same two stamps, and no .git anywhere above them:
+    // the branch binds NULL, `branch = NULL` is never true, and the two rows
+    // score the same as each other.
+    const std::filesystem::path plain = scratch.dir / "plain";
+    std::filesystem::create_directories(plain, ec);
+    WriteFixtureFile(plain / "here.cpp", "int a;\n");
+    WriteFixtureFile(plain / "there.cpp", "int b;\n");
+    const AsProjectRoot root{plain};
+    EXPECT_EQ(GitBranch(plain), std::string{});
+
+    const std::filesystem::path db = plain / "state.db";
+    std::string error{"unset"};
+    EXPECT_TRUE(ProjectStore::Open(db, error) != nullptr);
+    EXPECT_TRUE(seeded(db));
+
+    std::string again{"unset"};
+    const auto store = ProjectStore::Open(db, again);
+    EXPECT_TRUE(store != nullptr);
+    EXPECT_TRUE(again.empty());
+    if (store == nullptr) return;
+
+    const std::vector<FileVisit> frecent = store->FrecentFiles(0);
+    EXPECT_EQ(frecent.size(), 2u);
+    if (frecent.size() != 2u) return;
+    EXPECT_TRUE(Near(frecent.front().score, 16.0));
+    EXPECT_TRUE(Near(frecent.back().score, 16.0));
+    EXPECT_EQ(store->HotSymbols(10).size(), 2u);
+  }
+}
+
+// The other branch signal, and the only part of any of this that shells out.
+// Never on a keystroke path, and cached so that it runs once per branch switch.
+void TheBranchDiffIsReadOncePerBranch() {
+  TEST_CASE("project: no repository means no branch diff, and no complaint");
+  {
+    const Scratch scratch{"koi-branch-diff-none"};
+    const AsProjectRoot root{scratch.dir};
+    EXPECT_TRUE(BranchDiffFiles().empty());
+    // And again, off the cache, with the same answer.
+    EXPECT_TRUE(BranchDiffFiles().empty());
+  }
+
+  // Everything below needs a git that runs. Skipped quietly where there is
+  // none: the helper's contract is that a missing git is an empty answer, and
+  // that is what the block above already checks.
+  if (std::system("git --version >/dev/null 2>&1") != 0) return;
+
+  TEST_CASE("project: the branch diff names the files changed since the merge base");
+  const Scratch scratch{"koi-branch-diff"};
+  const std::filesystem::path repo = scratch.dir / "repo";
+  std::error_code ec;
+  std::filesystem::create_directories(repo, ec);
+  const std::string dir = "'" + repo.string() + "'";
+  const auto git = [&dir](const std::string& args) {
+    return std::system(("git -C " + dir + " -c user.email=koi@test -c user.name=koi " + args +
+                        " >/dev/null 2>&1")
+                           .c_str());
+  };
+
+  WriteFixtureFile(repo / "a.cpp", "int a;\n");
+  WriteFixtureFile(repo / "b.cpp", "int b;\n");
+  if (std::system(("git -c init.defaultBranch=main init -q " + dir + " >/dev/null 2>&1").c_str()) !=
+      0) {
+    return;
+  }
+  EXPECT_EQ(git("add -A"), 0);
+  EXPECT_EQ(git("commit -q -m init"), 0);
+  EXPECT_EQ(git("checkout -q -b feature"), 0);
+  WriteFixtureFile(repo / "a.cpp", "int a; // changed\n");
+
+  const AsProjectRoot root{repo};
+  {
+    const std::vector<std::string>& changed = BranchDiffFiles();
+    EXPECT_EQ(changed.size(), 1u);
+    if (changed.size() == 1u) EXPECT_EQ(changed.front(), std::string{"a.cpp"});
+  }
+
+  TEST_CASE("project: the branch diff is not re-read until the branch changes");
+  {
+    // A second file changed in the worktree, and no git command run: nothing
+    // touched .git/HEAD, so the answer has to be the cached one. If this came
+    // back with two entries the helper would be shelling out per call, which is
+    // the one thing it must not do.
+    WriteFixtureFile(repo / "b.cpp", "int b; // changed\n");
+    const std::vector<std::string>& again = BranchDiffFiles();
+    EXPECT_EQ(again.size(), 1u);
+    if (again.size() == 1u) EXPECT_EQ(again.front(), std::string{"a.cpp"});
+
+    // A checkout rewrites HEAD, which is the whole of the cache key, and the
+    // next call sees both changes.
+    EXPECT_EQ(git("checkout -q main"), 0);
+    EXPECT_EQ(GitBranch(repo), std::string{"main"});
+    const std::vector<std::string>& after = BranchDiffFiles();
+    EXPECT_EQ(after.size(), 2u);
+    if (after.size() == 2u) {
+      EXPECT_EQ(after.front(), std::string{"a.cpp"});
+      EXPECT_EQ(after.back(), std::string{"b.cpp"});
+    }
+  }
+}
+
+// The one writer of `locations`: what counts as the same place, what a merge
+// keeps and what it refreshes, and what holds the counters still.
+void LocationWrites() {
+  TEST_CASE("locations: one writer, and the merge rule it implements");
+
+  const Scratch scratch{"koi-locations-test"};
+  const AsProjectRoot root{scratch.dir};
+  const std::string file = scratch.Write("a.cpp", "int a;\n").string();
+  const std::string other = scratch.Write("b.cpp", "int b;\n").string();
+  const std::filesystem::path db = scratch.dir / "state.db";
+
+  std::string error;
+  const auto store = ProjectStore::Open(db, error);
+  EXPECT_TRUE(store != nullptr);
+  if (store == nullptr) return;
+
+  sqlite3* reader = nullptr;
+  EXPECT_EQ(sqlite3_open(db.c_str(), &reader), SQLITE_OK);
+  const auto scalar = [&reader](const char* sql) {
+    Stmt stmt{reader, sql};
+    return (stmt && stmt.Step()) ? stmt.Integer(0) : std::int64_t{-1};
+  };
+  const auto text_of = [&reader](const char* sql) {
+    Stmt stmt{reader, sql};
+    return (stmt && stmt.Step()) ? stmt.Column(0) : std::string{"<none>"};
+  };
+  const auto rows = [&scalar] { return scalar("SELECT COUNT(*) FROM locations;"); };
+  // Ages every row so the next record falls outside the visit debounce. Both
+  // stamps, which is what a minute of wall clock would do to them.
+  const auto age = [&reader] {
+    return ExecSql(reader,
+                   "UPDATE locations SET last_ts = last_ts - 60, counted_ts = counted_ts - 60;");
+  };
+
+  const auto record = [&store, &file](Index line, std::string_view symbol, int kind) {
+    LocationRecord row;
+    row.path = file;
+    row.line = line;
+    row.col = 1;
+    row.kind = kind;
+    row.symbol = symbol;
+    row.has_text = true;
+    row.content = "line " + std::to_string(line);
+    return store->WriteLocation(row);
+  };
+
+  // Within ten lines is one place: the row moves to the new line rather than
+  // gaining a neighbour.
+  EXPECT_TRUE(record(100, "", 0) > 0);
+  EXPECT_EQ(rows(), std::int64_t{1});
+  EXPECT_TRUE(record(108, "", 0) > 0);
+  EXPECT_EQ(rows(), std::int64_t{1});
+  EXPECT_EQ(scalar("SELECT line FROM locations;"), std::int64_t{108});
+  EXPECT_EQ(text_of("SELECT content FROM locations;"), std::string{"line 108"});
+
+  // Eleven lines away is somewhere else.
+  EXPECT_TRUE(record(119, "", 0) > 0);
+  EXPECT_EQ(rows(), std::int64_t{2});
+
+  // The same enclosing symbol merges however far apart the two lines are --
+  // which is what a row surviving an insertion above it depends on.
+  EXPECT_TRUE(record(200, "Draw", 0) > 0);
+  EXPECT_EQ(rows(), std::int64_t{3});
+  EXPECT_TRUE(record(260, "Draw", 0) > 0);
+  EXPECT_EQ(rows(), std::int64_t{3});
+  EXPECT_EQ(scalar("SELECT line FROM locations WHERE symbol='Draw';"), std::int64_t{260});
+  // And a null symbol is not a symbol: two rows with none of one share nothing
+  // but their distance.
+  EXPECT_TRUE(record(400, "", 0) > 0);
+  EXPECT_EQ(rows(), std::int64_t{4});
+
+  // Move-to-front, and the front row staying where it is. The seq counter is
+  // the jump list's order: a merge onto an older row takes a new one, a record
+  // at the place already at the front does not run the counter at all.
+  const std::int64_t front = scalar("SELECT MAX(seq) FROM locations;");
+  EXPECT_EQ(record(400, "", 0), front);
+  EXPECT_EQ(scalar("SELECT MAX(seq) FROM locations;"), front);
+  EXPECT_TRUE(record(108, "", 0) > front);
+  EXPECT_EQ(scalar("SELECT seq FROM locations WHERE line=108;"),
+            scalar("SELECT MAX(seq) FROM locations;"));
+
+  // The visit debounce, in both directions. Nothing about the row is frozen --
+  // the line, the content and the timestamp all refresh -- only the count.
+  const std::int64_t visits = scalar("SELECT visits FROM locations WHERE line=108;");
+  EXPECT_TRUE(record(104, "", 0) > 0);
+  EXPECT_EQ(scalar("SELECT visits FROM locations WHERE line=104;"), visits);
+  EXPECT_TRUE(age());
+  EXPECT_TRUE(record(104, "", 0) > 0);
+  EXPECT_EQ(scalar("SELECT visits FROM locations WHERE line=104;"), visits + 1);
+
+  // Kinds are separate rows only when the places are, and an edit is sticky: a
+  // visit merging onto a place you have edited does not demote it.
+  EXPECT_TRUE(record(600, "", 1) > 0);
+  EXPECT_EQ(scalar("SELECT kind FROM locations WHERE line=600;"), std::int64_t{1});
+  EXPECT_TRUE(record(602, "", 0) > 0);
+  EXPECT_EQ(scalar("SELECT kind FROM locations WHERE line=602;"), std::int64_t{1});
+
+  // A path is a path: the same line in another file is another place.
+  {
+    LocationRecord row;
+    row.path = other;
+    row.line = 600;
+    EXPECT_TRUE(store->WriteLocation(row) > 0);
+  }
+  EXPECT_EQ(scalar("SELECT COUNT(*) FROM locations WHERE path='b.cpp';"), std::int64_t{1});
+
+  // A record that carries no text says nothing about the four columns that
+  // identify the row, and a merge leaves them as they were.
+  EXPECT_EQ(text_of("SELECT content FROM locations WHERE line=104;"), std::string{"line 104"});
+  {
+    LocationRecord row;
+    row.path = file;
+    row.line = 106;
+    EXPECT_TRUE(store->WriteLocation(row) > 0);
+  }
+  EXPECT_EQ(text_of("SELECT content FROM locations WHERE line=106;"), std::string{"line 104"});
+
+  // A record is a hit. A row hidden at three misses is out of the `c` corpus
+  // until something resolves it, and the user standing in it and recording is
+  // the strongest evidence there is that it is still where it says.
+  EXPECT_TRUE(ExecSql(reader, "UPDATE locations SET misses = 3 WHERE line = 106;"));
+  EXPECT_EQ(scalar("SELECT misses FROM locations WHERE line=106;"), std::int64_t{3});
+  EXPECT_TRUE(record(106, "", 0) > 0);
+  EXPECT_EQ(scalar("SELECT misses FROM locations WHERE line=106;"), std::int64_t{0});
+  // The merge that carries no text says nothing about the four columns that
+  // identify the row -- but it still says the row was hit.
+  EXPECT_TRUE(ExecSql(reader, "UPDATE locations SET misses = 3 WHERE line = 106;"));
+  {
+    LocationRecord row;
+    row.path = file;
+    row.line = 106;
+    EXPECT_TRUE(store->WriteLocation(row) > 0);
+  }
+  EXPECT_EQ(scalar("SELECT misses FROM locations WHERE line=106;"), std::int64_t{0});
+
+  // And a path the store would not keep is not kept here either.
+  {
+    LocationRecord row;
+    row.path = "/tmp/scratch-not-in-any-project.cpp";
+    row.line = 1;
+    EXPECT_EQ(store->WriteLocation(row), std::int64_t{0});
+  }
+  sqlite3_close(reader);
+}
+
+// Firefox's adaptive input history, which is the only thing in smart-jump that
+// learns: a pair you have confirmed before outranks everything else, and it
+// fades on its own rather than by anything running in the background.
+void AConfirmedQueryEarnsItsPlaceAndDecaysOut() {
+  TEST_CASE("project: a confirmed query -> target pair, and how it fades");
+
+  // Every progressive prefix of the term list, each spelled one way. Typing
+  // "key cpp" teaches the shorter query too, which is what makes `key` alone
+  // get faster after you have narrowed it once.
+  EXPECT_EQ(QueryPrefixes("key cpp").size(), std::size_t{2});
+  EXPECT_EQ(QueryPrefixes("key cpp")[0], std::string{"key"});
+  EXPECT_EQ(QueryPrefixes("key cpp")[1], std::string{"key cpp"});
+  // One spelling: a lookup has to be able to rebuild the key a write made.
+  EXPECT_EQ(QueryPrefixes("  key \t cpp  ")[1], std::string{"key cpp"});
+  EXPECT_TRUE(QueryPrefixes("").empty());
+  EXPECT_TRUE(QueryPrefixes("   ").empty());
+
+  const Scratch scratch{"koi-queries"};
+  const AsProjectRoot root{scratch.dir};
+  const std::filesystem::path db = scratch.dir / "state.db";
+  const std::string target = "koi/src/keymap.cpp";
+
+  {
+    std::string error;
+    const auto store = ProjectStore::Open(db, error);
+    EXPECT_TRUE(store != nullptr);
+    if (store == nullptr) return;
+
+    // use_count = use_count * 0.9 + 1, so the first accept is 1 and the second
+    // is 1.9. The asymptote is 10: a pair confirmed a hundred times cannot run
+    // away from one confirmed ten.
+    store->RecordQueryAccept("key", target);
+    EXPECT_TRUE(Near(store->AdaptiveUse("key", target), 1.0));
+    store->RecordQueryAccept("key", target);
+    EXPECT_TRUE(Near(store->AdaptiveUse("key", target), 1.9));
+
+    // A pair nobody has confirmed is worth nothing, and an empty query or an
+    // empty target writes no row at all.
+    EXPECT_TRUE(Near(store->AdaptiveUse("key", "koi/src/keylog.cpp"), 0.0));
+    // The read is one statement kept prepared for the whole session, so a miss
+    // must not be a cached answer: confirm the pair that just missed and the
+    // very next read sees the row.
+    store->RecordQueryAccept("key", "koi/src/keylog.cpp");
+    EXPECT_TRUE(Near(store->AdaptiveUse("key", "koi/src/keylog.cpp"), 1.0));
+    EXPECT_TRUE(Near(store->AdaptiveUse("key", "koi/src/nowhere.cpp"), 0.0));
+    store->RecordQueryAccept("", target);
+    store->RecordQueryAccept("nowhere", "");
+    EXPECT_TRUE(Near(store->AdaptiveUse("nowhere", ""), 0.0));
+
+    // Two terms write two rows, and the longer one starts from scratch.
+    store->RecordQueryAccept("key cpp", target);
+    EXPECT_TRUE(Near(store->AdaptiveUse("key cpp", target), 1.0));
+    // ... while the shorter one was already at 1.9 and gets credited again.
+    EXPECT_TRUE(Near(store->AdaptiveUse("key", target), 1.9 * 0.9 + 1));
+
+    // The decay is applied on read. Age the row two days and the same stored
+    // count is worth 0.975^2 of what it was, with nothing written back.
+    EXPECT_TRUE(SeedStore(db, "UPDATE queries SET use_count = 1.9, last_ts = last_ts - " +
+                                  std::to_string(2 * 86400) + " WHERE prefix = 'key';"));
+    EXPECT_TRUE(std::abs(store->AdaptiveUse("key", target) - (1.9 * 0.975 * 0.975)) < 1e-5);
+  }
+
+  // Prune on open, by what a row is worth rather than by how many there are.
+  // 1.0 aged two hundred days decays to 0.006 and goes; 5.0 aged a hundred is
+  // still 0.4 and stays.
+  const double now =
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+  EXPECT_TRUE(SeedStore(db, "DELETE FROM queries;"
+                            "INSERT INTO queries(prefix, target, use_count, last_ts) VALUES"
+                            "('faded','a',1.0," +
+                                std::to_string(now - (200 * 86400)) +
+                                "),"
+                                "('kept','b',5.0," +
+                                std::to_string(now - (100 * 86400)) +
+                                "),"
+                                "('fresh','c',1.0," +
+                                std::to_string(now) + ");"));
+  {
+    std::string error;
+    const auto store = ProjectStore::Open(db, error);
+    EXPECT_TRUE(store != nullptr);
+    if (store == nullptr) return;
+    EXPECT_TRUE(Near(store->AdaptiveUse("faded", "a"), 0.0));
+    EXPECT_TRUE(store->AdaptiveUse("kept", "b") > kQueryDropBelow);
+    EXPECT_TRUE(Near(store->AdaptiveUse("fresh", "c"), 1.0));
+  }
+  EXPECT_TRUE(Near(StoreDouble(db, "SELECT COUNT(*) FROM queries;"), 2.0));
 }
 
 }  // namespace koi

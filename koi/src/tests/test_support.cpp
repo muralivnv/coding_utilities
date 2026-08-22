@@ -120,6 +120,30 @@ Index RangeTo(const SelectionSet& sel, std::size_t i) {
   return (i < sel.Ranges().size()) ? sel.Ranges()[i].To() : Index{-2};
 }
 
+AsProjectRoot::AsProjectRoot(const std::filesystem::path& root) : was{ProjectRoot()} {
+  SetProjectRoot(root);
+}
+
+AsProjectRoot::~AsProjectRoot() { SetProjectRoot(was); }
+
+InDirectory::InDirectory(const std::filesystem::path& dir) {
+  std::error_code ec;
+  was = std::filesystem::current_path(ec);
+  std::filesystem::current_path(dir, ec);
+}
+
+InDirectory::~InDirectory() {
+  std::error_code ec;
+  if (!was.empty()) std::filesystem::current_path(was, ec);
+}
+
+std::shared_ptr<JumpStore> OpenJumpStore(const std::filesystem::path& db, std::string pane,
+                                         std::string& error) {
+  std::shared_ptr<ProjectStore> project = ProjectStore::Open(db, error);
+  if (project == nullptr) return nullptr;
+  return JumpStore::Open(std::move(project), std::move(pane), error);
+}
+
 Key K(std::string_view text) {
   Key key;
   EXPECT_TRUE(ParseKey(text, key));

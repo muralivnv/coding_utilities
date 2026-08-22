@@ -20,6 +20,7 @@ namespace koi {
 
 struct JumpStore;
 struct ProjectStore;
+struct SmartJumpState;
 struct Syntax;
 class KeyRecorder;
 
@@ -222,6 +223,32 @@ inline Index NextDocumentId() {
   return next.fetch_add(1, std::memory_order_relaxed);
 }
 
+// A document's `locations` rows and where the edits since the last heal have
+// moved them. Lines are 1-based, like the store's.
+//
+// Lazy on purpose. Nothing here updates per edit: it carries a revision and
+// catches up through the journal when read, exactly like the stashed window
+// selections beside it (SyncWindowSelections). Defined in anchor.h terms by
+// SyncAnchorShadow; it lives on Document because it is per buffer and dies with
+// it.
+struct AnchorShadow {
+  struct Row {
+    std::int64_t id{0};
+    Index line{1};
+    // The store's `seq` when the row was adopted, which is what tells "the
+    // recorder moved this row" from "the line I am holding is the newer one".
+    std::int64_t seq{0};
+    // An edit landed on this anchor's own line. It is not shifted and it is not
+    // clamped to a neighbour -- it is re-resolved by content at the next heal.
+    bool dirty{false};
+  };
+  bool valid{false};
+  Index revision{-1};
+  std::vector<Row> rows;
+};
+
+struct AnchorJob;
+
 struct Document {
   // Moving a document between slots carries its identity with it, which is
   // right: it is the same document. Copying one would hand two documents the
@@ -243,6 +270,15 @@ struct Document {
 
   FileStamp disk_stamp;
 
+  // git's blob id of the file on disk, taken at load and re-taken at save --
+  // the two moments the bytes are already in hand. Empty when there is no file
+  // behind the buffer or it was too big to be worth hashing (kMaxBlobBytes).
+  //
+  // Stale the moment the buffer is modified or somebody else writes the file,
+  // which is exactly why a recorder only uses it on a clean buffer: it names
+  // the disk state a stored location was recorded against, not this text.
+  std::string disk_blob;
+
   Index saved_undo_serial{0};
 
   Viewport view;
@@ -254,6 +290,10 @@ struct Document {
   std::vector<Interval> search_cache;
   std::string search_cache_pattern;
   Index search_cache_revision{-1};
+
+  // Where this buffer's stored locations have drifted to since the store last
+  // saw them. Read and moved through anchor.h.
+  AnchorShadow anchors;
 };
 
 inline bool IsExcerptView(const Document& doc) { return !doc.view_name.empty(); }
@@ -311,7 +351,10 @@ std::vector<std::filesystem::path> ConfigPaths();
 
 std::filesystem::path ConfigPath();
 
-ErrorCtx SaveDocumentAs(Document& doc, const std::filesystem::path& path);
+// `wrote`, when given, takes the bytes that went to the file -- the same string
+// the write used, handed over rather than built a second time by the caller.
+ErrorCtx SaveDocumentAs(Document& doc, const std::filesystem::path& path,
+                        std::string* wrote = nullptr);
 
 ErrorCtx AtomicWriteFile(const std::filesystem::path& path, std::string_view text);
 
@@ -321,6 +364,26 @@ bool ExternallyModified(const Document& doc);
 // when the file cannot be stat()ed at all, which is the caller's cue that it
 // has nothing to compare against later.
 bool StampFile(const std::string& path, FileStamp& out);
+
+// Past this many bytes a document gets no blob id. Hashing is linear and about
+// as fast as reading, so the cap is not about SHA-1: it is that a file this
+// size is one koi already takes a visible moment to open, and a location in it
+// heals by content just as well without the O(1) first rung.
+inline constexpr std::size_t kMaxBlobBytes = 4u * 1024u * 1024u;
+
+// Past this many bytes a file is out of scope for the line-level work anchors
+// are built on: the recorder leaves `uniq` at 0 rather than pausing the input
+// loop for a census, and a heal declines the file rather than splitting it and
+// indexing it on a pool thread (a 97 MB file measured at 330 MB of peak memory
+// and two seconds, for every save and every focus-in). One judgement, so one
+// number: a generated file this size is not worth the pass either way.
+inline constexpr Index kMaxUniqBytes = 2 * 1024 * 1024;
+
+// git's name for these bytes as a blob, or empty when there are too many of
+// them. The two callers are the two moments a document's disk text is already
+// in hand -- load and save -- and nothing else may hash a buffer: the record
+// path copies what they left on the Document.
+std::string BlobOidOf(std::string_view text);
 
 std::filesystem::path CanonicalOf(const std::filesystem::path& path);
 
@@ -362,6 +425,8 @@ struct Settings {
   std::string theme{"ronin"};
   std::string file_filter;
   bool record{false};
+  // Whether a lone smart-jump match jumps on its own once the prompt is quiet.
+  bool smart_jump_auto{true};
   // Worker threads for the scan pool (searches, references, the file filter).
   // They are I/O bound over a file list, so this buys concurrency between
   // scans rather than throughput within one. The pool only ever grows while
@@ -468,6 +533,7 @@ enum class PromptKind {
   kSearch,
   kSelectRegex,
   kSearchExcerpts,
+  kSmartJump,
 };
 
 // One line the re-indent-on-type trigger moved on its own, and the whitespace it
@@ -523,6 +589,78 @@ struct IndentWarning {
   std::string message;
 };
 
+// What the boundary recorder remembers between events. It is here rather than
+// in a static inside navigate.cpp because it is per editor and because a test
+// has to be able to age it: the linger rule is "three seconds at one place",
+// and nothing in the suite should sleep for three seconds to reach it.
+//
+// Times are wall clock seconds, the same scale the store's own timestamps use.
+struct BoundaryRecorder {
+  // Where the cursor is sitting, and since when. `recorded` says a row already
+  // covers this stay, so the linger fires once and not once per event.
+  Index document{0};
+  Index line{-1};
+  double since{0};
+  bool recorded{false};
+  // The document's revision at the last boundary. An edit is a boundary where
+  // this moved.
+  Index revision{-1};
+
+  // The last row written, and the last `files` bump: what keeps a burst of
+  // typing at one place out of the database after the first record of it. The
+  // store debounces its own counters (kLocationVisitDebounce); this is what
+  // stops the place being described at all. Held as a document id rather than a
+  // path because it is the same identity and it costs no string.
+  Index wrote_document{-1};
+  Index wrote_line{-1};
+  int wrote_kind{-1};
+  double wrote_at{0};
+  double files_at{0};
+
+  // Whether the store will take this file's path, and the path that answer was
+  // reached from. It takes a canonicalisation to decide, so it is decided once
+  // per file rather than once per boundary; the string is compared and never
+  // rebuilt, so a rename under the same buffer is still noticed.
+  std::string storable_path;
+  bool storable{false};
+
+  // The document and enclosing symbol of the last record that resolved one, so
+  // that staying inside a function does not count as visiting it again -- and
+  // the line the tree was last asked about. The cursor has to leave a line
+  // before it can be inside a different function, so a boundary that has not
+  // left it already knows the answer.
+  Index symbol_document{0};
+  std::string symbol;
+  Index note_document{-1};
+  Index note_line{-1};
+
+  // A smart-jump arrival, held back until it has earned a row: two seconds
+  // standing in it, or the first edit there. Leaving sooner cancels it and
+  // nothing is written -- a mis-jump that records itself is the failure zoxide
+  // documents as the trust-killer, and this corpus is only worth having while
+  // it is honest about where its owner actually went.
+  //
+  // Here rather than in a machine of its own because it is the same question
+  // this struct already answers -- where the cursor is and since when -- asked
+  // with a different clock, and two machines would have to agree about what
+  // "still there" means.
+  bool pending{false};
+  Index pending_document{0};
+  Index pending_line{-1};
+  Index pending_revision{-1};
+  double pending_since{0};
+  // The query credit rides the same confirmation as the row: a mis-jump that
+  // is bounced must teach `queries` nothing, so the accept is held here until
+  // the arrival is stood in. Empty for a step, which never credits.
+  std::string pending_typed;
+  std::string pending_target;
+  // The prompt text an auto-fired jump fired on, and empty for one submitted by
+  // hand. Reopening the prompt while such an arrival is still unconfirmed types
+  // it back in: the fire is a guess the user never pressed a key for, so taking
+  // it back has to cost nothing.
+  std::string pending_query;
+};
+
 struct Editor {
 
   Document doc;
@@ -542,6 +680,10 @@ struct Editor {
   bool quit{false};
 
   std::vector<PendingCommand> pending_commands;
+
+  // Heal jobs in flight, one at a time per file. Drained by PumpAnchorHeals
+  // (anchor.h), which the same pump that drains the scans calls.
+  std::vector<std::shared_ptr<AnchorJob>> anchor_jobs;
 
   std::vector<std::string> registers;
 
@@ -578,6 +720,7 @@ struct Editor {
   int prompt_scroll{0};
   std::vector<std::string> prompt_history;
   std::vector<std::string> search_history;
+  std::vector<std::string> jump_history;
   std::size_t prompt_history_index{0};
 
   std::vector<Selection> prompt_return_ranges;
@@ -595,6 +738,14 @@ struct Editor {
   std::shared_ptr<JumpStore> jumps;
 
   std::shared_ptr<ProjectStore> project;
+
+  // The corpus snapshot the open prompt is scoring against, and the last
+  // query's ranked list. It outlives the prompt: smart_jump_next steps through
+  // that list long after the prompt has closed. Held by pointer so editor.h
+  // does not have to know what is in it.
+  std::shared_ptr<SmartJumpState> smart_jump;
+
+  BoundaryRecorder record;
 
   std::shared_ptr<KeyRecorder> recorder;
 

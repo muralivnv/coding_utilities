@@ -12,53 +12,132 @@ void JumpList() {
   const std::filesystem::path dir =
       TempFixture("koi-jump-test");
   RemoveAllQuietly(dir);
+  // The fixture is the project. Every place recorded below is keyed against it
+  // -- and a path the store would have to keep absolute under the system temp
+  // directory is not kept at all (StorablePath), which is every fixture file.
+  std::filesystem::create_directories(dir);
+  const AsProjectRoot root{dir};
   const std::filesystem::path db = dir / "state.db";
 
   const std::filesystem::path fa = dir / "a.txt";
   const std::filesystem::path fb = dir / "b.txt";
   std::filesystem::create_directories(dir);
+  // Sixty lines each, and every place recorded below is further from the last
+  // than kLocationMergeLines. Two places closer together than that are one
+  // place since v4 -- one row, merged -- and these fixtures are about the list,
+  // not about the merge; the merge has tests of its own further down.
+  std::string a_text;
+  std::string b_text;
+  for (int i = 1; i <= 60; ++i) {
+    a_text += "a line " + std::to_string(i) + "\n";
+    b_text += "b line " + std::to_string(i) + "\n";
+  }
   {
     std::ofstream oa(fa);
-    oa << "a one\na two\na three\na four\n";
+    oa << a_text;
     std::ofstream ob(fb);
-    ob << "b one\nb two\nb three\n";
+    ob << b_text;
   }
+
+  // Ages every row of a file, so a record that follows is outside the visit
+  // debounce without the test sleeping through it.
+  const auto age_rows = [](const std::filesystem::path& where, const char* key) {
+    sqlite3* handle = nullptr;
+    if (sqlite3_open(where.c_str(), &handle) != SQLITE_OK) {
+      sqlite3_close(handle);
+      return false;
+    }
+    bool ok = false;
+    {
+      // Scoped: a Stmt alive across sqlite3_close leaves the close returning
+      // BUSY and the handle leaked.
+      Stmt stmt{handle,
+                "UPDATE locations SET last_ts = last_ts - 60,"
+                " counted_ts = counted_ts - 60 WHERE path=?1;"};
+      stmt.Text(1, key);
+      ok = stmt.Run();
+    }
+    sqlite3_close(handle);
+    return ok;
+  };
+
+  // How many places a store's list holds. Asked of the database rather than of
+  // the store: the store had a Count() of its own that counted the same rows
+  // and nothing outside these tests ever called it.
+  const auto count_rows = [](const std::filesystem::path& where) {
+    sqlite3* handle = nullptr;
+    if (sqlite3_open(where.c_str(), &handle) != SQLITE_OK) {
+      sqlite3_close(handle);
+      return std::int64_t{-1};
+    }
+    std::int64_t rows = -1;
+    {
+      Stmt stmt{handle, "SELECT COUNT(*) FROM locations;"};
+      if (stmt && stmt.Step()) rows = stmt.Integer(0);
+    }
+    sqlite3_close(handle);
+    return rows;
+  };
 
   {
     std::string error;
-    auto store = JumpStore::Open(db, "pane-1", error);
+    auto store = OpenJumpStore(db, "pane-1", error);
     EXPECT_TRUE(store != nullptr);
     EXPECT_TRUE(error.empty());
-    EXPECT_EQ(store->Count(), 0);
+    EXPECT_EQ(count_rows(db), std::int64_t{0});
 
     store->Record(fa, 1, 1);
-    store->Record(fa, 3, 2);
-    EXPECT_EQ(store->Count(), 2);
+    store->Record(fa, 30, 2);
+    EXPECT_EQ(count_rows(db), std::int64_t{2});
 
-    store->Record(fa, 3, 2);
-    EXPECT_EQ(store->Count(), 2);
+    store->Record(fa, 30, 2);
+    EXPECT_EQ(count_rows(db), std::int64_t{2});
+
 
     Jump j;
     EXPECT_TRUE(store->Step(false, j));
     EXPECT_EQ(j.line, Index{1});
     EXPECT_TRUE(!store->Step(false, j));
     EXPECT_TRUE(store->Step(true, j));
-    EXPECT_EQ(j.line, Index{3});
+    EXPECT_EQ(j.line, Index{30});
     EXPECT_TRUE(!store->Step(true, j));
 
-    EXPECT_TRUE(std::filesystem::path{j.path}.is_absolute());
+    // What comes back is a path valid from here, resolved out of the key the
+    // store holds -- "a.txt" against the root, not the absolute path recorded.
+    std::error_code ec;
+    EXPECT_EQ(std::filesystem::weakly_canonical(j.path, ec),
+              std::filesystem::weakly_canonical(fa, ec));
+  }
+
+  {
+    // A short jump is still a jump. Jump records merge on their exact line
+    // (LocationRecord::exact), not the corpus's +/-10 window -- otherwise the
+    // departure record merges onto the row it is jumping from and stepping
+    // back over a five-line jump has nothing to step back to.
+    std::string error;
+    const std::filesystem::path short_db = dir / "short.db";
+    auto store = OpenJumpStore(short_db, "pane-s", error);
+    EXPECT_TRUE(store != nullptr);
+    store->Record(fa, 20, 1);
+    store->Record(fa, 25, 1);
+    EXPECT_EQ(count_rows(short_db), std::int64_t{2});
+    Jump close;
+    EXPECT_TRUE(store->Step(false, close));
+    EXPECT_EQ(close.line, Index{20});
+    EXPECT_TRUE(store->Step(true, close));
+    EXPECT_EQ(close.line, Index{25});
   }
 
   {
     std::string error;
-    auto pane1 = JumpStore::Open(db, "pane-1", error);
-    auto pane2 = JumpStore::Open(db, "pane-2", error);
+    auto pane1 = OpenJumpStore(db, "pane-1", error);
+    auto pane2 = OpenJumpStore(db, "pane-2", error);
     EXPECT_TRUE(pane1 != nullptr);
     EXPECT_TRUE(pane2 != nullptr);
 
     Jump j;
     EXPECT_TRUE(pane2->Step(false, j));
-    EXPECT_EQ(j.line, Index{3});
+    EXPECT_EQ(j.line, Index{30});
     EXPECT_TRUE(pane2->Step(false, j));
     EXPECT_EQ(j.line, Index{1});
 
@@ -67,7 +146,7 @@ void JumpList() {
     EXPECT_EQ(k.line, Index{1});
 
     pane2->Record(fb, 2, 1);
-    EXPECT_EQ(pane1->Count(), 3);
+    EXPECT_EQ(count_rows(db), std::int64_t{3});
     Jump newest;
     EXPECT_TRUE(pane1->Step(true, newest) || true);
   }
@@ -75,14 +154,14 @@ void JumpList() {
   {
     std::string error;
     const std::filesystem::path shifted = dir / "shifted.db";
-    auto pane_a = JumpStore::Open(shifted, "pane-a", error);
-    auto pane_b = JumpStore::Open(shifted, "pane-b", error);
+    auto pane_a = OpenJumpStore(shifted, "pane-a", error);
+    auto pane_b = OpenJumpStore(shifted, "pane-b", error);
     EXPECT_TRUE((pane_a != nullptr) && (pane_b != nullptr));
 
     pane_a->Record(fa, 1, 1);
-    pane_a->Record(fa, 2, 1);
+    pane_a->Record(fa, 30, 1);
     pane_b->Record(fb, 1, 1);
-    pane_b->Record(fb, 2, 1);
+    pane_b->Record(fb, 30, 1);
 
     Jump j;
     EXPECT_TRUE(pane_a->Step(false, j));
@@ -91,7 +170,7 @@ void JumpList() {
 
     EXPECT_TRUE(pane_a->Step(true, j));
     EXPECT_EQ(std::filesystem::path{j.path}.filename().string(), std::string{"a.txt"});
-    EXPECT_EQ(j.line, Index{2});
+    EXPECT_EQ(j.line, Index{30});
 
     EXPECT_TRUE(pane_a->Step(true, j));
     EXPECT_EQ(std::filesystem::path{j.path}.filename().string(), std::string{"b.txt"});
@@ -100,17 +179,19 @@ void JumpList() {
   {
     std::string error;
     Editor ed;
-    ed.jumps = JumpStore::Open(dir / "editor.db", "pane-editor", error);
+    ed.jumps = OpenJumpStore(dir / "editor.db", "pane-editor", error);
     EXPECT_TRUE(ed.jumps != nullptr);
 
-    ResetToOriginal(ed.doc.table, "a one\na two\na three\na four\n");
+    ResetToOriginal(ed.doc.table, a_text);
     ed.doc.file = fa;
     ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
 
     ed.jumps->Record(fa, 2, 1);
     ed.jumps->Record(fb, 3, 1);
-    ed.jumps->Record(fa, 4, 1);
-    const Index landed = LineStart(ed.doc.table, 3);
+    ed.jumps->Record(fa, 40, 1);
+    // Standing on the place at the front of the list, so the jump the step back
+    // records first merges onto it and the step is a step of one.
+    const Index landed = LineStart(ed.doc.table, 39);
     ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{landed, landed, -1}));
 
     const KeyMaps maps = DefaultKeyMaps();
@@ -142,7 +223,7 @@ void JumpList() {
     press("]");
     press("]");
     EXPECT_EQ(ed.doc.file.filename().string(), std::string{"a.txt"});
-    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{3});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{39});
 
     ed.status.clear();
     press("]");
@@ -153,46 +234,46 @@ void JumpList() {
   {
     std::string error;
     Editor ed;
-    ed.jumps = JumpStore::Open(dir / "resume.db", "pane-resume", error);
+    ed.jumps = OpenJumpStore(dir / "resume.db", "pane-resume", error);
     EXPECT_TRUE(ed.jumps != nullptr);
 
-    ResetToOriginal(ed.doc.table, "a one\na two\na three\na four\n");
+    ResetToOriginal(ed.doc.table, a_text);
     ed.doc.file = fa;
     ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
     RecordJump(ed);
 
-    const Index at = LineStart(ed.doc.table, 3);
+    const Index at = LineStart(ed.doc.table, 30);
     ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{at, at, -1}));
     ed.mode = Mode::kInsert;
     std::ignore = InsertAtCursorsKeeping("edited ", ed.doc.table, ed.doc.selections);
     ed.mode = Mode::kNormal;
     ApplyModeInvariants(ed);
-    EXPECT_EQ(ed.jumps->Count(), 1);
+    EXPECT_EQ(count_rows(dir / "resume.db"), std::int64_t{1});
     const Index edited_line = LineAt(ed.doc.table, Cur(ed));
-    EXPECT_EQ(edited_line, Index{3});
+    EXPECT_EQ(edited_line, Index{30});
 
     StepJump(ed, false);
     EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{0});
 
     StepJump(ed, true);
-    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{3});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{30});
 
-    EXPECT_EQ(ed.jumps->Count(), 2);
+    EXPECT_EQ(count_rows(dir / "resume.db"), std::int64_t{2});
     StepJump(ed, false);
     StepJump(ed, true);
-    EXPECT_EQ(ed.jumps->Count(), 2);
-    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{3});
+    EXPECT_EQ(count_rows(dir / "resume.db"), std::int64_t{2});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{30});
   }
 
   {
     std::string error;
     Editor ed;
-    ed.jumps = JumpStore::Open(dir / "motion.db", "pane-motion", error);
+    ed.jumps = OpenJumpStore(dir / "motion.db", "pane-motion", error);
     ResetToOriginal(ed.doc.table, "one\ntwo\nthree\nfour\nfive\nsix\n");
     ed.doc.file = fa;
     ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
     RecordJump(ed);
-    EXPECT_EQ(ed.jumps->Count(), 1);
+    EXPECT_EQ(count_rows(dir / "motion.db"), std::int64_t{1});
 
     for (int i = 0; i < 4; ++i) {
       RunCommands(ed, {"move_line_down", "move_char_right", "move_next_word_start",
@@ -205,27 +286,106 @@ void JumpList() {
     ApplyModeInvariants(ed);
     RunCommands(ed, {"undo"});
 
-    EXPECT_EQ(ed.jumps->Count(), 1);
+    EXPECT_EQ(count_rows(dir / "motion.db"), std::int64_t{1});
   }
 
   {
     std::string error;
-    auto store = JumpStore::Open(dir / "dedupe.db", "pane-dedupe", error);
+    auto store = OpenJumpStore(dir / "dedupe.db", "pane-dedupe", error);
     store->Record(fa, 10, 1);
-    store->Record(fa, 20, 1);
+    store->Record(fa, 30, 1);
     store->Record(fa, 10, 5);
-    EXPECT_EQ(store->Count(), 2);
+    EXPECT_EQ(count_rows(dir / "dedupe.db"), std::int64_t{2});
 
     Jump j;
     EXPECT_TRUE(store->Step(false, j));
-    EXPECT_EQ(j.line, Index{20});
+    EXPECT_EQ(j.line, Index{30});
     EXPECT_TRUE(!store->Step(false, j));
+  }
+
+  TEST_CASE("jump list: a place recorded again moves to the front and keeps its count");
+  {
+    const std::filesystem::path merged = dir / "merged.db";
+    std::string error;
+    auto store = OpenJumpStore(merged, "pane-merge", error);
+    EXPECT_TRUE(store != nullptr);
+    sqlite3* reader = nullptr;
+    EXPECT_EQ(sqlite3_open(merged.c_str(), &reader), SQLITE_OK);
+    const auto column = [&reader](const char* sql) {
+      Stmt stmt{reader, sql};
+      return (stmt && stmt.Step()) ? stmt.Integer(0) : std::int64_t{-1};
+    };
+
+    store->Record(fa, 4, 1);
+    store->Record(fb, 9, 1);
+    const std::int64_t first = column("SELECT seq FROM locations WHERE path='a.txt';");
+    // Aged past kLocationVisitDebounce first: the counter is held still for a
+    // window after every touch, so a second arrival inside it refreshes the row
+    // without counting -- which is the point of the debounce and not the point
+    // of this case.
+    EXPECT_TRUE(age_rows(merged, "a.txt"));
+    store->Record(fa, 4, 7);
+
+    // One row, one more visit, and the column of the arrival that merged onto
+    // it -- the whole difference from v3, which deleted the row and inserted a
+    // fresh one with visits back at 1.
+    EXPECT_EQ(count_rows(merged), std::int64_t{2});
+    EXPECT_EQ(column("SELECT COUNT(*) FROM locations WHERE path='a.txt';"), std::int64_t{1});
+    EXPECT_EQ(column("SELECT visits FROM locations WHERE path='a.txt';"), std::int64_t{2});
+    EXPECT_EQ(column("SELECT col FROM locations WHERE path='a.txt';"), std::int64_t{7});
+    // Move-to-front is the seq, and the seq only ever goes up: the row is now
+    // newer than the one recorded after it.
+    EXPECT_TRUE(column("SELECT seq FROM locations WHERE path='a.txt';") > first);
+    EXPECT_EQ(column("SELECT seq FROM locations WHERE path='a.txt';"),
+              column("SELECT MAX(seq) FROM locations;"));
+    // And the list steps in that order: back from the front is the other file.
+    Jump j;
+    EXPECT_TRUE(store->Step(false, j));
+    EXPECT_EQ(std::filesystem::path{j.path}.filename().string(), std::string{"b.txt"});
+    sqlite3_close(reader);
+  }
+
+  TEST_CASE("jump list: two panes recording one place share the row, and neither loses it");
+  {
+    // v3 deduped with a DELETE that was not pane-scoped, so recording a place
+    // in one pane took the other pane's row for the same place out of the list
+    // -- with its history -- and left that pane's cursor naming nothing.
+    const std::filesystem::path shared = dir / "two-panes.db";
+    std::string error;
+    auto left = OpenJumpStore(shared, "pane-left", error);
+    auto right = OpenJumpStore(shared, "pane-right", error);
+    EXPECT_TRUE((left != nullptr) && (right != nullptr));
+
+    left->Record(fa, 1, 1);
+    right->Record(fb, 2, 1);
+    left->Record(fa, 40, 1);
+    // The place the other pane recorded, recorded again here -- and aged first,
+    // so the arrival is outside the debounce window and counts.
+    EXPECT_TRUE(age_rows(shared, "b.txt"));
+    left->Record(fb, 2, 1);
+
+    EXPECT_EQ(count_rows(shared), std::int64_t{3});
+    sqlite3* reader = nullptr;
+    EXPECT_EQ(sqlite3_open(shared.c_str(), &reader), SQLITE_OK);
+    {
+      Stmt stmt{reader, "SELECT visits FROM locations WHERE path='b.txt';"};
+      EXPECT_EQ((stmt && stmt.Step()) ? stmt.Integer(0) : std::int64_t{-1}, std::int64_t{2});
+    }
+    // Both cursors still step, and both still reach the place the other pane
+    // recorded.
+    Jump j;
+    EXPECT_TRUE(right->Step(false, j));
+    EXPECT_EQ(std::filesystem::path{j.path}.filename().string(), std::string{"a.txt"});
+    Jump k;
+    EXPECT_TRUE(left->Step(false, k));
+    EXPECT_EQ(std::filesystem::path{k.path}.filename().string(), std::string{"a.txt"});
+    sqlite3_close(reader);
   }
 
   {
     std::string error;
     Editor ed;
-    ed.jumps = JumpStore::Open(dir / "dirty.db", "pane-dirty", error);
+    ed.jumps = OpenJumpStore(dir / "dirty.db", "pane-dirty", error);
     ResetToOriginal(ed.doc.table, "scratch\n");
     ed.doc.file = fa;
     ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
@@ -257,7 +417,7 @@ void JumpList() {
     std::string error;
     Editor ed;
     ed.theme = BuiltinTheme();
-    ed.jumps = JumpStore::Open(dir / "views.db", "pane-views", error);
+    ed.jumps = OpenJumpStore(dir / "views.db", "pane-views", error);
     EXPECT_TRUE(ed.jumps != nullptr);
     EXPECT_TRUE(OpenTarget(ed, fa.string()));
     EXPECT_TRUE(OpenTarget(ed, fb.string()));
@@ -296,7 +456,7 @@ void JumpList() {
   }
 
   {
-    const std::filesystem::path probe = JumpDbPath();
+    const std::filesystem::path probe = LegacyJumpDbPath();
     EXPECT_TRUE(!probe.empty());
     EXPECT_EQ(probe.filename().string(), std::string{"state.db"});
     const std::string project = probe.parent_path().filename().string();
@@ -309,9 +469,9 @@ void JumpList() {
 
   TEST_CASE("jump list: recording a jump is one transaction, and no path leaves one open");
   {
-    // Record is a read (is this already the newest place?), a DELETE (take the
-    // same file+line out of wherever it was), an INSERT (put it back at the
-    // end) and a cursor move onto the row just written -- one change to the
+    // Record is a read (is this place already in the list?), a seq taken from
+    // the store-wide counter, a merge or an insert that puts the place at the
+    // front, and a cursor move onto the row just written -- one change to the
     // list. Nothing here can crash the process between them to prove the
     // atomicity directly, so what is checked is everything the transaction is
     // observable through from outside: the result is committed and complete
@@ -319,7 +479,7 @@ void JumpList() {
     // was, and neither path leaves the write lock held.
     const std::filesystem::path txdb = dir / "one-transaction.db";
     std::string error{"unset"};
-    auto store = JumpStore::Open(txdb, "pane-tx", error);
+    auto store = OpenJumpStore(txdb, "pane-tx", error);
     EXPECT_TRUE(store != nullptr);
     EXPECT_TRUE(error.empty());
     if (store != nullptr) {
@@ -337,18 +497,29 @@ void JumpList() {
       // In WAL mode an uncommitted write is invisible to every other
       // connection, so reading through `other` checks that the transaction
       // closed -- not merely that the statements ran.
-      const auto rows = [&scalar] { return scalar("SELECT COUNT(*) FROM jumps;"); };
+      const auto rows = [&scalar] { return scalar("SELECT COUNT(*) FROM locations;"); };
+      // Where the cursor stands in the walk. The cursor holds a row id, which a
+      // merge does not move; what moves is the row's seq, and that is what says
+      // the place went to the front.
       const auto cursor = [&scalar] {
-        return scalar("SELECT COALESCE(MAX(at),0) FROM jump_cursor WHERE pane='pane-tx';");
+        return scalar("SELECT COALESCE((SELECT l.seq FROM jump_cursor c"
+                      " JOIN locations l ON l.id = c.at WHERE c.pane='pane-tx'),0);");
       };
       // The invariant the transaction exists for: the cursor names a row that
       // is really there.
       const auto cursor_is_real = [&scalar] {
-        return scalar("SELECT COUNT(*) FROM jumps WHERE id ="
+        return scalar("SELECT COUNT(*) FROM locations WHERE id ="
                       " (SELECT at FROM jump_cursor WHERE pane='pane-tx');");
       };
       const auto rows_at = [&other](const std::string& file, int line) {
-        Stmt stmt{other, "SELECT COUNT(*) FROM jumps WHERE path=?1 AND line=?2;"};
+        Stmt stmt{other, "SELECT COUNT(*) FROM locations WHERE path=?1 AND line=?2;"};
+        if (!stmt) return std::int64_t{-1};
+        stmt.Text(1, file);
+        stmt.Int(2, line);
+        return stmt.Step() ? stmt.Integer(0) : std::int64_t{-1};
+      };
+      const auto visits_at = [&other](const std::string& file, int line) {
+        Stmt stmt{other, "SELECT visits FROM locations WHERE path=?1 AND line=?2;"};
         if (!stmt) return std::int64_t{-1};
         stmt.Text(1, file);
         stmt.Int(2, line);
@@ -362,26 +533,30 @@ void JumpList() {
         return true;
       };
 
-      const std::string a = std::filesystem::weakly_canonical(fa).string();
-      const std::string b = std::filesystem::weakly_canonical(fb).string();
+      // The keys the rows are under, not the paths handed in: inside the
+      // project a path is stored relative to the root.
+      const std::string a{"a.txt"};
+      const std::string b{"b.txt"};
       store->Record(fa, 10, 1);
       store->Record(fb, 20, 1);
       EXPECT_EQ(rows(), std::int64_t{2});
       EXPECT_EQ(cursor_is_real(), std::int64_t{1});
       EXPECT_TRUE(lock_is_free());
 
-      // The dedup half: recording a place already in the list moves it to the
-      // end, and the move is one row before and one row after. A window between
-      // the DELETE and the INSERT is a moment when it is zero rows, and one
-      // between the INSERT and the cursor move is a moment when the cursor is
-      // still on the row that the DELETE took away.
+      // The merge half: recording a place already in the list moves it to the
+      // front, and the row it moves is the row that was there -- one row
+      // before, the same row after, with one more visit on it. v3 did this
+      // with a DELETE and an INSERT, which is where the visit count went.
       const std::int64_t before = cursor();
+      EXPECT_EQ(visits_at(a, 10), std::int64_t{1});
+      EXPECT_TRUE(age_rows(txdb, "a.txt"));
       store->Record(fa, 10, 5);
       EXPECT_EQ(rows(), std::int64_t{2});
       EXPECT_EQ(rows_at(a, 10), std::int64_t{1});
+      EXPECT_EQ(visits_at(a, 10), std::int64_t{2});
       EXPECT_TRUE(cursor() > before);
       EXPECT_EQ(cursor_is_real(), std::int64_t{1});
-      EXPECT_EQ(cursor(), scalar("SELECT MAX(id) FROM jumps;"));
+      EXPECT_EQ(cursor(), scalar("SELECT MAX(seq) FROM locations;"));
       EXPECT_TRUE(lock_is_free());
 
       // Now the failure paths, without patching SQLite: rename a table out from
@@ -390,19 +565,19 @@ void JumpList() {
       // rollback would leave the store on the write lock for the rest of the
       // session, which `lock_is_free` below would say.
       const std::int64_t kept_cursor = cursor();
-      EXPECT_TRUE(ExecSql(other, "ALTER TABLE jumps RENAME TO jumps_hidden;"));
+      EXPECT_TRUE(ExecSql(other, "ALTER TABLE locations RENAME TO locations_hidden;"));
       store->Record(fb, 30, 1);
       EXPECT_TRUE(lock_is_free());
-      EXPECT_TRUE(ExecSql(other, "ALTER TABLE jumps_hidden RENAME TO jumps;"));
+      EXPECT_TRUE(ExecSql(other, "ALTER TABLE locations_hidden RENAME TO locations;"));
       EXPECT_EQ(rows(), std::int64_t{2});
       EXPECT_EQ(rows_at(b, 30), std::int64_t{0});
       EXPECT_EQ(cursor(), kept_cursor);
 
-      // The cursor half of the same thing, and the one the DELETE+INSERT alone
-      // would not cover: the write that fails is the last of the three, so the
-      // insert has already succeeded inside the transaction and has to be
-      // taken back with it. Without the rollback the list keeps a jump whose
-      // cursor was never moved onto it.
+      // The cursor half of the same thing, and the one the insert alone would
+      // not cover: the write that fails is the last of them, so the insert and
+      // the seq it took have already succeeded inside the transaction and have
+      // to be taken back with it. Without the rollback the list keeps a jump
+      // whose cursor was never moved onto it.
       EXPECT_TRUE(ExecSql(other, "ALTER TABLE jump_cursor RENAME TO cursor_hidden;"));
       store->Record(fb, 40, 1);
       EXPECT_TRUE(lock_is_free());
@@ -425,7 +600,7 @@ void JumpList() {
 
       // Nothing above changed what the list reads back as, in memory or on
       // disk: the two failed Records are simply not there.
-      EXPECT_EQ(store->Count(), 3);
+      EXPECT_EQ(rows(), std::int64_t{3});
       Jump j;
       EXPECT_TRUE(store->Step(false, j));
       EXPECT_EQ(j.line, Index{10});
@@ -445,18 +620,21 @@ void JumpList() {
     // koi actually supports, one PaneId per instance.
     //
     // The list is seeded with every place the writer will re-record, so its row
-    // count is invariant from then on: each Record deletes exactly one row and
-    // inserts exactly one. Any other count the reader sees is a gap between two
-    // commits -- kPlaces - 1 is the DELETE without its INSERT.
+    // count is invariant from then on: each Record merges onto a row that is
+    // already there. Any other count the reader sees is a gap between two
+    // commits.
     const std::filesystem::path hammer_db = dir / "hammer.db";
     std::string error{"unset"};
-    auto writer = JumpStore::Open(hammer_db, "pane-hammer", error);
+    auto writer = OpenJumpStore(hammer_db, "pane-hammer", error);
     EXPECT_TRUE(writer != nullptr);
     if (writer != nullptr) {
       constexpr int kPlaces = 6;
       constexpr int kRecords = 400;
-      for (int i = 0; i < kPlaces; ++i) writer->Record(fa, Index{10 + i}, 1);
-      EXPECT_EQ(writer->Count(), kPlaces);
+      // Twenty lines apart, so each is a place of its own: closer than
+      // kLocationMergeLines and the six would be one row.
+      const auto place = [](int i) { return Index{10 + (20 * i)}; };
+      for (int i = 0; i < kPlaces; ++i) writer->Record(fa, place(i), 1);
+      EXPECT_EQ(count_rows(hammer_db), std::int64_t{kPlaces});
 
       std::atomic<bool> writing{true};
       std::atomic<int> samples{0};
@@ -476,8 +654,8 @@ void JumpList() {
           // One statement, so the two halves of the question are answered
           // against one snapshot of the database: how many rows there are, and
           // whether the writer's cursor names one of them.
-          Stmt look{other, "SELECT (SELECT COUNT(*) FROM jumps),"
-                           " (SELECT COUNT(*) FROM jumps WHERE id ="
+          Stmt look{other, "SELECT (SELECT COUNT(*) FROM locations),"
+                           " (SELECT COUNT(*) FROM locations WHERE id ="
                            " (SELECT at FROM jump_cursor WHERE pane='pane-hammer'));"};
           if (!look || !look.Step()) {
             ++unreadable;
@@ -492,12 +670,12 @@ void JumpList() {
 
       for (int i = 0; i < kRecords; ++i) {
         // Round-robin, so the place being recorded is never the newest row --
-        // that is the dedup shortcut, and it does no DELETE or INSERT at all.
-        writer->Record(fa, Index{10 + (i % kPlaces)}, Index{1 + (i % 3)});
+        // that is the shortcut, and it writes nothing but the cursor.
+        writer->Record(fa, place(i % kPlaces), Index{1 + (i % 3)});
         // Every so often, step back and re-record the place stepped onto. That
-        // is the one arrangement in which the row the dedup DELETE removes is
-        // the row the cursor is sitting on, so the cursor is left naming
-        // nothing until the INSERT and the cursor move land -- which is what
+        // is the one arrangement in which the row whose seq the merge moves is
+        // the row the cursor is sitting on, so a cursor written outside the
+        // transaction would name a seq nothing holds -- which is what
         // `dangling_cursor` is watching for.
         if ((i % 4) == 3) {
           Jump back;
@@ -517,7 +695,7 @@ void JumpList() {
       // zero for the wrong reason.
       EXPECT_TRUE(samples.load() > 0);
       // And the writer's own view is unchanged by any of it.
-      EXPECT_EQ(writer->Count(), kPlaces);
+      EXPECT_EQ(count_rows(hammer_db), std::int64_t{kPlaces});
     }
   }
 
@@ -529,12 +707,12 @@ void JumpList() {
     const std::filesystem::path locked = dir / "readonly.db";
     {
       std::string error{"unset"};
-      auto seed = JumpStore::Open(locked, "pane-ro", error);
+      auto seed = OpenJumpStore(locked, "pane-ro", error);
       EXPECT_TRUE(seed != nullptr);
       if (seed != nullptr) {
         seed->Record(fa, 7, 1);
         seed->Record(fb, 8, 1);
-        EXPECT_EQ(seed->Count(), 2);
+        EXPECT_EQ(count_rows(locked), std::int64_t{2});
       }
     }
 
@@ -553,7 +731,7 @@ void JumpList() {
       EXPECT_TRUE(set_mode(locked, read_only));
 
       std::string error{"unset"};
-      EXPECT_TRUE(JumpStore::Open(locked, "pane-ro", error) == nullptr);
+      EXPECT_TRUE(OpenJumpStore(locked, "pane-ro", error) == nullptr);
       EXPECT_TRUE(!error.empty());
       EXPECT_TRUE(std::filesystem::exists(locked));
 
@@ -567,11 +745,11 @@ void JumpList() {
       }
 
       std::string reopen_error{"unset"};
-      auto again = JumpStore::Open(locked, "pane-ro", reopen_error);
+      auto again = OpenJumpStore(locked, "pane-ro", reopen_error);
       EXPECT_TRUE(again != nullptr);
       EXPECT_TRUE(reopen_error.empty());
       if (again != nullptr) {
-        EXPECT_EQ(again->Count(), 2);
+        EXPECT_EQ(count_rows(locked), std::int64_t{2});
         // The cursor survived too, on the newest row: stepping back from it
         // lands on the older jump, and there is nothing older still.
         Jump j;
@@ -582,6 +760,78 @@ void JumpList() {
         EXPECT_EQ(j.line, Index{8});
       }
     }
+  }
+
+  TEST_CASE("jump list: a linger between the jump and the step back keeps the departure");
+  {
+    // `locations` is shared, and the jump list is not the only thing writing
+    // it: every linger and every edit takes the next store-wide seq. Reading
+    // "is this pane part-way back through the list?" off that counter meant one
+    // linger after a jump put the cursor behind a place the user never jumped
+    // to -- so the step back did not record the place it was leaving, and
+    // stepped from that place instead of back to it.
+    //
+    // Both stores are wired to the same database here, which is what the editor
+    // does and what the fixtures above do not: with no project store the linger
+    // has nowhere to land and the whole thing is invisible.
+    std::string error{"unset"};
+    Editor ed;
+    ed.project = ProjectStore::Open(dir / "linger.db", error);
+    EXPECT_TRUE(ed.project != nullptr);
+    ed.jumps = JumpStore::Open(ed.project, "pane-linger", error);
+    EXPECT_TRUE(ed.jumps != nullptr);
+    EXPECT_TRUE(error.empty());
+
+    ResetToOriginal(ed.doc.table, a_text);
+    ed.doc.file = fa;
+    const auto put_cursor = [&ed](Index line) {
+      const Index at = LineStart(ed.doc.table, line);
+      ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{at, at, -1}));
+    };
+    // What three seconds of sitting still writes: the store's own record, no
+    // cursor move, and a fresh seq every time.
+    const auto linger = [&ed] {
+      LocationRecord row;
+      EXPECT_TRUE(LocationHere(ed, row));
+      EXPECT_TRUE(ed.project->WriteLocation(row) != 0);
+    };
+
+    // Two jumps, each with a linger before it, and a linger at the place the
+    // second one landed. Twenty-five lines apart, so none of the three merges
+    // onto another.
+    put_cursor(1);
+    linger();
+    RecordJump(ed);
+    put_cursor(25);
+    linger();
+    RecordJump(ed);
+    put_cursor(50);
+    linger();
+
+    // The linger just written is the newest row in the store, and it is not a
+    // jump: the pane has not stepped anywhere, so the step back below has to
+    // record the place it is leaving first.
+    EXPECT_TRUE(ed.jumps->AtNewest());
+    StepJump(ed, false);
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{25});
+    // And now it has stepped, so the next one records nothing and steps again.
+    EXPECT_FALSE(ed.jumps->AtNewest());
+    StepJump(ed, false);
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{1});
+    EXPECT_FALSE(ed.jumps->AtNewest());
+
+    // A jump somewhere new ends the walk: the departure goes to the front of
+    // the list and the pane is recording again, not stepping.
+    RecordJump(ed);
+    EXPECT_TRUE(OpenTarget(ed, fb.string() + ":11"));
+    EXPECT_EQ(ed.doc.file.filename().string(), std::string{"b.txt"});
+    EXPECT_TRUE(ed.jumps->AtNewest());
+
+    // Which is the whole point of clearing it: the step back from there records
+    // b.txt and comes back to the place the jump left.
+    StepJump(ed, false);
+    EXPECT_EQ(ed.doc.file.filename().string(), std::string{"a.txt"});
+    EXPECT_EQ(LineAt(ed.doc.table, Cur(ed)), Index{1});
   }
 
   RemoveAllQuietly(dir);
