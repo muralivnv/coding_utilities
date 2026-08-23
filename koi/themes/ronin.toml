@@ -10,28 +10,32 @@
 "function.macro"            = { fg = "light_yellow"                            }
 "preproc_ifdef"             = { fg = "light_yellow"                            }
 "keyword"                   = { fg = "white"                                   }
-"keyword.control"           = { fg = "red"                                     }
-"keyword.control.import"    = { fg = "red"                                     }
-"keyword.control.exception" = { fg = "red"                                     }
-"keyword.operator"          = { fg = "red"                                     }
-"keyword.control.return"    = { fg = "lightsalmon", modifiers=["underlined"]   }
+# Keywords are plain: indentation already shows the structure. Red is for the
+# ones that leave the block -- the jumps and return -- which is also where
+# rust's query files break/continue (under keyword.control.return).
+"keyword.control"           = { fg = "white"                                   }
+"keyword.control.import"    = { fg = "white"                                   }
+"keyword.control.exception" = { fg = "white", modifiers = ["underlined"]       }
+"keyword.control.jump"      = { fg = "red"                                     }
+"keyword.operator"          = { fg = "white"                                   }
+"keyword.control.return"    = { fg = "red", modifiers=["underlined"]           }
 "keyword.directive"         = { fg = "white"                                   }
-"keyword.storage.modifier"  = { fg = "red"                                     }
+"keyword.storage.modifier"  = { fg = "white"                                   }
 "label"                     = { fg = "white"                                   }
 "namespace"                 = { fg = "white"                                   }
-"operator"                  = { fg = "red"                                     }
+"operator"                  = { fg = "white"                                   }
 "special"                   = { fg = "white"                                   }
 "string"                    = { fg = "green"                                   }
 "type"                      = { fg = "cyan"                                    }
-"variable.builtin"          = { fg = "red"                                     }
+"variable.builtin"          = { fg = "white"                                   }
 "variable.parameter"        = { fg = "white"                                   }
 "variable.other.member"     = { fg = "white"                                   }
-"variable.other.enummember" = { fg = "red"                                     }
+"variable.other.enummember" = { fg = "white"                                   }
 "variable"                  = { fg = "white"                                   }
 "punctuation"               = { fg = "white"                                   }
-"punctuation.special"       = { fg = "red"                                     }
+"punctuation.special"       = { fg = "white"                                   }
 
-"markup.heading"            = { fg = "red"   , modifiers = ["bold"]            }
+"markup.heading"            = { fg = "gold"  , modifiers = ["bold"]            }
 "markup.raw.inline"         = { fg = "green"                                   }
 "markup.raw.block"          = { fg = "white"                                   }
 "markup.bold"               = { fg = "gold"  , modifiers = ["bold"]            }
@@ -92,13 +96,18 @@
 "ui.text"                   = { fg = "white"                                   }
 "ui.text.focus"             = { fg = "white", bg = "#404040"                   }
 
-"ui.help"                   = { fg = "white", bg = "#282928"                   }
-"ui.popup"                  = { bg = "#282928"                                 }
-"ui.window"                 = { fg = "white"                                   }
-"ui.menu"                   = { fg = "white", bg = "#282928"                   }
-"ui.menu.selected"          = { fg = "black", bg = "red"                       }
+# Floating surfaces separate by a lighter fill, not by the border stroke: the
+# higher a surface sits, the lighter it is, and the frame around it stays
+# quieter than the text inside it.
+"ui.help"                   = { fg = "white", bg = "#363634"                   }
+"ui.popup"                  = { bg = "#363634"                                 }
+"ui.window"                 = { fg = "#5a5a5a"                                 }
+"ui.menu"                   = { fg = "white", bg = "#363634"                   }
+"ui.menu.selected"          = { fg = "dark", bg = "cyan"                       }
 "ui.menu.scroll"            = { fg = "white", bg = "#474B43A4"                 }
 
+# red marks what leaves or breaks: error, diff.minus, the two match scopes,
+# and the control-flow exits. Nothing that merely sits on the line wears it.
 [palette]
 light_yellow = "#ffce78"
 red          = "#ff8665"
@@ -107,8 +116,5 @@ cyan         = "#65B0B2"
 white        = "#bfbfbf"
 dark         = "#252524"
 moss_green   = "#58865A"
-black        = "#16181A"
-light_gray   = "#636C6E"
+light_gray   = "#8a938f"
 gold         = "#D19A66"
-navajowhite  = "#ffdead"
-lightsalmon  = "#ffa07a"

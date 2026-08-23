@@ -207,3 +207,15 @@
    "__VA_ARGS__" "__VA_OPT__" "__cplusplus"))
 
 (comment) @comment
+
+; koi additions. Above this marker is the file as it was vendored; below it is
+; koi's own. Later and narrower wins in PaintTree, so these recaptures override
+; the vendored ones for the same nodes.
+;
+; The jump keywords leave the block they sit in, which is what makes them worth
+; a mark when everything else in keyword.control went quiet.
+[
+  "goto"
+  "break"
+  "continue"
+] @keyword.control.jump

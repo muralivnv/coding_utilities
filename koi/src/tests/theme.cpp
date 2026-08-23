@@ -30,12 +30,14 @@ void Themes() {
 
   const Style keyword = theme.Get("keyword.control");
   EXPECT_TRUE(keyword.fg.set);
-  EXPECT_EQ(keyword.fg.rgb, 0xFF8665u);
+  EXPECT_EQ(keyword.fg.rgb, 0xBFBFBFu);
+  EXPECT_TRUE((keyword.mods & kModUnderlined) == 0);
 
   const Style ret = theme.Get("keyword.control.return");
-  EXPECT_EQ(ret.fg.rgb, 0xFFA07Au);
+  EXPECT_EQ(ret.fg.rgb, 0xFF8665u);
   EXPECT_TRUE((ret.mods & kModUnderlined) != 0);
-  EXPECT_EQ(theme.Get("keyword.control.conditional").fg.rgb, 0xFF8665u);
+  EXPECT_EQ(theme.Get("keyword.control.jump").fg.rgb, 0xFF8665u);
+  EXPECT_EQ(theme.Get("keyword.control.conditional").fg.rgb, 0xBFBFBFu);
 
   EXPECT_TRUE(!theme.Get("nonsense.scope").fg.set);
 

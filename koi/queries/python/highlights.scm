@@ -328,3 +328,13 @@
   left: (identifier) @type.definition
   type: (type (identifier) @_ann))
  (#eq? @_ann "TypeAlias"))
+
+; koi additions. Above this marker is the file as it was vendored; below it is
+; koi's own. Later and narrower wins in PaintTree, so these recaptures override
+; the vendored ones for the same nodes.
+;
+; break/continue jump out of the loop the vendored query files them under.
+[
+  "break"
+  "continue"
+] @keyword.control.jump
