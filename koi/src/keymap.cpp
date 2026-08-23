@@ -707,7 +707,7 @@ pagedown = ["page_down", "align_view_center"]
 "=" = "increment_excerpt_context"
 "-" = "decrement_excerpt_context"
 
-h = ["smart_jump", "align_view_center"]
+h = "smart_jump"
 b = ["smart_jump_next", "align_view_center"]
 B = ["smart_jump_prev", "align_view_center"]
 

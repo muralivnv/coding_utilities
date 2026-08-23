@@ -562,6 +562,7 @@ int Run(const char* arg, std::optional<std::string> piped) {
       // caret or the view, and a capture armed by a key does not survive it.
       drop_pending_input();
       ed.status.clear();
+      ed.jump_branch = false;
 
       const bool motion = (ev.mod & TB_MOD_MOTION) != 0;
 

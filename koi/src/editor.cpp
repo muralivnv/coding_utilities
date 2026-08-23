@@ -1470,7 +1470,9 @@ std::string_view PromptSigil(const Editor& ed) {
     case PromptKind::kSearch: return "/";
     case PromptKind::kSelectRegex: return "select:";
     case PromptKind::kSearchExcerpts: return "search:";
-    case PromptKind::kSmartJump: return "jump:";
+    // The jera rune -- the j -- where the box has no room for a word. Icons
+    // off falls back to the word.
+    case PromptKind::kSmartJump: return ed.settings.icons ? "ᛃ " : "jump:";
     case PromptKind::kCommand: break;
   }
   return ":";
@@ -1582,6 +1584,33 @@ std::string DisplayPath(const fs::path& path) {
   return shown.string();
 }
 
+FlatStatus FlattenStatus(std::string_view text, std::size_t target_from,
+                         std::size_t target_len) {
+  FlatStatus out;
+  const std::size_t target_to = target_from + target_len;
+  std::string* last = &out.before;
+  bool space = false;
+  bool any = false;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    if ((c == '\n') || (c == '\r') || (c == '\t') || (c == ' ')) {
+      space = any;
+      continue;
+    }
+    // A collapsed space stays in the piece before it, so a mark that starts
+    // on a word starts its piece on that word.
+    std::string& piece = ((target_len == 0) || (i < target_from)) ? out.before
+                         : (i < target_to)                        ? out.target
+                                                                  : out.after;
+    if (space) *last += ' ';
+    space = false;
+    any = true;
+    piece += c;
+    last = &piece;
+  }
+  return out;
+}
+
 StatusLine StatusBar(const Editor& ed, bool focused) {
   return StatusBar(ed, ed.doc, ed.doc.selections, ed.active, focused);
 }
@@ -1656,7 +1685,12 @@ StatusLine StatusBar(const Editor& ed, const Document& doc, const SelectionSet& 
   // between two keystrokes. Only the focused pane's bar: the hint belongs to
   // the pane the labels are drawn in.
   const std::string_view hint = focused ? LeapHint(ed) : std::string_view{};
-  if (focused && (!hint.empty() || !ed.status.empty())) {
+  // The smart-jump box hangs the match feedback under itself, and an arrival
+  // hangs its branch row off the caret; the bar saying either would say
+  // everything twice.
+  const bool branch_has_it =
+      (ed.prompt_active && (ed.prompt_kind == PromptKind::kSmartJump)) || ed.jump_branch;
+  if (focused && (!hint.empty() || (!branch_has_it && !ed.status.empty()))) {
     const StatusLevel level = hint.empty() ? ed.status.level() : StatusLevel::kInfo;
     const StatusTone tone = (level == StatusLevel::kError)     ? StatusTone::kError
                             : (level == StatusLevel::kWarning) ? StatusTone::kWarning
@@ -1664,23 +1698,17 @@ StatusLine StatusBar(const Editor& ed, const Document& doc, const SelectionSet& 
     const std::string& mark = (level == StatusLevel::kError)     ? s.icon_error
                               : (level == StatusLevel::kWarning) ? s.icon_warning
                                                                  : s.icon_info;
-    const std::string_view said = hint.empty() ? std::string_view{ed.status.text()} : hint;
-    std::string flat;
-    flat.reserve(said.size());
-    bool space = false;
-    for (const char c : said) {
-      if ((c == '\n') || (c == '\r') || (c == '\t') || (c == ' ')) {
-        space = !flat.empty();
-        continue;
-      }
-      if (space) flat += ' ';
-      space = false;
-      flat += c;
-    }
+    const FlatStatus flat = hint.empty() ? FlattenStatus(ed.status) : FlattenStatus(hint);
     out.message_from = out.left.size();
     add(out.left, "   ", StatusTone::kNormal);
-    const std::string prefix = glyph(mark);
-    add(out.left, prefix.empty() ? flat : (prefix + " " + flat), tone);
+    // The destination the message names is its own span, toned kNext, so a
+    // path in the feedback cannot be mistaken for the file the bar names.
+    std::string head = glyph(mark);
+    if (!head.empty() && !flat.empty()) head += " ";
+    head += flat.before;
+    add(out.left, head, tone);
+    add(out.left, flat.target, StatusTone::kNext);
+    add(out.left, flat.after, tone);
   }
 
   const auto dot = [&add, &out, &s]() {

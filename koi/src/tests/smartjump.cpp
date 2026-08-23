@@ -507,7 +507,10 @@ void SmartJumpFeedbackText() {
     press(fix.ed, "h");
     EXPECT_TRUE(fix.ed.prompt_active);
     EXPECT_TRUE(fix.ed.prompt_kind == PromptKind::kSmartJump);
+    EXPECT_EQ(std::string{PromptSigil(fix.ed)}, std::string{"ᛃ "});
+    fix.ed.settings.icons = false;
     EXPECT_EQ(std::string{PromptSigil(fix.ed)}, std::string{"jump:"});
+    fix.ed.settings.icons = true;
     // The snapshot is taken once, when the prompt opens.
     EXPECT_TRUE(fix.ed.smart_jump != nullptr);
     if (fix.ed.smart_jump == nullptr) return;
@@ -663,7 +666,7 @@ void SmartJumpLanding() {
     // its first hit, and stepping is the disambiguator.
     EXPECT_FALSE(IsExcerptView(fix.ed.doc));
     EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
-    EXPECT_TRUE(fix.ed.status.text().starts_with("jump 1/"));
+    EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 1/"));
     // Nothing is learnt until the arrival is stood in.
     EXPECT_EQ(Scalar(fix.db, "SELECT COUNT(*) FROM queries WHERE prefix='key'"), std::int64_t{0});
     fix.ed.record.pending_since -= kBounceSeconds + 1;
@@ -687,13 +690,16 @@ void SmartJumpLanding() {
   TEST_CASE("smart jump: the status names the line the landing healed to");
   {
     // The store says 212 and the landing goes where the anchor has drifted to.
-    // Both prints have to say the same number the cursor is on, or the status
-    // is a surprise dressed up as a promise. A lone match, because that is the
-    // one case where the status still names the row landed on -- with several
-    // it names the next one instead.
+    // Whatever names the row has to say the number the cursor is on, or the
+    // status is a surprise dressed up as a promise. A lone match lands in
+    // silence, so the naming is asked for with a step -- a walk of one names
+    // itself.
     SmartJumpSubmit(fix.ed, "c splitnode");
     EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"piece_tree.cpp"});
     EXPECT_EQ(fix.ed.smart_jump->matches.size(), std::size_t{1});
+    EXPECT_TRUE(fix.ed.status.empty());
+    EXPECT_FALSE(fix.ed.jump_branch);
+    SmartJumpStep(fix.ed, true);
     EXPECT_TRUE(fix.ed.status.text().find("piece_tree.cpp:212") != std::string::npos);
 
     Edit edit;
@@ -704,14 +710,13 @@ void SmartJumpLanding() {
     const Index landed =
         LineAt(fix.ed.doc.table, CursorOf(fix.ed.doc.table, fix.ed.doc.selections.Primary())) + 1;
     EXPECT_EQ(landed, Index{215});
-    EXPECT_TRUE(fix.ed.status.text().find("piece_tree.cpp:215") != std::string::npos);
-    EXPECT_TRUE(fix.ed.status.text().find("SplitNode(&node);") != std::string::npos);
+    EXPECT_TRUE(fix.ed.status.empty());
 
-    // And stepping back onto it says it too.
-    SmartJumpStep(fix.ed, true);
+    // And the step names the healed line, text and all.
     SmartJumpStep(fix.ed, true);
     EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"piece_tree.cpp"});
     EXPECT_TRUE(fix.ed.status.text().find("piece_tree.cpp:215") != std::string::npos);
+    EXPECT_TRUE(fix.ed.status.text().find("SplitNode(&node);") != std::string::npos);
   }
 }
 
@@ -778,41 +783,57 @@ void SmartJumpStepping() {
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
   EXPECT_EQ(fix.ed.smart_jump->matches.size(), std::size_t{3});
   // What the status names is where one more press goes, not the row under the
-  // cursor: match 2, from a landing on match 1.
-  EXPECT_TRUE(fix.ed.status.text().starts_with("jump 1/3  next koi/src/keylog.cpp"));
+  // cursor: match 2, from a landing on match 1. The destination alone carries
+  // the highlight mark, so the bar can dress it apart from the file name.
+  EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 1/3  koi/src/keylog.cpp"));
+  EXPECT_TRUE(fix.ed.status.target().starts_with("koi/src/keylog.cpp"));
+  // An arrival hangs its feedback off the caret rather than the bar.
+  EXPECT_TRUE(fix.ed.jump_branch);
 
   SmartJumpStep(fix.ed, true);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keylog.cpp"});
-  EXPECT_TRUE(fix.ed.status.text().starts_with("jump 2/3  next koi/src/tooey.cpp"));
+  EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 2/3  koi/src/tooey.cpp"));
 
   SmartJumpStep(fix.ed, true);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"tooey.cpp"});
-  // The end of the list, said as what the next press costs.
-  EXPECT_TRUE(fix.ed.status.text().starts_with("jump 3/3  next wraps to koi/src/keymap.cpp"));
+  // The end of the list, said as what the next press costs. The wrap words
+  // stay outside the mark.
+  EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 3/3  wraps to koi/src/keymap.cpp"));
+  EXPECT_TRUE(fix.ed.status.target().starts_with("koi/src/keymap.cpp"));
 
   SmartJumpStep(fix.ed, true);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
-  EXPECT_TRUE(fix.ed.status.text().starts_with("jump 1/3  next koi/src/keylog.cpp"));
+  EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 1/3  koi/src/keylog.cpp"));
   EXPECT_TRUE(fix.ed.status.text().find("wrapped to the top") != std::string::npos);
 
   SmartJumpStep(fix.ed, false);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"tooey.cpp"});
   // Direction-aware: prev from the last row names the row behind it, which is
   // the one prev would give again.
-  EXPECT_TRUE(fix.ed.status.text().starts_with("jump 3/3  next koi/src/keylog.cpp"));
+  EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 3/3  koi/src/keylog.cpp"));
   EXPECT_TRUE(fix.ed.status.text().find("wrapped to the bottom") != std::string::npos);
 
   // And prev from the top wraps the other way.
   SmartJumpStep(fix.ed, false);
   SmartJumpStep(fix.ed, false);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
-  EXPECT_TRUE(fix.ed.status.text().starts_with("jump 1/3  next wraps to koi/src/tooey.cpp"));
+  EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 1/3  wraps to koi/src/tooey.cpp"));
 
   // A new query replaces the list outright.
   SmartJumpSubmit(fix.ed, "piece");
   EXPECT_EQ(fix.ed.smart_jump->matches.size(), std::size_t{1});
   SmartJumpStep(fix.ed, true);
-  EXPECT_TRUE(fix.ed.status.text().starts_with("jump 1/1"));
+  EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 1/1"));
+
+  // The branch lives for exactly one decision: the first key that is not a
+  // step buries it, message and all.
+  EXPECT_TRUE(fix.ed.jump_branch);
+  {
+    PressKey press;
+    press(fix.ed, "esc");
+  }
+  EXPECT_FALSE(fix.ed.jump_branch);
+  EXPECT_TRUE(fix.ed.status.empty());
 
   TEST_CASE("smart jump: the next destination's line is healed too");
   {
@@ -826,14 +847,14 @@ void SmartJumpStepping() {
 
     SmartJumpSubmit(heal.ed, "c splitnode");
     EXPECT_EQ(heal.ed.doc.file.filename().string(), std::string{"piece_tree.cpp"});
-    EXPECT_TRUE(heal.ed.status.text().starts_with("jump 1/2  next koi/src/piece_tree.cpp:250"));
+    EXPECT_TRUE(heal.ed.status.text().starts_with("ᛃ 1/2  koi/src/piece_tree.cpp:250"));
 
     Edit edit;
     ExpectOk(Insert("one\ntwo\nthree\n", LineStart(heal.ed.doc.table, 0), heal.ed.doc.table, &edit),
              "three lines above both anchors");
 
     SmartJumpSubmit(heal.ed, "c splitnode");
-    EXPECT_TRUE(heal.ed.status.text().starts_with("jump 1/2  next koi/src/piece_tree.cpp:253"));
+    EXPECT_TRUE(heal.ed.status.text().starts_with("ᛃ 1/2  koi/src/piece_tree.cpp:253"));
   }
 
   TEST_CASE("smart jump: a dead end takes the list with it");

@@ -2584,6 +2584,12 @@ void SearchPreviewJump(Editor& ed) {
 
 void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector<Key>& pending) {
   ed.status_overlay = false;
+  // The branch row lives for exactly one decision: press again or stay. Any
+  // key buries it -- a step or a landing sets it right back below.
+  if (ed.jump_branch) {
+    ed.jump_branch = false;
+    ed.status.clear();
+  }
 
   Recording recording{ed, key, pending};
 

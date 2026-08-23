@@ -87,6 +87,9 @@
 "ui.statusline.normal"   = { fg = "#252524", bg = "#8EC87C" }  # the NOR block
 "ui.statusline.insert"   = { fg = "#252524", bg = "#D19A66" }  # the INS block
 "ui.virtual.jump-label"  = { fg = "#252524", bg = "#FFCE78", modifiers = ["bold"] }
+"ui.jump.next"           = { fg = "#8EC87C" }  # the destination a smart-jump
+                                               # message names, on the bar and
+                                               # under the prompt box
 #                                              # the keys `leap` paints over its
 #                                              # targets. One cell each, over
 #                                              # the text, so it wants a

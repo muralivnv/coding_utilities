@@ -47,6 +47,7 @@ struct Palette {
   Style wrap;
   Style whitespace;
   Style jump_label;
+  Style jump_next;
 };
 
 Palette Resolve(const Theme& theme) {
@@ -73,6 +74,7 @@ Palette Resolve(const Theme& theme) {
   ui.wrap = theme.Get("ui.virtual.wrap");
   ui.whitespace = theme.Get("ui.virtual.whitespace");
   ui.jump_label = theme.Get("ui.virtual.jump-label");
+  ui.jump_next = theme.Get("ui.jump.next");
   return ui;
 }
 
@@ -285,6 +287,7 @@ void DrawStatus(const Editor& ed, const PaneRef& pane, const Palette& ui, int y,
       case StatusTone::kError: return severity(ui.status_error);
       case StatusTone::kWarning: return severity(ui.status_warning);
       case StatusTone::kInfo: return severity(ui.status_info);
+      case StatusTone::kNext: return severity(ui.jump_next);
       case StatusTone::kNormal: break;
     }
     return {bar_fg, bar_bg};
@@ -567,7 +570,10 @@ struct Panes {
 };
 
 Panes PanesOf(const Editor& ed, int width, int height) {
-  const int prompt_rows = ed.prompt_active ? 1 : 0;
+  // The smart-jump prompt draws at the caret, so it takes no row and opening
+  // it reflows nothing.
+  const int prompt_rows =
+      (ed.prompt_active && (ed.prompt_kind != PromptKind::kSmartJump)) ? 1 : 0;
   const Rect screen{0, 0, width, std::max(0, height - prompt_rows)};
   return Panes{screen, LayoutWindows(ed, screen), WindowOrder(ed)};
 }
@@ -992,6 +998,179 @@ void DrawCompletions(const Editor& ed, const Palette& ui, int width, int height)
   }
 }
 
+// A command or a pattern can be longer than its row is wide, so the row is a
+// window onto it and scrolls the way a pane does: the sigil holds the first
+// columns the way a gutter does, the input scrolls beside it, and the window
+// moves only far enough to hold the caret -- which keeps the text on both
+// sides of a mid-string caret up instead of snapping to the end. `width` is
+// the columns available from `x0`; the terminal cursor lands on the caret.
+void DrawPromptInput(Editor& ed, const Palette& ui, int x0, int y, int width, Attr fg,
+                     Attr bg) {
+  const std::string sigil{PromptSigil(ed)};
+  const std::string& shown = ed.prompt_input;
+
+  const int gutter = std::min(width, DisplayWidthOf(sigil));
+  DrawText(x0, y, x0 + gutter, sigil, fg, bg);
+
+  const std::size_t caret_at = std::min(ed.prompt_cursor, shown.size());
+  const int caret_column = DisplayWidthOf(std::string_view{shown}.substr(0, caret_at));
+  const int room = std::max(1, width - gutter);
+  int& scroll = ed.prompt_scroll;
+  if (scroll > caret_column) scroll = caret_column;
+  if (caret_column >= (scroll + room)) scroll = caret_column - room + 1;
+  scroll = std::clamp(scroll, 0, std::max(0, DisplayWidthOf(shown) - room + 1));
+
+  const int limit = x0 + width;
+  int x = x0 + gutter;
+  int column = 0;
+  size_t i = 0;
+  while ((x < limit) && (i < shown.size())) {
+    const size_t next = NextGraphemeInString(shown, i);
+    const std::string_view cluster{shown.data() + i, next - i};
+    const int cluster_width = std::max(1, GraphemeWidth(cluster));
+    if ((column + cluster_width) > scroll) {
+      if ((column < scroll) || ((x + cluster_width) > limit)) {
+        // Half of a wide glyph is not a glyph: a cluster hanging off either
+        // edge of the window is blanked, never split.
+        for (int step = std::max(0, scroll - column); (step < cluster_width) && (x < limit);
+             ++step) {
+          Cell(x++, y, ' ', fg, bg);
+        }
+      } else {
+        DrawCluster(x++, y, cluster, fg, bg);
+        for (int step = 1; step < cluster_width; ++step) Cell(x++, y, ' ', fg, bg);
+      }
+    }
+    column += cluster_width;
+    i = next;
+  }
+  while (x < limit) Cell(x++, y, ' ', fg, bg);
+  g_out->cursor_insert = true;
+  SetCursor(std::clamp(x0 + gutter + caret_column - scroll, x0, std::max(x0, limit - 1)), y);
+}
+
+// One feedback row: the branch glyph, then the message around its marked
+// destination, which wears ui.jump.next. A pad space each side, so the text
+// the row floats over never touches the glyphs. `bg` is the caller's: the
+// box's own interior under the box, chrome elsewhere.
+void DrawBranchRow(Editor& ed, const Palette& ui, const FlatStatus& said, int x0, int y,
+                   int width, bool below, Attr bg) {
+  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const StatusLevel level = ed.status.level();
+  const Style& sev = (level == StatusLevel::kError)     ? ui.status_error
+                     : (level == StatusLevel::kWarning) ? ui.status_warning
+                                                        : ui.status_info;
+  const Attr sfg = Fg(sev, ui) | Attrs(sev);
+  int x = DrawText(x0, y, width, " ", sfg, bg);
+  x = DrawText(x, y, width, below ? "╰─▸ " : "╭─▸ ", border, bg);
+  x = DrawText(x, y, width, said.before, sfg, bg);
+  x = DrawText(x, y, width, said.target, Fg(ui.jump_next, ui) | Attrs(ui.jump_next), bg);
+  x = DrawText(x, y, width, said.after, sfg, bg);
+  DrawText(x, y, width, " ", sfg, bg);
+}
+
+// The smart-jump prompt sits at the caret instead of the bottom row: its loop
+// is type, read, decide, several times a second, and the status line is
+// peripheral to where the eyes already are. The box takes the rows below the
+// caret and flips above when below would reach the focused status line. The
+// match feedback hangs off the box on a branch row of its own, so the bar
+// never has to be read at all. False means neither side fits and the caller
+// keeps the bottom row.
+bool DrawPromptBox(Editor& ed, const Palette& ui, int caret_x, int caret_y,
+                   const Rect& content, int width) {
+  if ((caret_x < 0) || (caret_y < 0)) return false;
+
+  const int inner = std::min(width - 4, std::max(32, width / 3));
+  if (inner < 12) return false;
+  const int box_w = inner + 4;
+
+  // The feedback the bar would have shown, flattened the way the bar
+  // flattens it, the destination it names split out to wear its own colour.
+  const FlatStatus said = FlattenStatus(ed.status);
+  const int rows = 3 + (said.empty() ? 0 : 1);
+
+  const int status_y = content.y + std::max(0, content.h - 1);
+  const bool below = (caret_y + rows) < status_y;
+  const int y0 = below ? (caret_y + 1) : (caret_y - 3);
+  if (!below && ((y0 - (rows - 3)) < content.y)) return false;
+
+  const int x0 = std::clamp(caret_x - 2, 0, std::max(0, width - box_w));
+
+  const Attr bg = Bg(ui.popup, ui);
+  const Attr fg = Fg(ui.text, ui);
+  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+
+  const auto hline = [&](int y, std::string_view left, std::string_view mid,
+                         std::string_view right) {
+    Put(x0, y, left, border, bg);
+    for (int x = 1; x < (box_w - 1); ++x) Put(x0 + x, y, mid, border, bg);
+    Put(x0 + box_w - 1, y, right, border, bg);
+  };
+  hline(y0, "╭", "─", "╮");
+  for (int x = 0; x < box_w; ++x) Cell(x0 + x, y0 + 1, ' ', fg, bg);
+  Put(x0, y0 + 1, "│", border, bg);
+  Put(x0 + box_w - 1, y0 + 1, "│", border, bg);
+  DrawPromptInput(ed, ui, x0 + 2, y0 + 1, inner, fg, bg);
+  hline(y0 + 2, "╰", "─", "╯");
+
+  // The branch hangs below the box, and climbs out of its top when the box
+  // flipped above the caret.
+  if (!said.empty()) {
+    DrawBranchRow(ed, ui, said, x0 + 1, below ? (y0 + 3) : (y0 - 1), width, below, bg);
+  }
+  return true;
+}
+
+// A smart-jump arrival answers the walk's only question -- press again or
+// stay -- right where the eyes are: the prompt's rounded box at the caret,
+// sized to what it holds, naming where the next press goes. Below the caret,
+// above when below would reach the status line. A bare row was tried first
+// and read as part of the code it floated over; the border is what keeps it
+// apart. No room, or no caret to hang from, and it does not draw --
+// :messages keeps what it would have said.
+void DrawJumpBranch(Editor& ed, const Palette& ui, int caret_x, int caret_y,
+                    const Rect& content, int width) {
+  if ((caret_x < 0) || (caret_y < 0)) return;
+  const FlatStatus said = FlattenStatus(ed.status);
+  if (said.empty()) return;
+
+  const int text_w =
+      DisplayWidthOf(said.before) + DisplayWidthOf(said.target) + DisplayWidthOf(said.after);
+  const int box_w = std::min(width, text_w + 4);
+  if (box_w < 8) return;
+
+  const int status_y = content.y + std::max(0, content.h - 1);
+  int y0 = caret_y + 1;
+  if ((y0 + 2) >= status_y) y0 = caret_y - 3;
+  if (y0 < content.y) return;
+
+  const int x0 = std::clamp(caret_x - 2, 0, std::max(0, width - box_w));
+
+  const Attr bg = Bg(ui.popup, ui);
+  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const StatusLevel level = ed.status.level();
+  const Style& sev = (level == StatusLevel::kError)     ? ui.status_error
+                     : (level == StatusLevel::kWarning) ? ui.status_warning
+                                                        : ui.status_info;
+  const Attr sfg = Fg(sev, ui) | Attrs(sev);
+
+  const auto hline = [&](int y, std::string_view left, std::string_view mid,
+                         std::string_view right) {
+    Put(x0, y, left, border, bg);
+    for (int x = 1; x < (box_w - 1); ++x) Put(x0 + x, y, mid, border, bg);
+    Put(x0 + box_w - 1, y, right, border, bg);
+  };
+  hline(y0, "╭", "─", "╮");
+  for (int x = 0; x < box_w; ++x) Cell(x0 + x, y0 + 1, ' ', sfg, bg);
+  Put(x0, y0 + 1, "│", border, bg);
+  Put(x0 + box_w - 1, y0 + 1, "│", border, bg);
+  const int limit = x0 + box_w - 2;
+  int x = DrawText(x0 + 2, y0 + 1, limit, said.before, sfg, bg);
+  x = DrawText(x, y0 + 1, limit, said.target, Fg(ui.jump_next, ui) | Attrs(ui.jump_next), bg);
+  DrawText(x, y0 + 1, limit, said.after, sfg, bg);
+  hline(y0 + 2, "╰", "─", "╯");
+}
+
 void RenderInto(Editor& ed, int width, int height) {
   const Palette ui = Resolve(ed.theme);
 
@@ -1010,6 +1189,7 @@ void RenderInto(Editor& ed, int width, int height) {
 
   int caret_x = -1;
   int caret_y = -1;
+  Rect focused_content{0, 0, width, height};
   bool status_clipped = false;
 
   // Not over a leap: the popup is drawn after the panes and would cover labels
@@ -1047,6 +1227,7 @@ void RenderInto(Editor& ed, int width, int height) {
 
     const int text_w = TextWidthOf(area, width);
     const Rect content = PaneContent(ed, area, width);
+    if (pane.focused) focused_content = content;
     g_clip = Clip{content.x, content.y, content.w, content.h};
     int pane_x = -1;
     int pane_y = -1;
@@ -1071,56 +1252,18 @@ void RenderInto(Editor& ed, int width, int height) {
   ed.status_overlay =
       overlay_takes_message && status_clipped && DrawStatusOverlay(ed, ui, width, height);
 
+  if (ed.jump_branch && !ed.prompt_active) {
+    DrawJumpBranch(ed, ui, caret_x, caret_y, focused_content, width);
+  }
+
   if (ed.prompt_active) {
     DrawCompletions(ed, ui, width, height);
-    const int y = height - 1;
-    const std::string sigil{PromptSigil(ed)};
-    const std::string& shown = ed.prompt_input;
-    const Attr fg = Fg(ui.text, ui);
-    const Attr bg = Bg(ui.background, ui);
-
-    // A command or a pattern can be longer than the terminal is wide, so the
-    // row is a window onto it and scrolls the way a pane does: the sigil holds
-    // column 0 the way a gutter does, the input scrolls beside it, and the
-    // window moves only far enough to hold the caret -- which keeps the text
-    // on both sides of a mid-string caret up instead of snapping to the end.
-    const int gutter = std::min(width, DisplayWidthOf(sigil));
-    DrawText(0, y, gutter, sigil, fg, bg);
-
-    const std::size_t caret_at = std::min(ed.prompt_cursor, shown.size());
-    const int caret_column = DisplayWidthOf(std::string_view{shown}.substr(0, caret_at));
-    const int room = std::max(1, width - gutter);
-    int& scroll = ed.prompt_scroll;
-    if (scroll > caret_column) scroll = caret_column;
-    if (caret_column >= (scroll + room)) scroll = caret_column - room + 1;
-    scroll = std::clamp(scroll, 0, std::max(0, DisplayWidthOf(shown) - room + 1));
-
-    int x = gutter;
-    int column = 0;
-    size_t i = 0;
-    while ((x < width) && (i < shown.size())) {
-      const size_t next = NextGraphemeInString(shown, i);
-      const std::string_view cluster{shown.data() + i, next - i};
-      const int cluster_width = std::max(1, GraphemeWidth(cluster));
-      if ((column + cluster_width) > scroll) {
-        if ((column < scroll) || ((x + cluster_width) > width)) {
-          // Half of a wide glyph is not a glyph: a cluster hanging off either
-          // edge of the window is blanked, never split.
-          for (int step = std::max(0, scroll - column); (step < cluster_width) && (x < width);
-               ++step) {
-            Cell(x++, y, ' ', fg, bg);
-          }
-        } else {
-          DrawCluster(x++, y, cluster, fg, bg);
-          for (int step = 1; step < cluster_width; ++step) Cell(x++, y, ' ', fg, bg);
-        }
-      }
-      column += cluster_width;
-      i = next;
+    const bool at_caret =
+        (ed.prompt_kind == PromptKind::kSmartJump) &&
+        DrawPromptBox(ed, ui, caret_x, caret_y, focused_content, width);
+    if (!at_caret) {
+      DrawPromptInput(ed, ui, 0, height - 1, width, Fg(ui.text, ui), Bg(ui.background, ui));
     }
-    while (x < width) Cell(x++, y, ' ', fg, bg);
-    g_out->cursor_insert = true;
-    SetCursor(std::clamp(gutter + caret_column - scroll, 0, std::max(0, width - 1)), y);
   } else {
     g_out->cursor_insert = (ed.mode == Mode::kInsert);
     if ((ed.mode == Mode::kInsert) && (caret_x >= 0) && (caret_y >= 0)) {

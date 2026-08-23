@@ -710,6 +710,22 @@ void StatusSeverity() {
     EXPECT_TRUE(text.find("first line second line third") != std::string::npos);
   }
 
+  // A marked destination is its own span, toned apart from the words around
+  // it, and the whole message still reads back in order. Cleared first: a
+  // plain assignment keeps the level the last Fail left behind.
+  ed.status.clear();
+  ed.status = "jump 1/9  next koi/CMakeLists.txt";
+  ed.status.Highlight(15, 18);
+  {
+    const StatusLine bar = StatusBar(ed);
+    EXPECT_TRUE(joined(bar.left, StatusTone::kNext) == std::string{"koi/CMakeLists.txt"});
+    EXPECT_TRUE(joined(bar.left, StatusTone::kInfo).find("jump 1/9 next") != std::string::npos);
+    EXPECT_TRUE(all(bar.left).find("jump 1/9 next koi/CMakeLists.txt") != std::string::npos);
+  }
+  // The mark belongs to the message it was set on.
+  ed.status = "plain";
+  EXPECT_TRUE(joined(StatusBar(ed).left, StatusTone::kNext).empty());
+
   ed.status.clear();
   ed.doc.file = "some/deep/dir/thing.cpp";
   {

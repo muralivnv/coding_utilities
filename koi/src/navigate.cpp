@@ -4005,8 +4005,14 @@ bool LandSmartJump(Editor& ed, const SmartMatch& match, Index column, Index& lan
 // shadow when the row belongs to it -- which is the common case, a second line
 // in the file just opened -- and the stored line otherwise, which is the best
 // that is known without opening the file.
+// The stepping status wears the rune the prompt does, spelled out only with
+// icons off.
+std::string SmartJumpBadge(const Editor& ed) {
+  return ed.settings.icons ? "ᛃ " : "jump ";
+}
+
 std::string SmartNextSaid(Editor& ed, const std::vector<SmartMatch>& matches, std::size_t at,
-                          bool forward) {
+                          bool forward, std::size_t* target_from = nullptr) {
   const auto count = static_cast<std::ptrdiff_t>(matches.size());
   if (count < 2) return {};
   const std::ptrdiff_t step = static_cast<std::ptrdiff_t>(at) + (forward ? 1 : -1);
@@ -4015,8 +4021,13 @@ std::string SmartNextSaid(Editor& ed, const std::vector<SmartMatch>& matches, st
   Index line = next.line;
   AnchorShadowLine(ed, ed.doc, next.row_id, line);
   // The end of the list, said as what it costs: one more press is the top of
-  // the list again, not a new place.
-  return (wraps ? "next wraps to " : "next ") + SmartDisplayAt(next, line);
+  // the list again, not a new place. Bare otherwise -- the branch row's whole
+  // meaning is "the next press", so the word would only repeat the glyph.
+  // `target_from` gets the offset of the destination itself, for the caller
+  // to mark.
+  const std::string head = wraps ? "wraps to " : "";
+  if (target_from != nullptr) *target_from = head.size();
+  return head + SmartDisplayAt(next, line);
 }
 
 // One accepted arrival: the jump, the query credited for having found it, and
@@ -4057,6 +4068,10 @@ void SmartJumpPrompt(Editor& ed) {
   const std::string again = ed.record.pending ? ed.record.pending_query : std::string{};
   DropSmartJumpArrival(ed);
   PromptOpen(ed, PromptKind::kSmartJump);
+  // The caret box hangs whatever ed.status holds off itself as its feedback
+  // row, so a message left over from before the prompt would read as an answer
+  // to a query not yet typed. An empty query previews to nothing; start there.
+  ed.status.clear();
   // The whole corpus, once, here. Every keystroke after this re-scores it in
   // full and touches nothing else -- no disk, no parser, no subprocess.
   SmartJumpState& state = SmartJumpStateOf(ed);
@@ -4095,10 +4110,10 @@ void SmartJumpPreview(Editor& ed) {
   SmartJumpState& state = *ed.smart_jump;
   const SmartQuery query = ParseSmartQuery(ed.prompt_input);
   // The count and the best target with its line text, so that where Enter goes
-  // is visible before it is pressed. On the pane's status line, not in a box:
-  // there is one prompt in this editor and this is it. The summary and not the
-  // list: this runs on every keystroke and the rest of the ranking is strings
-  // nothing here reads.
+  // is visible before it is pressed. Into ed.status, which the caret box hangs
+  // off itself as its feedback row -- and the bar leaves alone while the
+  // prompt is up. The summary and not the list: this runs on every keystroke
+  // and the rest of the ranking is strings nothing here reads.
   const SmartSummary summary = SummariseSmartMatches(state.corpus, query, ed.project.get());
   // One match arms the auto-jump; every other count disarms it -- a parse
   // error, a term too short and a corpus that answered nothing all count zero.
@@ -4118,6 +4133,12 @@ void SmartJumpPreview(Editor& ed) {
     ed.status.clear();
   } else {
     ed.status = said;
+    // Where enter would land wears its own colour in the branch row, the way
+    // the stepping status paints it on the bar.
+    if (query.error.empty() && (summary.count > 0) && !summary.display.empty() &&
+        said.ends_with(summary.display)) {
+      ed.status.Highlight(said.size() - summary.display.size(), summary.display.size());
+    }
   }
 }
 
@@ -4166,12 +4187,22 @@ void SmartJumpSubmit(Editor& ed, std::string_view line) {
   const std::size_t count = state.matches.size();
   Index landed = 0;
   if (AcceptSmartJump(ed, 0, landed)) {
-    // One match names itself, because there is nowhere else to go. Several name
-    // the second one: the first is under the cursor, and what is worth saying
-    // is where smart_jump_next would take you from it.
-    ed.status = (count == 1) ? SmartDisplayAt(state.matches.front(), landed)
-                             : ("jump 1/" + std::to_string(count) + "  " +
-                                SmartNextSaid(ed, state.matches, 0, true));
+    // A lone match lands in silence: the cursor arriving is the whole answer,
+    // and a box naming the place it already stands -- after an auto-jump
+    // especially -- would be noise. Several leave the walk's box at the
+    // caret, naming the second: the first is under the cursor, and what is
+    // worth saying is where smart_jump_next would take you from it.
+    if (count == 1) {
+      ed.status.clear();
+      ed.jump_branch = false;
+    } else {
+      std::size_t dest = 0;
+      const std::string said = SmartNextSaid(ed, state.matches, 0, true, &dest);
+      const std::string head = SmartJumpBadge(ed) + "1/" + std::to_string(count) + "  ";
+      ed.status = head + said;
+      if (!said.empty()) ed.status.Highlight(head.size() + dest, said.size() - dest);
+      ed.jump_branch = true;
+    }
   }
 }
 
@@ -4208,12 +4239,17 @@ void SmartJumpStep(Editor& ed, bool forward) {
   // Where the next press goes, not where this one landed -- and for a list of
   // one there is no next, so that one names itself. The wrap note is about the
   // step just taken; "next wraps to" is about the one after it.
+  std::size_t dest = 0;
   const std::string said = (count == 1) ? SmartDisplayAt(match, at_line)
-                                        : SmartNextSaid(ed, state.matches, landed, forward);
-  ed.status = "jump " + std::to_string(landed + 1) + "/" + std::to_string(count) + "  " + said +
+                                        : SmartNextSaid(ed, state.matches, landed, forward, &dest);
+  const std::string head =
+      SmartJumpBadge(ed) + std::to_string(landed + 1) + "/" + std::to_string(count) + "  ";
+  ed.status = head + said +
               ((!wrapped || (count == 1)) ? ""
                : forward                  ? " -- wrapped to the top"
                                           : " -- wrapped to the bottom");
+  if (!said.empty()) ed.status.Highlight(head.size() + dest, said.size() - dest);
+  ed.jump_branch = true;
 }
 
 

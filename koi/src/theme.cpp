@@ -287,6 +287,7 @@ Theme BuiltinTheme() {
   set("ui.cursor.primary", Style{rgb(0x65B0B2), {}, kModReversed});
   set("ui.cursor.match", Style{{}, rgb(0x6C4E1E), 0});
   set("ui.virtual.jump-label", Style{rgb(0x252524), rgb(0xFFCE78), kModBold});
+  set("ui.jump.next", Style{rgb(0x8EC87C), {}, 0});
   set("ui.excerpt.header", Style{rgb(0xD19A66), {}, kModBold});
   set("ui.excerpt.match", Style{rgb(0xEF2929), {}, kModBold});
   set("ui.statusline", Style{rgb(0xBFBFBF), rgb(0x313131), 0});
@@ -313,6 +314,7 @@ std::vector<std::string_view> UiScopes() {
       "ui.excerpt.header",  "ui.excerpt.match",
       "ui.statusline",       "ui.statusline.normal", "ui.statusline.insert",
       "ui.virtual.wrap",     "ui.virtual.whitespace", "ui.virtual.jump-label",
+      "ui.jump.next",
   };
 }
 

@@ -725,6 +725,150 @@ void Rendering() {
     }
   }
 
+  TEST_CASE("render: the smart-jump prompt is a box at the caret, not the bottom row");
+  {
+    Editor ed;
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\ncharlie\ndelta\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kSmartJump);
+    PromptInsert(ed, "na");
+
+    const Surface frame = draw(ed, 60, 16);
+
+    // Caret on row 0: borders on rows 1 and 3, the rune sigil and the input
+    // between them, the terminal cursor inside the box.
+    EXPECT_TRUE(frame.Row(1).find("╭") != std::string::npos);
+    EXPECT_TRUE(frame.Row(2).find("ᛃ na") != std::string::npos);
+    EXPECT_TRUE(frame.Row(3).find("╰") != std::string::npos);
+    EXPECT_TRUE(frame.cursor_visible);
+    EXPECT_EQ(frame.cursor_y, 2);
+
+    // The bottom row keeps being the status line: no reserved prompt row, so
+    // opening the prompt reflows nothing.
+    EXPECT_TRUE(frame.Row(frame.height - 1).find("ᛃ") == std::string::npos);
+    EXPECT_TRUE(frame.Row(frame.height - 1).find("1:1") != std::string::npos);
+  }
+
+  TEST_CASE("render: the box hangs the match feedback off itself and the bar stays quiet");
+  {
+    Editor ed;
+    // The builtin theme, so ui.jump.next resolves to its own colour rather
+    // than every foreground falling back to the terminal default together.
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\ncharlie\ndelta\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kSmartJump);
+    PromptInsert(ed, "na");
+    ed.status = "12 zz/yy.cpp";
+    ed.status.Highlight(3, 9);
+
+    const Surface frame = draw(ed, 60, 16);
+    EXPECT_TRUE(frame.Row(4).find("╰─▸ 12 zz/yy.cpp") != std::string::npos);
+    EXPECT_TRUE(frame.Row(frame.height - 1).find("zz/yy.cpp") == std::string::npos);
+
+    // The marked destination wears ui.jump.next, apart from the count.
+    int digit_x = -1;
+    int path_x = -1;
+    for (int x = 0; x < frame.width; ++x) {
+      const std::string& t = frame.At(x, 4).text;
+      if ((digit_x < 0) && (t == "1")) digit_x = x;
+      if ((path_x < 0) && (t == "z")) path_x = x;
+    }
+    EXPECT_TRUE((digit_x >= 0) && (path_x >= 0));
+    EXPECT_TRUE(frame.At(path_x, 4).fg != frame.At(digit_x, 4).fg);
+  }
+
+  TEST_CASE("render: the box flips above a caret near the floor, branch out of its top");
+  {
+    Editor ed;
+    std::string text;
+    for (int i = 0; i < 40; ++i) text += "line\n";
+    ResetToOriginal(ed.doc.table, text);
+    const Index end = DocLength(ed.doc.table);
+    ed.doc.selections.Set(Selection{end, end, -1});
+    PromptOpen(ed, PromptKind::kSmartJump);
+    PromptInsert(ed, "na");
+    ed.status = "12 zz/yy.cpp";
+
+    // Caret in the scrolloff band off the floor: the box takes the rows above
+    // it, the feedback climbing out of the top border instead of hanging
+    // below, where the rows the branch would take belong to the caret and the
+    // status line.
+    const Surface frame = draw(ed, 60, 16);
+    const int input_y = frame.cursor_y;
+    EXPECT_TRUE(input_y >= 3);
+    EXPECT_TRUE(frame.Row(input_y).find("ᛃ na") != std::string::npos);
+    EXPECT_TRUE(frame.Row(input_y - 2).find("╭─▸ 12 zz/yy.cpp") != std::string::npos);
+    EXPECT_TRUE(frame.Row(input_y + 2).find("▸") == std::string::npos);
+  }
+
+  TEST_CASE("render: no room by the caret and the smart-jump prompt keeps the bottom row");
+  {
+    Editor ed;
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kSmartJump);
+    PromptInsert(ed, "na");
+
+    const Surface frame = draw(ed, 40, 4);
+    EXPECT_TRUE(frame.Row(3).find("ᛃ na") != std::string::npos);
+    EXPECT_EQ(frame.cursor_y, 3);
+  }
+
+  TEST_CASE("render: an arrival's feedback is the rounded box at the caret, bar quiet");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\ncharlie\ndelta\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    ed.status = "12 zz/yy.cpp";
+    ed.status.Highlight(3, 9);
+    ed.jump_branch = true;
+
+    const Surface frame = draw(ed, 60, 12);
+    EXPECT_TRUE(frame.Row(1).find("╭") != std::string::npos);
+    EXPECT_TRUE(frame.Row(2).find("12 zz/yy.cpp") != std::string::npos);
+    EXPECT_TRUE(frame.Row(3).find("╰") != std::string::npos);
+    EXPECT_TRUE(frame.Row(frame.height - 1).find("zz/yy.cpp") == std::string::npos);
+
+    // Against the floor the box sits above the caret rather than reaching the
+    // status line.
+    Editor low;
+    low.theme = BuiltinTheme();
+    std::string text;
+    for (int i = 0; i < 30; ++i) text += "line\n";
+    ResetToOriginal(low.doc.table, text);
+    low.settings.scrolloff = 0;
+    const Index end = DocLength(low.doc.table);
+    low.doc.selections.Set(Selection{end, end, -1});
+    low.status = "12 zz/yy.cpp";
+    low.jump_branch = true;
+
+    const Surface floor = draw(low, 60, 12);
+    EXPECT_TRUE(floor.Row(7).find("╭") != std::string::npos);
+    EXPECT_TRUE(floor.Row(8).find("12 zz/yy.cpp") != std::string::npos);
+  }
+
+  TEST_CASE("render: the smart-jump box behaves at every size");
+  {
+    Editor ed;
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n");
+    ed.doc.selections.Set(Selection{10, 10, -1});
+    PromptOpen(ed, PromptKind::kSmartJump);
+    PromptInsert(ed, "na");
+    ed.status = "3 zz/yy.cpp";
+    for (int w = 1; w <= 24; ++w) {
+      for (int h = 1; h <= 12; ++h) {
+        const Surface frame = draw(ed, w, h);
+        EXPECT_EQ(frame.cells.size(), static_cast<std::size_t>(w) * h);
+        if (frame.cursor_visible) {
+          EXPECT_TRUE((frame.cursor_x >= 0) && (frame.cursor_x < w));
+          EXPECT_TRUE((frame.cursor_y >= 0) && (frame.cursor_y < h));
+        }
+      }
+    }
+  }
+
   TEST_CASE("render: every size from tiny to large draws without misbehaving");
   {
     Editor ed;

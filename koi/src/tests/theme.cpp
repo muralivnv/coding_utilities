@@ -69,6 +69,16 @@ void Themes() {
   const Style builtin_label = BuiltinTheme().Get("ui.virtual.jump-label");
   EXPECT_TRUE(builtin_label.fg.set);
   EXPECT_TRUE(builtin_label.bg.set);
+
+  // The smart-jump destination colour needs only a foreground, but every
+  // shipped theme and the builtin must give it one, or the path a message
+  // names dresses exactly like the file name beside it.
+  for (const std::string_view name : {"ronin", "calm"}) {
+    Theme shipped;
+    EXPECT_TRUE(LoadTheme(name, shipped, error));
+    EXPECT_TRUE(shipped.Get("ui.jump.next").fg.set);
+  }
+  EXPECT_TRUE(BuiltinTheme().Get("ui.jump.next").fg.set);
 }
 
 namespace {

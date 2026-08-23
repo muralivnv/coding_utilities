@@ -79,6 +79,10 @@
 # should not read as a row of mode blocks.
 "ui.virtual.jump-label"     = { fg = "dark", bg = "light_yellow", modifiers = ["bold"] }
 
+# The destination a smart-jump message names -- apart from the file name that
+# sits beside it on the bar.
+"ui.jump.next"              = { fg = "green"                                   }
+
 "ui.statusline"             = { fg = "white", bg = "#313131"                   }
 "ui.statusline.inactive"    = { fg = "white", bg = "#313131"                   }
 "ui.statusline.normal"      = { fg = "dark", bg = "green"                      }

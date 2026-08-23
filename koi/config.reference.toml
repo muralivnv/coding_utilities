@@ -314,11 +314,19 @@ tabpad = "·"
 #   nav d pin          visited definitions matching pin, in files matching nav
 #   key 640            the visited line in keymap.cpp nearest 640
 #
-# While typing, the status line shows the match count and where enter would go.
+# While typing, a box at the caret holds the query -- its sigil ᛃ, the j
+# rune; icons off spells it jump: -- and the match count and where enter
+# would go hang off the box. It flips above the caret when there is no room
+# below, and a terminal too small for it falls back to the bottom row.
+# A landing or a step leaves the same rounded box at the caret, wearing the
+# same ᛃ and naming where the next press of the walk would go; the first key
+# that is not a step buries it, and the bar stays out of it entirely. The
+# destination in either box is painted `ui.jump.next` -- green in the
+# shipped themes -- so it never reads as a file name.
 #
 #   enter      land on the best match
 #   b          step to the next match of the last query, "B" back; the
-#              status names where the next press would go, and says so when
+#              box at the caret names where the next press would go, and says so when
 #              that press wraps around the list
 #   tab        hand the terms to the picker the most specific clause names --
 #              file, symbol or content. A query with no matches goes to that

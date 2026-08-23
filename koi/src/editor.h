@@ -36,6 +36,7 @@ class StatusMessage {
   StatusMessage& operator=(std::string text) {
     Keep();
     text_ = std::move(text);
+    target_from_ = target_len_ = 0;
     return *this;
   }
   StatusMessage& operator=(std::string_view text) { return *this = std::string{text}; }
@@ -48,13 +49,27 @@ class StatusMessage {
   void Warn(std::string text) {
     Keep();
     text_ = std::move(text);
+    target_from_ = target_len_ = 0;
     if (level_ < StatusLevel::kWarning) level_ = StatusLevel::kWarning;
   }
   void Fail(std::string text) {
     Keep();
     text_ = std::move(text);
+    target_from_ = target_len_ = 0;
     level_ = StatusLevel::kError;
   }
+
+  // Marks [from, from+len) of the text as the destination it names, painted
+  // apart from the words around it wherever the message is drawn. The mark
+  // belongs to the text it was set on: any later message clears it.
+  void Highlight(std::size_t from, std::size_t len) {
+    target_from_ = std::min(from, text_.size());
+    target_len_ = std::min(len, text_.size() - target_from_);
+  }
+  std::string_view target() const {
+    return std::string_view{text_}.substr(target_from_, target_len_);
+  }
+  std::size_t target_from() const { return target_from_; }
   void Log(std::string text, StatusLevel level) {
     if (text.empty()) return;
     if (!log_->empty() && (log_->back().text == text)) return;
@@ -65,6 +80,7 @@ class StatusMessage {
   void clear() {
     Keep();
     text_.clear();
+    target_from_ = target_len_ = 0;
     level_ = StatusLevel::kInfo;
   }
   bool empty() const { return text_.empty(); }
@@ -79,6 +95,8 @@ class StatusMessage {
 
   static constexpr std::size_t kLogCap = 200;
   std::string text_;
+  std::size_t target_from_{0};
+  std::size_t target_len_{0};
   StatusLevel level_{StatusLevel::kInfo};
   std::shared_ptr<std::vector<StatusRecord>> log_{std::make_shared<std::vector<StatusRecord>>()};
 };
@@ -711,6 +729,11 @@ struct Editor {
   bool align_view_once{false};
 
   bool status_overlay{false};
+  // A smart-jump arrival just happened and nothing else has been pressed: the
+  // status is drawn as a branch row under the caret instead of on the bar,
+  // naming where the next press of the walk goes. The first keystroke that is
+  // not a step clears it, message and all.
+  bool jump_branch{false};
 
   bool prompt_active{false};
   PromptKind prompt_kind{PromptKind::kCommand};
@@ -837,6 +860,9 @@ enum class StatusTone : std::uint8_t {
   kError,
   kWarning,
   kInfo,
+  // The destination a smart-jump message names, painted `ui.jump.next` so a
+  // path in the feedback cannot be read as the file the bar names.
+  kNext,
 };
 
 struct StatusSpan {
@@ -850,6 +876,21 @@ struct StatusLine {
   static constexpr std::size_t kNoMessage = static_cast<std::size_t>(-1);
   std::size_t message_from{kNoMessage};
 };
+
+// A status message flattened onto one row -- whitespace runs collapsed to
+// single spaces -- and split around its highlighted target, both pieces of
+// which are empty when nothing is marked.
+struct FlatStatus {
+  std::string before;
+  std::string target;
+  std::string after;
+  bool empty() const { return before.empty() && target.empty() && after.empty(); }
+};
+FlatStatus FlattenStatus(std::string_view text, std::size_t target_from = 0,
+                         std::size_t target_len = 0);
+inline FlatStatus FlattenStatus(const StatusMessage& status) {
+  return FlattenStatus(status.text(), status.target_from(), status.target().size());
+}
 
 StatusLine StatusBar(const Editor& ed, bool focused = true);
 
