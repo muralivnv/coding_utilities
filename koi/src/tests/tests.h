@@ -73,6 +73,7 @@ void ExcerptCommandModes();
 void ExcerptViewSources();
 void ExcerptViewFuzz(Rng& rng);
 void SearchExcerptView();
+void ExcerptMatchSelection();
 void ExcerptHeaderLineStaysTrue();
 void ExcerptSaveRoundTripFuzz(Rng& rng);
 void ReanchorRefusesToSwallowLinesItNeverShowed();

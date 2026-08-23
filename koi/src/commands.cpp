@@ -2063,6 +2063,7 @@ constexpr std::array kCommands = std::to_array<CommandDef>({
     {"search_next", KOI_CMD({ SearchStep(ed, true); }), "next match"},
     {"search_prev", KOI_CMD({ SearchStep(ed, false); }), "previous match"},
     {"select_all", KOI_CMD({ ed.doc.selections.Set(Selection{0, DocLength(ed.doc.table), -1}); }), "select the whole file"},
+    {"select_excerpt_matches", KOI_CMD({ SelectExcerptMatches(ed); }), "select every painted match in an excerpt view"},
     {"select_regex", KOI_CMD({ PromptOpen(ed, PromptKind::kSelectRegex); }), "select every match inside the selections"},
     {"select_textobject_around", KOI_CMD({ ArmPendingChar(ed, PendingChar::kTextObjectAround, false, "select around..."); }), "select around a pair or word"},
     {"select_textobject_inner", KOI_CMD({ ArmPendingChar(ed, PendingChar::kTextObjectInner, false, "select inside..."); }), "select inside a pair or word"},

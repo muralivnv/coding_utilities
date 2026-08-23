@@ -223,6 +223,7 @@ int main() {
   koi::ExcerptViewSources();
   koi::ExcerptViewFuzz(rng);
   koi::SearchExcerptView();
+  koi::ExcerptMatchSelection();
   koi::ChunkedScanSearch();
   koi::SavingOntoAnOpenBufferIsRefused();
   koi::JournalIsIndexableByRevision();

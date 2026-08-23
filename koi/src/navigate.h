@@ -1,6 +1,7 @@
 #ifndef KOI_NAVIGATE_H_
 #define KOI_NAVIGATE_H_
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -72,6 +73,21 @@ void MarkLiveViewsStale(Editor& ed, ExcerptView::Kind kind);
 void RefreshLiveExcerptViews(Editor& ed);
 
 void DropExcerptHunk(Editor& ed);
+
+// What one line of an excerpt view is. The renderer paints from this and
+// SelectExcerptMatches selects from it, so the two cannot drift: whatever wears
+// `ui.excerpt.match` on screen is exactly what the command selects.
+enum class ExcerptLine : std::uint8_t { kPlain, kHeader, kWholeLineMatch, kSpanMatches };
+
+// `line` is a line's content without its newline. `spans` is cleared, and
+// filled with byte offsets into `line` -- clamped to it, never empty -- only
+// for kSpanMatches.
+ExcerptLine ClassifyExcerptLine(const ExcerptView& view, std::string_view line,
+                                std::vector<Interval>& spans);
+
+// Every painted match in the view, as a cursor. Refuses outside an excerpt
+// view, and leaves the selections alone when nothing is painted.
+void SelectExcerptMatches(Editor& ed);
 
 bool RebuildExcerptView(Editor& ed);
 

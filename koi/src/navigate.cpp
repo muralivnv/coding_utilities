@@ -3234,6 +3234,79 @@ void DropExcerptHunk(Editor& ed) {
               (ed.doc.excerpts.watched ? " -- :w re-arms the watch" : "");
 }
 
+ExcerptLine ClassifyExcerptLine(const ExcerptView& view, std::string_view line,
+                                std::vector<Interval>& spans) {
+  spans.clear();
+  // A header is a path:line marker, never text from any file, so it is checked
+  // first and never painted or selected as a match.
+  if (std::ranges::binary_search(view.header_index, line)) return ExcerptLine::kHeader;
+  if (std::ranges::binary_search(view.anchor_index, line)) return ExcerptLine::kWholeLineMatch;
+  if (!view.paint_line) return ExcerptLine::kPlain;
+  view.paint_line(line, spans);
+  const auto width = static_cast<Index>(line.size());
+  for (Interval& span : spans) {
+    if (span.empty()) continue;
+    // Both ends clamped, the right one never below the left: a span a painter
+    // put past the line must come out empty, not as an inverted iota_view.
+    const Index lo = std::clamp<Index>(span.front(), 0, width);
+    span = Interval(lo, std::clamp<Index>(span.back() + 1, lo, width));
+  }
+  const auto gone = std::ranges::remove_if(spans, [](const Interval& s) { return s.empty(); });
+  spans.erase(gone.begin(), gone.end());
+  return spans.empty() ? ExcerptLine::kPlain : ExcerptLine::kSpanMatches;
+}
+
+void SelectExcerptMatches(Editor& ed) {
+  if (!IsExcerptView(ed.doc)) {
+    ed.status.Warn("not an excerpt view");
+    return;
+  }
+  // No AlignExcerptModel here, unlike the excerpt commands that read `blocks`:
+  // this reads only the paint model, and reads it exactly as the renderer does.
+  // Undo and redo align it already, so aligning again could only move it away
+  // from what is on screen.
+  std::string text;
+  ReadDocRangeInto(ed.doc.table, Interval(0, DocLength(ed.doc.table)), text);
+  std::vector<Selection> found;
+  std::vector<Interval> spans;
+  std::size_t at = 0;
+  while (at < text.size()) {
+    std::size_t eol = text.find('\n', at);
+    if (eol == std::string::npos) eol = text.size();
+    const std::string_view line{text.data() + at, eol - at};
+    const auto start = static_cast<Index>(at);
+    // The newline is never part of a match: a selection that swallowed it would
+    // join two body lines on the first change typed over it.
+    switch (ClassifyExcerptLine(ed.doc.excerpts, line, spans)) {
+      case ExcerptLine::kWholeLineMatch:
+        if (!line.empty()) {
+          found.push_back(CoveringSelection(ed.doc.table, start,
+                                            start + static_cast<Index>(line.size())));
+        }
+        break;
+      case ExcerptLine::kSpanMatches:
+        for (const Interval& span : spans) {
+          found.push_back(
+              CoveringSelection(ed.doc.table, start + span.front(), start + span.back() + 1));
+        }
+        break;
+      case ExcerptLine::kHeader:
+      case ExcerptLine::kPlain:
+        break;
+    }
+    at = eol + 1;
+  }
+
+  if (found.empty()) {
+    ed.status.Warn("no matches");
+    return;
+  }
+  RecordJump(ed);
+  const std::size_t count = found.size();
+  ed.doc.selections.Replace(ed.doc.table, std::move(found));
+  ed.status = "selected " + std::to_string(count) + " match" + ((count == 1) ? "" : "es");
+}
+
 void GotoExcerptSource(Editor& ed) {
   if (!IsExcerptView(ed.doc)) {
     ed.status.Warn("not an excerpt view");

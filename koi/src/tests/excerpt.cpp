@@ -3354,6 +3354,204 @@ void SearchExcerptView() {
   }
 }
 
+void ExcerptMatchSelection() {
+  namespace fs = std::filesystem;
+  const Scratch scratch{"koi-excerpt-select"};
+  const std::string pristine_one = "alpha widget one\nbeta\ngamma widget tail\n";
+  const std::string pristine_two = "widget solo\n";
+  scratch.Write("one.txt", pristine_one);
+  scratch.Write("two.txt", pristine_two);
+
+  const auto fresh = [&scratch] {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ed.settings.excerpt_context = 0;
+    ed.settings.file_filter = "find " + scratch.dir.string() + " -type f -printf '%p\\n'";
+    return ed;
+  };
+  const auto view = [](const Editor& ed) {
+    return ReadDocRange(ed.doc.table, {0, DocLength(ed.doc.table)});
+  };
+  const auto file_text = [](const fs::path& p) {
+    std::ifstream in{p, std::ios::binary};
+    return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+  };
+  const auto edit_through_cursors = [](Editor& ed, std::string_view with) {
+    ExpectOk(InsertAtCursors(with, ed.doc.table, ed.doc.selections), "InsertAtCursors");
+    // What leaving insert mode does. Without it the carets the insert left
+    // behind are zero-width, which is only legal while insert mode is on.
+    ed.doc.selections.EnsureBlockCursors(ed.doc.table);
+    ed.doc.modified = true;
+  };
+
+  TEST_CASE("select_excerpt_matches: every painted match becomes a cursor, and only those");
+  {
+    Editor ed = fresh();
+    SearchExcerpts(ed, "widget");
+    PumpUntilIdle(ed);
+    EXPECT_TRUE(IsExcerptView(ed.doc));
+    const std::string text = view(ed);
+
+    // The title carries the word searched for and the renderer paints it there
+    // too, so it is selected as well: what is highlighted is what is selected.
+    // No header holds "widget", so every occurrence in the view is a match.
+    std::vector<Index> want;
+    for (std::size_t at = text.find("widget"); at != std::string::npos;
+         at = text.find("widget", at + 1)) {
+      want.push_back(static_cast<Index>(at));
+    }
+    EXPECT_EQ(want.size(), std::size_t{4});
+
+    RunCommands(ed, {"select_excerpt_matches"});
+    EXPECT_EQ(StatusAbout(ed, "selected 4 matches"), std::string{"selected 4 matches"});
+    EXPECT_EQ(ed.doc.selections.Size(), want.size());
+    for (std::size_t i = 0; (i < want.size()) && (i < ed.doc.selections.Size()); ++i) {
+      EXPECT_EQ(ed.doc.selections.Ranges()[i].From(), want[i]);
+      EXPECT_EQ(ed.doc.selections.Ranges()[i].To(), want[i] + Index{6});
+    }
+    EXPECT_EQ(EditorInvariants(ed), std::string{});
+  }
+
+  TEST_CASE("select_excerpt_matches: a header that reads as a match is still skipped");
+  {
+    // "one" is in every header of one.txt's blocks (it is in the path) and in
+    // the body once. The header index is consulted first, so only the body line
+    // and the title come back.
+    Editor ed = fresh();
+    SearchExcerpts(ed, "one");
+    PumpUntilIdle(ed);
+    EXPECT_TRUE(IsExcerptView(ed.doc));
+    const std::string text = view(ed);
+    EXPECT_TRUE(text.find("one.txt:1,1") != std::string::npos);
+
+    RunCommands(ed, {"select_excerpt_matches"});
+    EXPECT_EQ(ed.doc.selections.Size(), std::size_t{2});
+    for (const Selection& s : ed.doc.selections.Ranges()) {
+      const Index line = LineAt(ed.doc.table, s.From());
+      const std::string content =
+          ReadDocRange(ed.doc.table, LineContentRange(ed.doc.table, line));
+      EXPECT_TRUE(!std::ranges::binary_search(ed.doc.excerpts.header_index, content));
+    }
+  }
+
+  TEST_CASE("select_excerpt_matches: outside an excerpt view it refuses, cursors untouched");
+  {
+    Editor ed = fresh();
+    EXPECT_TRUE(OpenTarget(ed, (scratch.dir / "one.txt").string()));
+    ed.doc.selections.Set(Selection{2, 5, -1});
+    RunCommands(ed, {"select_excerpt_matches"});
+    EXPECT_EQ(StatusAbout(ed, "not an excerpt view"), std::string{"not an excerpt view"});
+    EXPECT_EQ(ed.doc.selections.Size(), std::size_t{1});
+    EXPECT_EQ(ed.doc.selections.Primary().From(), Index{2});
+    EXPECT_EQ(ed.doc.selections.Primary().To(), Index{5});
+  }
+
+  TEST_CASE("select_excerpt_matches: a view edited past its last match says so and changes nothing");
+  {
+    Editor ed = fresh();
+    SearchExcerpts(ed, "widget");
+    PumpUntilIdle(ed);
+    RunCommands(ed, {"select_excerpt_matches"});
+    edit_through_cursors(ed, "gadget");
+    EXPECT_TRUE(view(ed).find("widget") == std::string::npos);
+
+    ed.doc.selections.Set(Selection{0, 1, -1});
+    RunCommands(ed, {"select_excerpt_matches"});
+    EXPECT_EQ(StatusAbout(ed, "no matches"), std::string{"no matches"});
+    EXPECT_EQ(ed.doc.selections.Size(), std::size_t{1});
+    EXPECT_EQ(ed.doc.selections.Primary().From(), Index{0});
+    EXPECT_EQ(ed.doc.selections.Primary().To(), Index{1});
+  }
+
+  TEST_CASE("select_excerpt_matches: a match that ends inside a cluster widens to hold it");
+  {
+    const Scratch utf8{"koi-excerpt-select-utf8"};
+    const std::string accented = "val" + std::string{kEAcute} + "ur\n";
+    utf8.Write("acc.txt", accented);
+
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ed.settings.excerpt_context = 0;
+    ed.settings.file_filter = "find " + utf8.dir.string() + " -type f -printf '%p\\n'";
+    SearchExcerpts(ed, "vale");
+    PumpUntilIdle(ed);
+    EXPECT_TRUE(IsExcerptView(ed.doc));
+    const std::string text = view(ed);
+    const auto body = static_cast<Index>(text.find("val" + std::string{kEAcute}));
+    EXPECT_TRUE(body > 0);
+
+    RunCommands(ed, {"select_excerpt_matches"});
+    const auto found = std::ranges::find_if(
+        ed.doc.selections.Ranges(), [body](const Selection& s) { return s.From() == body; });
+    EXPECT_TRUE(found != ed.doc.selections.Ranges().end());
+    if (found != ed.doc.selections.Ranges().end()) {
+      // The regex matched four bytes; the fourth is the "e" of a two-code-point
+      // cluster, so the selection has to reach over the combining mark as well
+      // or no edit through it is legal.
+      EXPECT_EQ(ReadDocRange(ed.doc.table, Interval(found->From(), found->To())),
+                "val" + std::string{kEAcute});
+      edit_through_cursors(ed, "Z");
+      EXPECT_TRUE(view(ed).find("Zur") != std::string::npos);
+      EXPECT_EQ(EditorInvariants(ed), std::string{});
+    }
+  }
+
+  TEST_CASE("select_excerpt_matches: change every match, and :w writes them all home");
+  {
+    Editor ed = fresh();
+    SearchExcerpts(ed, "widget");
+    PumpUntilIdle(ed);
+    RunCommands(ed, {"select_excerpt_matches"});
+    edit_through_cursors(ed, "gadget");
+    EXPECT_TRUE(SaveExcerptView(ed));
+    EXPECT_EQ(file_text(scratch.dir / "one.txt"),
+              std::string{"alpha gadget one\nbeta\ngamma gadget tail\n"});
+    EXPECT_EQ(file_text(scratch.dir / "two.txt"), std::string{"gadget solo\n"});
+    EXPECT_EQ(EditorInvariants(ed), std::string{});
+
+    scratch.Write("one.txt", pristine_one);
+    scratch.Write("two.txt", pristine_two);
+  }
+
+  TEST_CASE("select_excerpt_matches: a pins view selects the whole anchored line");
+  {
+    const Scratch pins{"koi-excerpt-select-pins"};
+    pins.Write("pinned.txt", "target line\nsecond line\nthird line\n");
+    const AsProjectRoot root{pins.dir};
+    // SetPin keys what it is given against the working directory, so a bare
+    // name has to be stored from inside the fixture or it names somewhere else.
+    const InDirectory here{pins.dir};
+    std::string error{"unset"};
+    const std::shared_ptr<ProjectStore> store = ProjectStore::Open(pins.dir / "pins.db", error);
+    EXPECT_TRUE(store != nullptr);
+    EXPECT_TRUE(error.empty());
+    if (store == nullptr) return;
+    store->SetPin(1, "pinned.txt");
+
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ed.project = store;
+    ed.settings.excerpt_context = 1;
+    ed.settings.file_filter = "printf ''";
+    PinExcerpts(ed);
+    EXPECT_TRUE(IsExcerptView(ed.doc));
+    // A pins view paints no spans: the anchored line is the whole highlight.
+    EXPECT_TRUE(!ed.doc.excerpts.paint_line);
+    EXPECT_EQ(ed.doc.excerpts.anchor_index.size(), std::size_t{1});
+
+    const std::string text = view(ed);
+    const auto at = static_cast<Index>(text.find("target line"));
+    EXPECT_TRUE(at > 0);
+    RunCommands(ed, {"select_excerpt_matches"});
+    EXPECT_EQ(StatusAbout(ed, "selected 1 match"), std::string{"selected 1 match"});
+    EXPECT_EQ(ed.doc.selections.Size(), std::size_t{1});
+    EXPECT_EQ(ed.doc.selections.Primary().From(), at);
+    // The content, not the newline: a selection over the break would join two
+    // body lines the moment anything was typed over it.
+    EXPECT_EQ(ed.doc.selections.Primary().To(), at + Index{11});
+  }
+}
+
 void ExcerptHeaderLineStaysTrue() {
   TEST_CASE("excerpts: the cached header line never outlives the edits under it");
   const Scratch scratch{"koi-header-line"};

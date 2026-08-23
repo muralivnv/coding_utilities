@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "commands.h"
+#include "navigate.h"
 #include "search.h"
 #include "syntax.h"
 #include "theme.h"
@@ -750,26 +751,24 @@ void RenderPane(const Editor& ed, const PaneRef& pane, const Palette& ui, int wi
       static std::string visible;
       ReadDocRangeInto(doc.table, Interval(from, to), visible);
       std::vector<Interval> spans;
+      const auto paint = [&highlights](std::size_t lo, std::size_t hi, CaptureId id) {
+        for (std::size_t x = lo; x < hi; ++x) highlights.captures[x] = id;
+      };
       std::size_t at = 0;
       while (at < visible.size()) {
         std::size_t eol = visible.find('\n', at);
         if (eol == std::string::npos) eol = visible.size();
         const std::string_view line{visible.data() + at, eol - at};
-        if (std::ranges::binary_search(doc.excerpts.header_index, line)) {
-          for (std::size_t x = at; x < eol; ++x) highlights.captures[x] = kHeaderCapture;
-        } else if (std::ranges::binary_search(doc.excerpts.anchor_index, line)) {
-          for (std::size_t x = at; x < eol; ++x) highlights.captures[x] = kMatchCapture;
-        } else if (doc.excerpts.paint_line) {
-          spans.clear();
-          doc.excerpts.paint_line(line, spans);
-          for (const Interval& span : spans) {
-            if (span.empty()) continue;
-            const Index lo = std::max<Index>(span.front(), 0);
-            const Index hi = std::min<Index>(span.back(), static_cast<Index>(line.size()) - 1);
-            for (Index x = lo; x <= hi; ++x) {
-              highlights.captures[at + static_cast<std::size_t>(x)] = kMatchCapture;
+        switch (ClassifyExcerptLine(doc.excerpts, line, spans)) {
+          case ExcerptLine::kHeader: paint(at, eol, kHeaderCapture); break;
+          case ExcerptLine::kWholeLineMatch: paint(at, eol, kMatchCapture); break;
+          case ExcerptLine::kSpanMatches:
+            for (const Interval& span : spans) {
+              paint(at + static_cast<std::size_t>(span.front()),
+                    at + static_cast<std::size_t>(span.back() + 1), kMatchCapture);
             }
-          }
+            break;
+          case ExcerptLine::kPlain: break;
         }
         at = eol + 1;
       }
