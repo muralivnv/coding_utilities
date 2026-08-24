@@ -10,7 +10,8 @@
 #
 # `:config-reload` re-reads both. It resets to the built-in defaults first, so
 # deleting a key restores its default. Everything applies immediately except
-# scan-workers, which can be raised live but not lowered.
+# scan-workers, which can be raised live but not lowered, and the two picker
+# ceilings, which are read when a scan starts and when a picker opens.
 #
 # Values below are the defaults unless a comment says otherwise.
 #
@@ -55,9 +56,6 @@ trim_trailing_whitespace_on_save = false # default is true. Runs on :w. Note the
                                          # this is the only key that is not kebab-case.
 record                           = false # whether to record key presses, into keylog.db
                                          # beside the project database
-smart-jump-auto                  = true # whether a lone smart_jump match jumps by itself once the
-                                        # prompt goes quiet. Off, every landing takes an enter. The
-                                        # smart_jump notes below say what fires and when.
 
 # How the mode label is drawn: "bar" colours the text, "block" fills a block
 # behind it. Both use `ui.statusline.normal` / `ui.statusline.insert`.
@@ -80,6 +78,27 @@ multi-cursor-paste               = "full" # "spread"
 # on stdout. A trailing `|` is trimmed. Unset, koi uses
 #   find . -type f -printf '%P\n' | gai -e '.*(build|.git)'
 file-filter = "find . -type f -not -path '*/.git/*' -printf '%P\\n'"
+
+# The two picker ceilings, both in bytes. Per project on purpose: they are
+# statements about this tree's size against this machine's memory, not tastes.
+#
+# picker-corpus-max-bytes is how much of a streaming scan's output the corpus
+# will hold. Content emits every non-blank line of the project and the corpus is
+# the row storage, so a big enough tree is the editor's memory. Past this the
+# read stops and the band keeps what landed -- that is the "truncated" the count
+# says. Raise it for a huge tree on a big machine; lower it on a small one.
+#
+# picker-file-max-bytes is the biggest file a picker will read to draw a row's
+# line or its context block. Past it the row keeps the text the scan gave it and
+# the block draws nothing, the same as a row whose file went missing -- which is
+# what keeps a bundled script or a checked-in dump from costing a frame. Raise
+# it for a project with big files worth stepping through.
+#
+# Both are read once, where they are spent: the corpus ceiling when a scan
+# starts, the file ceiling when a picker opens. `:config-reload` therefore
+# applies to the next scan or prompt, never to a live one.
+picker-corpus-max-bytes          = 268435456 # 256 MiB; clamped to 4 MiB - 64 GiB
+picker-file-max-bytes            = 8388608 # 8 MiB; clamped to 1 MiB - 1 GiB
 
 # ---------------------------------------------------------------------------
 # [editor.icons]
@@ -214,34 +233,34 @@ tabpad = "·"
 #   align_view_top                      goto_last_line                      paste_before
 #   append_mode                         goto_line                           paste_clipboard_after
 #   buffer_close                        goto_line_end                       paste_clipboard_before
-#   buffer_list                         goto_line_start                     redo
-#   buffer_next                         goto_next_buffer                    remove_primary_selection
-#   buffer_picker                       goto_next_class                     replace
-#   buffer_previous                     goto_next_comment                   replace_with_yanked
-#   buffer_symbol_picker                goto_next_function                  rotate_selection_contents_backward
-#   change_selection                    goto_next_paragraph                 rotate_selection_contents_forward
-#   clear_search_highlight              goto_next_parameter                 rotate_selections_backward
-#   collapse_selection                  goto_next_test                      rotate_selections_forward
-#   command_mode                        goto_prev_class                     save_selection
-#   content_picker                      goto_prev_comment                   scroll_down
-#   copy_selection_on_next_line         goto_prev_function                  scroll_up
-#   copy_selection_on_prev_line         goto_prev_paragraph                 search
-#   decrement_excerpt_context           goto_prev_parameter                 search_excerpts
-#   delete_char_backward                goto_prev_test                      search_next
-#   delete_char_forward                 goto_previous_buffer                search_prev
-#   delete_selection                    hsplit                              select_all
-#   delete_selection_noyank             increment_excerpt_context           select_excerpt_matches
-#   excerpt_drop                        indent                              select_regex
-#   expand_height                       insert_at_line_end                  select_textobject_around
-#   expand_selection                    insert_at_line_start                select_textobject_inner
-#   expand_width                        insert_mode                         show_definition_excerpts
-#   extend_char_left                    insert_newline                      show_reference_excerpts
-#   extend_char_right                   insert_tab                          show_references
-#   extend_line                         join_selections                     shrink_height
-#   extend_line_below                   jump_backward                       shrink_width
-#   extend_line_down                    jump_forward                        smart_jump
-#   extend_line_up                      jump_view_down                      smart_jump_next
-#   extend_next_char                    jump_view_left                      smart_jump_prev
+#   buffer_list                         goto_line_start                     picker_jump_next
+#   buffer_next                         goto_next_buffer                    picker_jump_prev
+#   buffer_picker                       goto_next_class                     redo
+#   buffer_previous                     goto_next_comment                   remove_primary_selection
+#   buffer_symbol_picker                goto_next_function                  replace
+#   change_selection                    goto_next_paragraph                 replace_with_yanked
+#   clear_search_highlight              goto_next_parameter                 rotate_selection_contents_backward
+#   collapse_selection                  goto_next_test                      rotate_selection_contents_forward
+#   command_mode                        goto_prev_class                     rotate_selections_backward
+#   content_picker                      goto_prev_comment                   rotate_selections_forward
+#   copy_selection_on_next_line         goto_prev_function                  save_selection
+#   copy_selection_on_prev_line         goto_prev_paragraph                 scroll_down
+#   decrement_excerpt_context           goto_prev_parameter                 scroll_up
+#   delete_char_backward                goto_prev_test                      search
+#   delete_char_forward                 goto_previous_buffer                search_excerpts
+#   delete_selection                    hsplit                              search_next
+#   delete_selection_noyank             increment_excerpt_context           search_prev
+#   excerpt_drop                        indent                              select_all
+#   expand_height                       insert_at_line_end                  select_excerpt_matches
+#   expand_selection                    insert_at_line_start                select_regex
+#   expand_width                        insert_mode                         select_textobject_around
+#   extend_char_left                    insert_newline                      select_textobject_inner
+#   extend_char_right                   insert_tab                          show_definition_excerpts
+#   extend_line                         join_selections                     show_reference_excerpts
+#   extend_line_below                   jump_backward                       show_references
+#   extend_line_down                    jump_forward                        shrink_height
+#   extend_line_up                      jump_view_down                      shrink_width
+#   extend_next_char                    jump_view_left                      smart_jump
 #   extend_next_long_word_end           jump_view_next                      split_selection
 #   extend_next_long_word_start         jump_view_previous                  split_selection_on_newline
 #   extend_next_word_end                jump_view_right                     surround_add
@@ -325,21 +344,65 @@ tabpad = "·"
 # shipped themes -- so it never reads as a file name.
 #
 #   enter      land on the best match
-#   b          step to the next match of the last query, "B" back; the
-#              box at the caret names where the next press would go, and says so when
-#              that press wraps around the list
+#   b          step to the next match of the last query, "B" back -- and the
+#              same two keys walk a picker's rows after a pick, whichever list
+#              was made last; the box at the caret names where the next press
+#              would go, and says so when that press wraps around the list
 #   tab        hand the terms to the picker the most specific clause names --
 #              file, symbol or content. A query with no matches goes to that
 #              picker on enter as well
 #   esc        cancel; stepping still works for the last submitted query
 #
-# One match left and the prompt quiet for a moment, and it jumps on its own --
-# no enter. A wrong guess costs nothing: the landing is recorded only after you
-# have stood in it for ~2 seconds or edited there, and reopening the prompt
-# before then types the query that fired back in, to extend rather than retype.
-# `editor.smart-jump-auto = false` turns the auto-jump off; everything else
-# stays as above.
+# A wrong landing costs nothing: it is recorded only after you have stood in it
+# for ~2 seconds or edited there, so a jump you step away from teaches the
+# corpus nothing.
 #
 # The corpus fills as you work: lingering at a place for a few seconds records
 # a visit, edits record edit locations, and a jump you keep teaches the query
 # its target. A fresh project starts empty and the ranking sharpens with use.
+
+# ---------------------------------------------------------------------------
+# How to use: the pickers
+# ---------------------------------------------------------------------------
+#
+# Every picker is the same prompt: a box at the caret, a band of up to five
+# rows hanging off it, and -- for every picker that points into a file
+# (definitions, references, symbols, content) -- a block of context lines
+# around the selected target. What you type is a case-insensitive regex
+# filtered over the list; a pattern that does not compile keeps the last good
+# list and says why on the branch row. Symbols and content stream in while you
+# type -- the count says "scanning…" while more is coming, and "truncated" if a
+# huge project hit the corpus ceiling -- picker-corpus-max-bytes, above.
+#
+# The pickers that point into files -- definitions, references, both symbol
+# lists, content -- draw at the screen's full width, because their rows are
+# lines of source. A file or buffer band is a list of paths, so it is drawn
+# only as wide as its widest row and hangs off the box.
+#
+# Every row reads the same way: what the row is for on the left -- the file's
+# path, the symbol's name, the matched line -- and where it points,
+# `path:line`, dimmed at the card's right edge. Long text clips at that column
+# rather than pushing the path off the card, and a path drops out entirely
+# where keeping it would leave the text no room. A file or buffer row is its
+# own path, so it carries no second copy of it.
+#
+# The last row carries a dimmed `i/n/m`: which row of the filtered list is
+# selected, how many rows the filter left, how many candidates there were.
+#
+#   1..5       take that row of the band; 0 and 6..9 still type into the
+#              query, and a buffers band grown past five is walked, not
+#              numbered
+#   tab / down     step the selection forward, shift-tab / up back
+#   enter      take the selection
+#   esc        cancel -- the only way out; backspace on an empty query
+#              deletes nothing rather than closing the prompt
+#
+# A pick leaves the filtered list behind as the walk: "b" steps forward
+# through it, "B" back, the same keys that walk smart-jump matches. A step
+# that cannot land -- a row whose file will not open -- says so and stays
+# where it stood.
+#
+# last_picker reopens whatever was open last, query and all, routed by name:
+# files, buffers, definition, references, buffer-symbols, symbols, content.
+# Only a query that compiled is recorded, so a half-typed pattern is never
+# what comes back.

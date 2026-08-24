@@ -115,6 +115,28 @@ bool Cancelled(const std::atomic<bool>* cancel) {
   return (cancel != nullptr) && cancel->load(std::memory_order_relaxed);
 }
 
+// How far either way LineAt looks for a line's ends. Generous for source, and
+// a ceiling on the pathological: a minified bundle is one line of a megabyte,
+// and scanning to its real ends once per capture is quadratic in the file.
+constexpr size_t kLineWindowBytes = 4096;
+
+// The whole line byte `at` falls on, as a row holds one. A scan outward from
+// the capture, so it costs the line's length rather than a pass over the file
+// -- and the bytes are already here, which is the point: the alternative is the
+// picker reading the file back once per hit it means to show.
+std::string_view LineAt(std::string_view text, std::size_t at) {
+  if (at >= text.size()) return {};
+  const std::size_t back = at - std::min(at, kLineWindowBytes);
+  const std::size_t newline = text.substr(back, at - back).rfind('\n');
+  // No line start within the window means this is not a line anyone reads, so
+  // the row starts at the capture -- the part of such a line worth showing.
+  const std::size_t from = (newline == std::string_view::npos) ? at : (back + newline + 1);
+  const std::size_t ahead = std::min(kLineWindowBytes, text.size() - at);
+  const std::size_t end = text.substr(at, ahead).find('\n');
+  const std::size_t to = (end == std::string_view::npos) ? (at + ahead) : (at + end);
+  return TrimAnchorLine(text.substr(from, to - from));
+}
+
 std::generator<Symbol> ScanFile(Scanner& scanner, const fs::path& path, SymbolKind kind,
                                 std::string& error, std::string_view containing_word,
                                 const std::atomic<bool>* cancel) {
@@ -238,7 +260,7 @@ std::generator<Symbol> ScanFile(Scanner& scanner, const fs::path& path, SymbolKi
       // Capped: reference queries capture the whole call expression by design,
       // and nested calls nest their captures, so f1(f2(f3(...))) yields names
       // of N, N-1, ... 1 tokens -- O(N^2) bytes in total. An 85 KB file of
-      // nested calls drove the picker-staging path to 1.9 GB of RSS. Nothing
+      // nested calls drove the picker-row path to 1.9 GB of RSS. Nothing
       // downstream needs more than a row's worth of text; truncate on a
       // code-point start so a clipped name stays valid UTF-8.
       std::string_view kept = name;
@@ -254,8 +276,15 @@ std::generator<Symbol> ScanFile(Scanner& scanner, const fs::path& path, SymbolKi
       for (char& c : cleaned) {
         if ((c == '\n') || (c == '\r') || (c == '\t')) c = ' ';
       }
-      co_yield Symbol{path_text, static_cast<Index>(row) + 1, static_cast<Index>(column) + 1,
-                      std::move(cleaned)};
+      // `name` views into `contents` (NodeTextIn hands back a slice of it), so
+      // its offset is where in the file the capture starts and the line around
+      // it is a substring away. An empty capture never reaches here.
+      const auto at = static_cast<std::size_t>(name.data() - contents.data());
+      co_yield Symbol{path_text,
+                      static_cast<Index>(row) + 1,
+                      static_cast<Index>(column) + 1,
+                      std::move(cleaned),
+                      std::string{LineAt(contents, at)}};
     }
   }
 

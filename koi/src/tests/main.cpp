@@ -104,8 +104,6 @@ void RunUnicodeTests(Rng& rng) {
   SymbolRows();
   WordMatching();
   HotFirstOrdering();
-  PickerCommands();
-  PickerPipelines();
   FilePickerRanking();
   FileFilter();
   SelfIsRunnableByName();
@@ -174,7 +172,13 @@ struct PrivateHome {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** /*argv*/) {
+  // A picker scan expands %{koi} to /proc/self/exe, which under the suite is
+  // this binary rather than koi: a test that starts one would start the whole
+  // suite again as its child. Anything with arguments is that child, and it
+  // has nothing to say.
+  if (argc > 1) return 0;
+
   const PrivateHome private_home;
 
   unsigned long long seed = 0x5EED1234ULL;
@@ -200,6 +204,13 @@ int main() {
   koi::Rendering();
   koi::RenderingGaps();
   koi::BufferPickerRows();
+  koi::InProcessPicker();
+  koi::InProcessFilePickerRows();
+  koi::InProcessSymbolPickers();
+  koi::PickerWalk();
+  koi::StreamingSymbolPicker();
+  koi::StreamingContentPicker();
+  koi::PickerCeilingsFollowTheSettings();
   koi::PickerCommandShape();
   koi::FilePinsLandWhereYouLeft();
   koi::LastEditIsFoundAcrossFiles();
@@ -318,12 +329,12 @@ int main() {
   koi::SmartJumpLanding();
   koi::SmartJumpAdaptiveLoop();
   koi::SmartJumpStepping();
-  koi::SmartJumpAutoFire();
   koi::SmartJumpBounceRule();
   koi::SmartJumpArrivalRules();
   koi::SmartJumpSnapshotCost();
 
   // Round 8.
+  koi::ScannedSymbolsCarryTheirLine();
   koi::QueryMatchesAreBoundedLikeQueryTime();
   koi::AQueryThatWillNotCompileFailsOncePerRunNotOncePerFile();
   koi::AProjectScaleScanKeepsItsOrderAndItsFrames();

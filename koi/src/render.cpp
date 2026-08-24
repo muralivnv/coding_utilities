@@ -4,12 +4,14 @@
 #include <array>
 #include <cstdint>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "commands.h"
+#include "format.h"
 #include "navigate.h"
 #include "search.h"
 #include "syntax.h"
@@ -49,6 +51,7 @@ struct Palette {
   Style whitespace;
   Style jump_label;
   Style jump_next;
+  Style excerpt_match;
 };
 
 Palette Resolve(const Theme& theme) {
@@ -76,6 +79,7 @@ Palette Resolve(const Theme& theme) {
   ui.whitespace = theme.Get("ui.virtual.whitespace");
   ui.jump_label = theme.Get("ui.virtual.jump-label");
   ui.jump_next = theme.Get("ui.jump.next");
+  ui.excerpt_match = theme.Get(kExcerptMatchScope);
   return ui;
 }
 
@@ -571,10 +575,12 @@ struct Panes {
 };
 
 Panes PanesOf(const Editor& ed, int width, int height) {
-  // The smart-jump prompt draws at the caret, so it takes no row and opening
-  // it reflows nothing.
-  const int prompt_rows =
-      (ed.prompt_active && (ed.prompt_kind != PromptKind::kSmartJump)) ? 1 : 0;
+  // The smart-jump and picker prompts draw at the caret, so they take no row
+  // and opening them reflows nothing.
+  const int prompt_rows = (ed.prompt_active && (ed.prompt_kind != PromptKind::kSmartJump) &&
+                           (ed.prompt_kind != PromptKind::kPicker))
+                              ? 1
+                              : 0;
   const Rect screen{0, 0, width, std::max(0, height - prompt_rows)};
   return Panes{screen, LayoutWindows(ed, screen), WindowOrder(ed)};
 }
@@ -661,9 +667,13 @@ Index PositionAtScreen(const Editor& ed, const WrapMetrics& wrap, int gutter, in
 
 namespace {
 
+// `defer_status` leaves this pane's status row to the caller, which is what a
+// prompt drawn at the caret needs: whether the bar says ed.status depends on
+// whether the box found room for its branch row, and the box is fitted around
+// the caret this draws.
 void RenderPane(const Editor& ed, const PaneRef& pane, const Palette& ui, int width, int height,
                 int& caret_x, int& caret_y, bool* status_clipped = nullptr,
-                bool overlay_takes_message = false) {
+                bool overlay_takes_message = false, bool defer_status = false) {
   const Document& doc = pane.doc;
   const int gutter = GutterFor(doc, width);
   const int chrome_rows = (height >= 2) ? 1 : 0;
@@ -844,7 +854,7 @@ void RenderPane(const Editor& ed, const PaneRef& pane, const Palette& ui, int wi
     line_y += static_cast<int>(row_starts.size());
   }
 
-  if (chrome_rows > 0) {
+  if ((chrome_rows > 0) && !defer_status) {
     DrawStatus(ed, pane, ui, height - chrome_rows, width, status_clipped, overlay_takes_message);
   }
 
@@ -1068,32 +1078,130 @@ void DrawBranchRow(Editor& ed, const Palette& ui, const FlatStatus& said, int x0
   DrawText(x, y, width, " ", sfg, bg);
 }
 
+// What the picker asks to hang off the box, before any of it has been placed.
+// `band_grow` is what the band takes when the side the box lands on has room
+// past `band_rows` -- buffers is the one list worth reading whole; everywhere
+// else it is the baseline itself. `rule_rows` is the line between the block and
+// the band, so context lines and list rows do not read as one list: one row,
+// and only when there is a block.
+struct PickerWant {
+  int context_rows{0};
+  int rule_rows{0};
+  int band_rows{0};
+  int band_grow{0};
+};
+
+// Two borders and the input between them -- the one part of the stack that
+// cannot be given up a row at a time.
+constexpr int kPromptBoxRows = 3;
+
+// Where the box landed and what the stack gave up to land there. The side, the
+// rows drawn and the window the keys walk all come out of this one
+// computation, so the band cannot draw one thing while the digits mean
+// another. Everything stacks away from the caret -- box, branch row, context
+// block, rule, band -- sharing the branch row's left edge. `ok` false means not
+// even the box fits and the caller keeps a bottom row.
+struct PromptFit {
+  bool ok{false};
+  bool below{false};
+  int x0{0};
+  int y0{0};
+  int inner{0};
+  int box_w{0};
+  // The feedback the bar would have shown, flattened the way the bar flattens
+  // it, and whether the stack found room for the branch row that says it. That
+  // row is the last one given up, and when it goes the bar says it instead
+  // (Editor::prompt_box_said).
+  FlatStatus said;
+  int said_rows{0};
+  int context_rows{0};
+  int rule_rows{0};
+  int band_rows{0};
+  int x{0};
+  int context_top{0};
+  int rule_top{0};
+  int band_top{0};
+};
+
 // The smart-jump prompt sits at the caret instead of the bottom row: its loop
 // is type, read, decide, several times a second, and the status line is
 // peripheral to where the eyes already are. The box takes the rows below the
-// caret and flips above when below would reach the focused status line. The
-// match feedback hangs off the box on a branch row of its own, so the bar
-// never has to be read at all. False means neither side fits and the caller
-// keeps the bottom row.
-bool DrawPromptBox(Editor& ed, const Palette& ui, int caret_x, int caret_y,
-                   const Rect& content, int width) {
-  if ((caret_x < 0) || (caret_y < 0)) return false;
+// caret and flips above when below would reach the focused status line.
+//
+// A side too short shrinks the stack rather than refusing it: a box that will
+// not draw leaves the digits and enter live over rows nobody can see. The block
+// and its rule go first -- they are the one part with nothing behind them --
+// then band rows down to one, then the branch row, which the bar can say. Only
+// a side with no room for the box at all is refused.
+PromptFit FitPromptBox(const Editor& ed, int caret_x, int caret_y, const Rect& content, int width,
+                       const PickerWant& want) {
+  PromptFit fit;
+  if ((caret_x < 0) || (caret_y < 0)) return fit;
 
   const int inner = std::min(width - 4, std::max(32, width / 3));
-  if (inner < 12) return false;
-  const int box_w = inner + 4;
+  if (inner < 12) return fit;
 
-  // The feedback the bar would have shown, flattened the way the bar
-  // flattens it, the destination it names split out to wear its own colour.
-  const FlatStatus said = FlattenStatus(ed.status);
-  const int rows = 3 + (said.empty() ? 0 : 1);
-
+  fit.said = FlattenStatus(ed.status);
   const int status_y = content.y + std::max(0, content.h - 1);
-  const bool below = (caret_y + rows) < status_y;
-  const int y0 = below ? (caret_y + 1) : (caret_y - 3);
-  if (!below && ((y0 - (rows - 3)) < content.y)) return false;
+  // What each side has room for: down to the row above the focused status
+  // line, up to the top of the pane.
+  const int below_room = status_y - caret_y - 1;
+  const int above_room = caret_y - content.y;
+  // The side is chosen with the baseline band and never the grown one, so a
+  // list growing into the room it found cannot move the box off it. Below is
+  // preferred; above is taken when the whole stack fits there and not below;
+  // when neither side fits whole the roomier one wins.
+  const int whole = kPromptBoxRows + (fit.said.empty() ? 0 : 1) + want.context_rows +
+                    want.rule_rows + want.band_rows;
+  const bool below =
+      (whole <= below_room) || ((whole > above_room) && (below_room >= above_room));
+  const int room = below ? below_room : above_room;
 
-  const int x0 = std::clamp(caret_x - 2, 0, std::max(0, width - box_w));
+  const int band_min = (want.band_rows > 0) ? 1 : 0;
+  int said_rows = fit.said.empty() ? 0 : 1;
+  int left = room - kPromptBoxRows - said_rows;
+  if (left < band_min) {
+    said_rows = 0;
+    left = room - kPromptBoxRows;
+  }
+  if (left < band_min) return fit;
+
+  int band = std::min(std::max(want.band_rows, band_min), left);
+  int context = 0;
+  int rule = 0;
+  if ((band >= want.band_rows) && ((left - band) >= (want.context_rows + want.rule_rows))) {
+    context = want.context_rows;
+    rule = want.rule_rows;
+    // Only a stack that fit whole grows, into whatever the block left over.
+    band = std::max(band, std::min(want.band_grow, left - context - rule));
+  }
+
+  fit.ok = true;
+  fit.below = below;
+  fit.inner = inner;
+  fit.box_w = inner + 4;
+  fit.said_rows = said_rows;
+  fit.context_rows = context;
+  fit.rule_rows = rule;
+  fit.band_rows = band;
+  fit.x0 = std::clamp(caret_x - 2, 0, std::max(0, width - fit.box_w));
+  fit.y0 = below ? (caret_y + 1) : (caret_y - kPromptBoxRows);
+  fit.x = fit.x0 + 1;
+  fit.context_top =
+      below ? (fit.y0 + kPromptBoxRows + said_rows) : (fit.y0 - said_rows - context);
+  // Away from the box either way: box, block, rule, band.
+  fit.rule_top = below ? (fit.context_top + context) : (fit.context_top - rule);
+  fit.band_top = below ? (fit.rule_top + rule) : (fit.rule_top - band);
+  return fit;
+}
+
+// The box the fit placed. The match feedback hangs off it on a branch row of
+// its own, so the bar never has to be read at all -- below the box, or climbing
+// out of its top when the box flipped above the caret.
+void DrawPromptBox(Editor& ed, const Palette& ui, const PromptFit& fit, int width) {
+  const int x0 = fit.x0;
+  const int y0 = fit.y0;
+  const int box_w = fit.box_w;
 
   const Attr bg = Bg(ui.popup, ui);
   const Attr fg = Fg(ui.text, ui);
@@ -1109,15 +1217,194 @@ bool DrawPromptBox(Editor& ed, const Palette& ui, int caret_x, int caret_y,
   for (int x = 0; x < box_w; ++x) Cell(x0 + x, y0 + 1, ' ', fg, bg);
   Put(x0, y0 + 1, "│", border, bg);
   Put(x0 + box_w - 1, y0 + 1, "│", border, bg);
-  DrawPromptInput(ed, ui, x0 + 2, y0 + 1, inner, fg, bg);
+  DrawPromptInput(ed, ui, x0 + 2, y0 + 1, fit.inner, fg, bg);
   hline(y0 + 2, "╰", "─", "╯");
 
-  // The branch hangs below the box, and climbs out of its top when the box
-  // flipped above the caret.
-  if (!said.empty()) {
-    DrawBranchRow(ed, ui, said, x0 + 1, below ? (y0 + 3) : (y0 - 1), width, below, bg);
+  if (fit.said_rows > 0) {
+    DrawBranchRow(ed, ui, fit.said, x0 + 1, fit.below ? (y0 + 3) : (y0 - 1), width, fit.below, bg);
   }
-  return true;
+}
+
+// Where the card the block, the rule and the band share sits, and how wide.
+// The width the filter computed, clipped to the screen, at the box's left edge
+// -- pulled left where that width would run off the right, and all the way to
+// the margin for a card as wide as the screen, which is what every picker over
+// file content asks for (kPickerCardWide). Nothing here measures a row, so
+// nothing here can resize the card on a step.
+struct PickerCard {
+  int x{0};
+  int w{0};
+};
+
+PickerCard PickerCardAt(const PickerState& state, int x0, int width) {
+  const int want = std::max(state.card_w, 8);
+  // A card the screen cannot hold at the box's edge is pulled left until it
+  // fits, which for a card wider than the screen is the margin: it stops
+  // touching the box, and the band draws its plain indent instead of the
+  // connector (RenderInto asks PickerCardAt whether it still touches).
+  const int w = std::min(want, width);
+  return {std::clamp(x0, 0, std::max(0, width - w)), w};
+}
+
+// The rule between the block and the band, in the card's own language: the
+// popup fill, the band's indent, a dimmed line in the border's colour. Without
+// it the context lines and the list rows read as one list.
+void DrawPickerRule(const Editor& ed, const Palette& ui, int x0, int y, int width) {
+  if (ed.picker == nullptr) return;
+  const Attr bg = Bg(ui.popup, ui);
+  const Attr fg = Fg(ui.text, ui);
+  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const PickerCard card = PickerCardAt(*ed.picker, x0, width);
+  const int card_w = card.w;
+  const int bx = card.x;
+  for (int x = 0; x < card_w; ++x) Cell(bx + x, y, ' ', fg, bg);
+  // From the text column the rows share to the card's far edge.
+  for (int x = bx + 5; x < (bx + card_w - 1); ++x) Put(x, y, "─", border | kAttrDim, bg);
+}
+
+// The picker's band hangs off the box the way the branch row does: the same
+// left edge, the popup fill only as wide as what it says, the connector on
+// the row touching the box -- `touches` is false when the context block is
+// between the two and carries it instead. Digits are the accelerators; the
+// selected row wears ui.cursorline.primary, the band the editor puts under the
+// cursor's own line. A dimmed index/shown/total count rides the last row.
+void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int rows, int width,
+                    bool below, bool touches) {
+  if (ed.picker == nullptr) return;
+  const PickerState& state = *ed.picker;
+  const Attr bg = Bg(ui.popup, ui);
+  const Attr fg = Fg(ui.text, ui);
+  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+
+  // i/n/m -- where the selection is in the filtered list, how much of the list
+  // the filter left, how many candidates there were -- and while a child is
+  // still feeding it, that it is still coming: a count that stood still would
+  // read as the whole answer. Its width is arithmetic rather than a string
+  // measured, because every row is laid out around it and only the last one
+  // draws it. The index is padded to n's width, so stepping from row 9 to row
+  // 10 does not widen the count and move every path under it.
+  const std::size_t shown = state.shown.size();
+  const std::size_t total = PickerTotal(state);
+  const std::size_t index = (shown == 0) ? 0 : (std::min(state.selected, shown - 1) + 1);
+  const std::string_view note = PickerCountNote(state);
+  const int index_w = PickerCountDigits(shown);
+  const int count_w = (2 * index_w) + PickerCountDigits(total) + 2 + DisplayWidthOf(note);
+
+  // One width for the whole card, taken from the shown rows when the filter
+  // last changed: stepping into a longer file must not resize it (see
+  // PickerCardWidth). Long rows clip.
+  const PickerCard card = PickerCardAt(state, x0, width);
+  const int band_w = card.w;
+  const int bx = card.x;
+  const int limit = bx + band_w - 1;
+  // Where a row points rides the right edge instead of a column of its own --
+  // for every source that draws a block, whether the row leads with a name, with
+  // the line it points at, or with a matched line of the project. The count's
+  // room is kept off every row, not just the last, so the paths align.
+  const bool tailed = PickerShowsContext(state.source);
+  const int tail = tailed ? (limit - count_w - 1) : limit;
+
+  for (int r = 0; r < rows; ++r) {
+    const int y = y0 + r;
+    const std::size_t at = state.offset + static_cast<std::size_t>(r);
+    const bool selected = (at < state.shown.size()) && (at == state.selected);
+    const Attr row_bg = selected ? Bg(ui.cursorline_primary, ui) : bg;
+    for (int x = 0; x < band_w; ++x) Cell(bx + x, y, ' ', fg, row_bg);
+    const bool joins = touches && (below ? (r == 0) : (r == (rows - 1)));
+    int x = DrawText(bx + 1, y, limit, joins ? (below ? "╰─▸ " : "╭─▸ ") : "    ", border, row_bg);
+    // A tailed row has the count's column kept off it already. An untailed one
+    // runs to the card's edge, so it gives that column up on the row the count
+    // rides, rather than being stamped over there.
+    const int text_limit = (tailed || (r != (rows - 1))) ? tail : (limit - count_w - 1);
+    if (at < state.shown.size()) {
+      // Whatever holds the row -- an entry, or a byte offset into content's
+      // corpus -- and whatever it leads with, resolved in one place
+      // (PickerRowLead, PickerRowDetail).
+      const std::string_view text = PickerRowLead(state, at);
+      const std::string_view detail = PickerRowDetail(state, at);
+      // The row enter would open wears what the branch row's destination
+      // wears: ui.jump.next.
+      const Attr text_fg = selected ? (Fg(ui.jump_next, ui) | Attrs(ui.jump_next)) : fg;
+      // The digit names the window's row: 1..5 wherever the band is scrolled.
+      // A band grown past those is walked rather than numbered (PickerAccept),
+      // so the rows past them wear a space -- a digit nothing honours is worse
+      // than none, and a two-digit one would shift the text column as well.
+      const bool numbered = r < static_cast<int>(kPickerRows);
+      x = DrawText(x, y, limit, numbered ? std::to_string(r + 1) : std::string{" "}, fg | kAttrDim,
+                   row_bg);
+      if (tailed) {
+        // The line is what the row is for, so it is what the clip keeps: the
+        // detail takes its column only where doing so leaves some line behind.
+        const int dx = tail - DisplayWidthOf(detail);
+        if (dx > (x + 2)) {
+          DrawText(x + 1, y, dx - 1, text, text_fg, row_bg);
+          DrawText(dx, y, limit, detail, fg | kAttrDim, row_bg);
+        } else {
+          DrawText(x + 1, y, text_limit, text, text_fg, row_bg);
+        }
+      } else {
+        x = DrawText(x + 1, y, text_limit, text, text_fg, row_bg);
+        DrawText(x, y, text_limit, detail, text_fg | kAttrDim, row_bg);
+      }
+    }
+    if (r == (rows - 1)) {
+      const int cx = limit - count_w;
+      // Formatted where it is drawn: what FormatIntoStringView hands back is a
+      // view of a buffer the next call to it takes, so nothing here holds one.
+      if (cx > bx) {
+        DrawText(cx, y, limit,
+                 common::FormatIntoStringView<"%*lu/%lu/%lu%s">(index_w, index, shown, total, note),
+                 fg | kAttrDim, row_bg);
+      }
+    }
+  }
+}
+
+// The block drawn between the box and the band: the lines around the selected
+// row's target, a dimmed line-number gutter, and the target line in
+// ui.excerpt.match. That is the `--no-syntax --highlight-line` look
+// (cli.cpp), drawn in the editor -- no grammar runs, because this redraws on
+// every keystroke and every step. The band's left edge and its indent, so the
+// two read as one card.
+void DrawPickerContext(const Editor& ed, const Palette& ui, int x0, int y0, int rows, int width,
+                       bool below, bool touches) {
+  if (ed.picker == nullptr) return;
+  const PickerState& state = *ed.picker;
+  if (state.context.empty()) return;
+  // What the fill decided the target was, so nothing here has to know what holds
+  // the row -- content's is a byte offset into a corpus.
+  const Index target = state.context_target;
+
+  const Attr bg = Bg(ui.popup, ui);
+  const Attr fg = Fg(ui.text, ui);
+  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const Attr match = Fg(ui.excerpt_match, ui) | Attrs(ui.excerpt_match);
+
+  // No heading over the lines: the selected row says which file this is, at the
+  // card's right edge, for every source that has a block at all.
+  const int last = static_cast<int>(state.context_first) + rows - 1;
+  const int gutter = PickerCountDigits(static_cast<std::size_t>(std::max(1, last)));
+  // The band's width, not the block's own: the lines here change with every
+  // step and the card they share may not change with them. Long lines clip.
+  const PickerCard card = PickerCardAt(state, x0, width);
+  const int card_w = card.w;
+  const int bx = card.x;
+  const int limit = bx + card_w - 1;
+
+  for (int r = 0; r < rows; ++r) {
+    const int y = y0 + r;
+    for (int x = 0; x < card_w; ++x) Cell(bx + x, y, ' ', fg, bg);
+    const bool joins = touches && (below ? (r == 0) : (r == (rows - 1)));
+    int x = DrawText(bx + 1, y, limit, joins ? (below ? "╰─▸ " : "╭─▸ ") : "    ", border, bg);
+    const auto at = static_cast<std::size_t>(r);
+    if (at >= state.context.size()) continue;
+    const Index number = state.context_first + static_cast<Index>(r);
+    // Right-aligned in the gutter by the field width: the row's fill is already
+    // drawn, so the padding the format writes is the fill it writes over.
+    x = DrawText(x, y, limit, common::FormatIntoStringView<"%*td">(gutter, number), fg | kAttrDim,
+                 bg);
+    DrawText(x + 1, y, limit, state.context[at], (number == target) ? match : fg, bg);
+  }
 }
 
 // A smart-jump arrival answers the walk's only question -- press again or
@@ -1191,6 +1478,15 @@ void RenderInto(Editor& ed, int width, int height) {
   Rect focused_content{0, 0, width, height};
   bool status_clipped = false;
 
+  // A prompt that lives in a box at the caret decides what its branch row says
+  // -- and so what the bar may not say twice -- only once the box has been
+  // fitted, which needs the caret this loop finds. The focused bar waits for
+  // that; every other pane's is drawn with the rest of it.
+  const bool prompt_at_caret = ed.prompt_active &&
+                               ((ed.prompt_kind == PromptKind::kSmartJump) ||
+                                (ed.prompt_kind == PromptKind::kPicker));
+  std::optional<PaneRef> focused_pane;
+
   // Not over a leap: the popup is drawn after the panes and would cover labels
   // whose keys are still armed, hiding targets the user can still take by
   // pressing them. The message keeps its place in ed.status and in :messages
@@ -1226,13 +1522,16 @@ void RenderInto(Editor& ed, int width, int height) {
 
     const int text_w = TextWidthOf(area, width);
     const Rect content = PaneContent(ed, area, width);
-    if (pane.focused) focused_content = content;
+    if (pane.focused) {
+      focused_content = content;
+      focused_pane.emplace(pane);
+    }
     g_clip = Clip{content.x, content.y, content.w, content.h};
     int pane_x = -1;
     int pane_y = -1;
     RenderPane(ed, pane, ui, content.w, content.h, pane_x, pane_y,
                pane.focused ? &status_clipped : nullptr,
-               pane.focused && overlay_takes_message);
+               pane.focused && overlay_takes_message, pane.focused && prompt_at_caret);
 
     if (text_w < area.w) {
       g_clip = Clip{area.x + text_w, area.y, area.w - text_w, area.h};
@@ -1257,11 +1556,62 @@ void RenderInto(Editor& ed, int width, int height) {
 
   if (ed.prompt_active) {
     DrawCompletions(ed, ui, width, height);
-    const bool at_caret =
-        (ed.prompt_kind == PromptKind::kSmartJump) &&
-        DrawPromptBox(ed, ui, caret_x, caret_y, focused_content, width);
-    if (!at_caret) {
-      DrawPromptInput(ed, ui, 0, height - 1, width, Fg(ui.text, ui), Bg(ui.background, ui));
+    PickerWant want;
+    if ((ed.prompt_kind == PromptKind::kPicker) && (ed.picker != nullptr)) {
+      const auto shown = static_cast<int>(ed.picker->shown.size());
+      // At least one row, so an empty filter still has somewhere to say 0/N.
+      want.band_rows = std::clamp<int>(shown, 1, static_cast<int>(kPickerRows));
+      // Buffers is the one list worth reading whole: it grows into whatever the
+      // side the box takes has room for, past the baseline the side was chosen
+      // with.
+      want.band_grow = (ed.picker->source == PickerState::Source::kBuffers)
+                           ? std::max(shown, want.band_rows)
+                           : want.band_rows;
+      // However many lines were read: a target near the top of its file, or in
+      // a file that has gone away, is a shorter card or none.
+      want.context_rows = static_cast<int>(ed.picker->context.size());
+      want.rule_rows = (want.context_rows > 0) ? 1 : 0;
+    }
+    const PromptFit fit = prompt_at_caret
+                              ? FitPromptBox(ed, caret_x, caret_y, focused_content, width, want)
+                              : PromptFit{};
+    // The bar asks this before it decides whether to say ed.status itself, and
+    // only the fit knows whether the branch row survived the side it landed on.
+    ed.prompt_box_said = fit.ok && (fit.said_rows > 0);
+    if (prompt_at_caret && focused_pane.has_value() && (focused_content.h >= 2)) {
+      g_clip = Clip{focused_content.x, focused_content.y, focused_content.w, focused_content.h};
+      DrawStatus(ed, *focused_pane, ui, focused_content.h - 1, focused_content.w);
+      g_clip = Clip{0, 0, width, height};
+    }
+    if ((ed.prompt_kind == PromptKind::kPicker) && (ed.picker != nullptr)) {
+      // What stepping and the digits walk: the rows the band drew, which is
+      // what the renderer alone knows and may be none of them. A window past
+      // what is on screen would leave the accelerators opening rows nobody can
+      // see. A resize that changed it leaves the window where the selection is,
+      // not where the last screen had put it.
+      ed.picker->window = static_cast<std::size_t>(fit.ok ? fit.band_rows : 0);
+      PickerScrollToSelected(*ed.picker);
+    }
+    if (fit.ok) {
+      DrawPromptBox(ed, ui, fit, width);
+      if ((fit.band_rows > 0) && (ed.picker != nullptr)) {
+        // A card too wide for the room at the box's edge is pulled left, and a
+        // connector drawn from a card that no longer starts under the box
+        // points at the code between the two. The plain indent is what is
+        // honest there; the box stays where the caret put it either way.
+        const bool attached = PickerCardAt(*ed.picker, fit.x, width).x == fit.x;
+        DrawPickerContext(ed, ui, fit.x, fit.context_top, fit.context_rows, width, fit.below,
+                          attached);
+        if (fit.rule_rows > 0) DrawPickerRule(ed, ui, fit.x, fit.rule_top, width);
+        DrawPickerBand(ed, ui, fit.x, fit.band_top, fit.band_rows, width, fit.below,
+                       attached && (fit.context_rows == 0));
+      }
+    } else {
+      // PanesOf reserves no row for a prompt that lives in a box, so the bottom
+      // row is the focused pane's status line: the fallback input sits above it
+      // rather than over it.
+      const int y = prompt_at_caret ? std::max(0, height - 2) : (height - 1);
+      DrawPromptInput(ed, ui, 0, y, width, Fg(ui.text, ui), Bg(ui.background, ui));
     }
   } else {
     g_out->cursor_insert = (ed.mode == Mode::kInsert);

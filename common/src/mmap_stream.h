@@ -8,6 +8,11 @@
 
 namespace common {
 
+// Ceiling on how much one ReadAvailable call takes when the caller names no
+// other, so an interactive one gets a turn back even when the producer is
+// faster than we can consume.
+inline constexpr size_t kMaxBytesPerCall{8u << 20};
+
 // Outcome of one incremental read.
 // `delta` is how far the mapping moved while growing: any pointer taken into the
 // buffer before the call is off by exactly this much and must have it added back.
@@ -31,10 +36,11 @@ struct MmapStream {
   ~MmapStream();
 
   // Appends what `fd` can supply, growing the mapping as needed. A blocking fd is
-  // drained until EOF, a non-blocking one until it would block. Returns after a
-  // bounded number of bytes so a fast producer cannot starve an interactive caller.
-  // The mapping may be relocated -- see ReadProgress::delta.
-  ReadProgress ReadAvailable(int fd);
+  // drained until EOF, a non-blocking one until it would block. Returns after
+  // `max_bytes` so a fast producer cannot starve an interactive caller; a caller
+  // that does work per byte read sets its own budget, one it can finish inside a
+  // wake. The mapping may be relocated -- see ReadProgress::delta.
+  ReadProgress ReadAvailable(int fd, size_t max_bytes = kMaxBytesPerCall);
 };
 
 // Wraps a copy of `bytes` in a stream, for callers that already hold their data

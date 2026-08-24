@@ -9,7 +9,6 @@
 #include "unicode.h"
 
 namespace koi {
-namespace {
 
 // gai names the reason a compile failed in a field of a multi-line message that
 // echoes the pattern first:
@@ -42,6 +41,8 @@ std::string OneLineReason(std::string_view what) {
   if (tail.empty()) return "bad pattern";
   return std::string{tail};
 }
+
+namespace {
 
 // gai caps what one line can cost, but the cap is per subject and these loops
 // run the pattern once per line of the document -- on the main thread, and for

@@ -377,24 +377,38 @@ inherits = "audit-alpha-parent"
     EXPECT_TRUE(all_opaque(bare));
   }
 
-  TEST_CASE("theme: ronin's translucent selection reaches the screen as the blend it asks for");
+  TEST_CASE("theme: a translucent ronin colour reaches the screen as the blend it asks for");
   {
     // #474B43A4 over ronin's own background, #252524:
     // (0x47*164 + 0x25*91 + 127)/255 = 0x3B, then 0x3D, then 0x38.
     constexpr std::uint32_t kBlend = 0x3B3D38u;
     const Theme ronin = load("ronin");
     EXPECT_EQ(ronin.Get("ui.background").bg.rgb, 0x252524u);
-    EXPECT_EQ(ronin.Get("ui.selection").bg.rgb, kBlend);
-    EXPECT_EQ(ronin.Get("ui.selection.primary").bg.rgb, kBlend);
+    // ronin's own selection is authored opaque; the scrollbar is the
+    // translucent entry it still has.
+    EXPECT_EQ(ronin.Get("ui.selection").bg.rgb, 0x4C4B4Bu);
+    EXPECT_EQ(ronin.Get("ui.selection.primary").bg.rgb, 0x4C4B4Bu);
     EXPECT_EQ(ronin.Get("ui.menu.scroll").bg.rgb, kBlend);
     EXPECT_EQ(ronin.Get("ui.menu.scroll").fg.rgb, 0xBFBFBFu);
     EXPECT_TRUE(all_opaque(ronin));
     EXPECT_TRUE(all_opaque(load("calm")));
 
-    // On the screen, not just in the map: the cells under a selection carry
-    // the blend, and none of them the alpha-stripped colour.
+    // On the screen, not just in the map: a theme over ronin that asks for a
+    // translucent selection gets the blend in the cells under it, and none of
+    // them the alpha-stripped colour.
+    themes.Write("audit-alpha-ronin", R"THEME(
+inherits = "ronin"
+"ui.selection"          = { bg = "#474B43A4" }
+"ui.selection.primary"  = { bg = "#474B43A4" }
+)THEME");
+    const Theme translucent = load("audit-alpha-ronin");
+    EXPECT_EQ(translucent.Get("ui.background").bg.rgb, 0x252524u);
+    EXPECT_EQ(translucent.Get("ui.selection").bg.rgb, kBlend);
+    EXPECT_EQ(translucent.Get("ui.selection.primary").bg.rgb, kBlend);
+    EXPECT_TRUE(all_opaque(translucent));
+
     Editor ed;
-    ed.theme = ronin;
+    ed.theme = translucent;
     ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
     ed.doc.selections.Replace(ed.doc.table, {Selection{0, 5, -1}});
     constexpr int kWidth = 40;

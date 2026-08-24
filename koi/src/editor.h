@@ -19,9 +19,11 @@
 namespace koi {
 
 struct JumpStore;
+struct PickerState;
 struct ProjectStore;
 struct SmartJumpState;
 struct Syntax;
+struct WalkList;
 class KeyRecorder;
 
 enum class StatusLevel : std::uint8_t { kInfo, kWarning, kError };
@@ -405,6 +407,28 @@ std::string BlobOidOf(std::string_view text);
 
 std::filesystem::path CanonicalOf(const std::filesystem::path& path);
 
+// Default for `picker-corpus-max-bytes`. Bytes of a child's output a picker's corpus
+// will hold. Content emits every non-blank line of the project and the corpus IS
+// the row storage, so a scan of a big enough tree is the editor's memory, up to
+// the OOM killer taking it and every unsaved buffer with it. Past this the read
+// stops, the child is ended and the band keeps everything that landed -- the
+// count says it was cut off rather than showing a slice of the project as the
+// whole of it. A knob because it is a statement about one tree's size against
+// one machine's memory: above any tree worth picking through, below what the
+// machine would miss.
+inline constexpr std::uintmax_t kDefaultPickerCorpusMax = 256u << 20;
+
+// Default for `picker-file-max-bytes`. Biggest file a picker's line cache will read. A
+// picker steps into whatever a scan matched, and what a `\w` scan matches most
+// of is generated: a bundled script, a SQL dump, a checked-in minified blob.
+// Reading one whole to show three lines of it costs its size in memory and the
+// editor's whole frame in time, and a multi-gigabyte one costs the editor -- the
+// read throws where nothing catches. Past this the row keeps its own text and
+// the block draws nothing, which is what a row whose file went missing already
+// does. A knob because a project can have big files worth stepping through:
+// above any file worth reading by hand, below anything that would be felt.
+inline constexpr std::uintmax_t kDefaultPickerFileMax = 8u << 20;
+
 struct Settings {
   Index tab_width{4};
   bool insert_spaces{true};
@@ -443,13 +467,18 @@ struct Settings {
   std::string theme{"ronin"};
   std::string file_filter;
   bool record{false};
-  // Whether a lone smart-jump match jumps on its own once the prompt is quiet.
-  bool smart_jump_auto{true};
   // Worker threads for the scan pool (searches, references, the file filter).
   // They are I/O bound over a file list, so this buys concurrency between
   // scans rather than throughput within one. The pool only ever grows while
   // koi runs -- see EnsureScanWorker -- so lowering it takes a restart.
   Index scan_workers{1};
+  // Both in bytes. Snapshotted where they
+  // are spent -- the corpus ceiling into the scan when its child is spawned, the
+  // file ceiling into the picker when the prompt opens -- so neither is looked
+  // up per read or per row, and :config-reload lands on the next scan or prompt
+  // rather than under a live one.
+  std::uintmax_t picker_corpus_max{kDefaultPickerCorpusMax};
+  std::uintmax_t picker_file_max{kDefaultPickerFileMax};
 };
 
 struct WrapMetrics {
@@ -552,6 +581,7 @@ enum class PromptKind {
   kSelectRegex,
   kSearchExcerpts,
   kSmartJump,
+  kPicker,
 };
 
 // One line the re-indent-on-type trigger moved on its own, and the whitespace it
@@ -672,11 +702,6 @@ struct BoundaryRecorder {
   // the arrival is stood in. Empty for a step, which never credits.
   std::string pending_typed;
   std::string pending_target;
-  // The prompt text an auto-fired jump fired on, and empty for one submitted by
-  // hand. Reopening the prompt while such an arrival is still unconfirmed types
-  // it back in: the fire is a guess the user never pressed a key for, so taking
-  // it back has to cost nothing.
-  std::string pending_query;
 };
 
 struct Editor {
@@ -734,6 +759,11 @@ struct Editor {
   // naming where the next press of the walk goes. The first keystroke that is
   // not a step clears it, message and all.
   bool jump_branch{false};
+  // The box at the caret drew its branch row this frame, so the bar leaves
+  // ed.status to it. Written by the renderer before the focused bar is drawn:
+  // a stack squeezed out of that row, or a box with no room to draw at all,
+  // hands the message back to the bar rather than dropping it.
+  bool prompt_box_said{false};
 
   bool prompt_active{false};
   PromptKind prompt_kind{PromptKind::kCommand};
@@ -763,10 +793,20 @@ struct Editor {
   std::shared_ptr<ProjectStore> project;
 
   // The corpus snapshot the open prompt is scoring against, and the last
-  // query's ranked list. It outlives the prompt: smart_jump_next steps through
+  // query's ranked list. It outlives the prompt: picker_jump_next steps through
   // that list long after the prompt has closed. Held by pointer so editor.h
   // does not have to know what is in it.
   std::shared_ptr<SmartJumpState> smart_jump;
+
+  // The in-process picker's rows while its prompt is open, and nothing outside
+  // one: freed on accept and on cancel alike. Held by pointer for the same
+  // reason smart_jump is.
+  std::shared_ptr<PickerState> picker;
+
+  // What a pick left behind for picker_jump_next to walk: the filtered rows,
+  // capped and owned. Outlives its prompt the way smart_jump does, and only a
+  // newer list of either kind replaces it.
+  std::shared_ptr<WalkList> walk;
 
   BoundaryRecorder record;
 

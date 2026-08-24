@@ -63,8 +63,8 @@
 "ui.cursor.primary"         = { fg = "cyan", modifiers = ["reversed"]          }
 "ui.cursor.match"           = { fg = "red", modifiers = ["underlined", "bold"] }
 
-"ui.selection"              = { bg = "#474B43A4"                               }
-"ui.selection.primary"      = { bg = "#474B43A4"                               }
+"ui.selection"              = { bg = "#4c4b4b"                                 }
+"ui.selection.primary"      = { bg = "#4c4b4b"                                 }
 "ui.cursorline.primary"     = { bg = "#313131"                                 }
 
 "ui.linenr"                 = { fg = "#7d7d7d"                                 }

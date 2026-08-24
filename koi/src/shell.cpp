@@ -111,8 +111,7 @@ std::string SelfExecutablePath() {
 
 }
 
-std::string ExpandVariables(std::string_view command, const Editor& ed,
-                            std::string_view user_query) {
+std::string ExpandVariables(std::string_view command, const Editor& ed) {
   std::string out;
   out.reserve(command.size());
 
@@ -145,8 +144,6 @@ std::string ExpandVariables(std::string_view command, const Editor& ed,
       value = std::to_string(ColumnForByte(ed.doc.table, PrimaryCursorByte(ed), ed.doc.tab_width) + 1);
     } else if (name == "selection") {
       value = PrimaryText(ed);
-    } else if (name == "user_query") {
-      value = user_query;
     } else {
       known = false;
     }
@@ -291,79 +288,6 @@ void RunShellCommand(Editor& ed, std::string_view command, ShellMode mode) {
   }
   ed.doc.selections.Replace(ed.doc.table, std::move(ranges));
   if (IsExcerptView(ed.doc)) DropUnreachableEpochs(ed.doc);
-}
-
-namespace {
-
-bool PickerOutput(Editor& ed, std::string_view command, std::string_view items,
-                  std::vector<std::string>& lines) {
-  lines.clear();
-  if (command.empty()) return false;
-
-  std::optional<common::MmapStream> input = common::MmapStreamFromBytes(items.data(), items.size());
-  if (!input) {
-    ed.status.Fail("could not stage the picker's input");
-    return false;
-  }
-
-  if (ed.suspend_terminal) ed.suspend_terminal();
-  const common::CmdResult result = common::RunCmdWithCapture(
-      std::string{command}, common::CaptureMode::kPipe, common::CaptureMode::kInherit, &*input);
-  if (ed.resume_terminal) ed.resume_terminal();
-
-  if (!result.output) {
-    ed.status.Fail("could not run the picker: " + std::string{command});
-    return false;
-  }
-  if (result.exit_status == 127) {
-    ed.status.Fail("a program in the picker command was not found: " + std::string{command});
-    return false;
-  }
-  if (result.exit_status != 0) {
-    if ((result.exit_status != 1) && (result.exit_status != 130)) {
-      ed.status.Warn("the picker exited " + std::to_string(result.exit_status));
-    }
-    return true;
-  }
-
-  std::string text(result.output->buffer, result.output->size);
-  while (!text.empty() && ((text.back() == '\n') || (text.back() == '\r'))) text.pop_back();
-  if (text.empty()) {
-    return true;
-  }
-  if (!IsWellFormedUtf8(text)) {
-    ed.status.Fail("the picker returned invalid UTF-8");
-    return false;
-  }
-
-  size_t at = 0;
-  while (at <= text.size()) {
-    const size_t eol = std::min(text.find('\n', at), text.size());
-    std::string_view line{text.data() + at, eol - at};
-    while (!line.empty() && (line.back() == '\r')) line.remove_suffix(1);
-    lines.emplace_back(line);
-    if (eol == text.size()) break;
-    at = eol + 1;
-  }
-  return true;
-}
-
-}
-
-bool RunPickerLines(Editor& ed, std::string_view command, std::string_view items,
-                    std::string& query, std::vector<std::string>& rows) {
-  query.clear();
-  rows.clear();
-  std::vector<std::string> lines;
-  if (!PickerOutput(ed, command, items, lines)) return false;
-  if (lines.empty()) return true;
-  if (lines.size() == 1) {
-    rows = std::move(lines);
-    return true;
-  }
-  query = std::move(lines.front());
-  rows.assign(std::make_move_iterator(lines.begin() + 1), std::make_move_iterator(lines.end()));
-  return true;
 }
 
 namespace {

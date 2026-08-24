@@ -2041,6 +2041,8 @@ constexpr std::array kCommands = std::to_array<CommandDef>({
     {"paste_before", KOI_CMD({ Paste(ed, false); }), "paste before the selection"},
     {"paste_clipboard_after", KOI_CMD({ PasteFromClipboard(ed, true, false); }), "paste the system clipboard after the selection"},
     {"paste_clipboard_before", KOI_CMD({ PasteFromClipboard(ed, false, false); }), "paste the system clipboard before the selection"},
+    {"picker_jump_next", KOI_CMD({ PickerJumpStep(ed, true); }), "the next place the last jump or pick found"},
+    {"picker_jump_prev", KOI_CMD({ PickerJumpStep(ed, false); }), "the previous place the last jump or pick found"},
     {"redo", KOI_CMD({ UndoOrRedo(ed, false); }), "redo"},
     {"remove_primary_selection", KOI_CMD({
        if (ed.doc.selections.Size() > 1) {
@@ -2073,8 +2075,6 @@ constexpr std::array kCommands = std::to_array<CommandDef>({
     {"shrink_height", KOI_CMD({ ResizeFocusedPane(ed, ResizeAxis::kHeight, false); }), "make this window a tenth shorter"},
     {"shrink_width", KOI_CMD({ ResizeFocusedPane(ed, ResizeAxis::kWidth, false); }), "make this window a tenth narrower"},
     {"smart_jump", KOI_CMD({ SmartJumpPrompt(ed); }), "jump to somewhere you have been, by any part of it"},
-    {"smart_jump_next", KOI_CMD({ SmartJumpStep(ed, true); }), "the next place the last smart jump found"},
-    {"smart_jump_prev", KOI_CMD({ SmartJumpStep(ed, false); }), "the previous place the last smart jump found"},
     {"split_selection", KOI_CMD({ ArmPendingChar(ed, PendingChar::kSplitOn, false, "split on char..."); }), "split every selection on a character"},
     {"split_selection_on_newline", KOI_CMD({ SplitOnNewlines(ed); }), "one cursor per selected line"},
     {"surround_add", KOI_CMD({ ArmPendingChar(ed, PendingChar::kSurroundAdd, false, "surround with..."); }), "wrap the selection in a pair"},
@@ -2562,12 +2562,13 @@ class Recording {
 
 void SearchPreviewJump(Editor& ed);
 
-// What a keystroke in the prompt costs, for the two kinds that answer while you
-// type. Both are cheap and both decline unless their own prompt is the one
+// What a keystroke in the prompt costs, for the kinds that answer while you
+// type. All are cheap and all decline unless their own prompt is the one
 // open, so the key path calls this rather than knowing which is which.
 void PromptTyped(Editor& ed) {
   SearchPreviewJump(ed);
   SmartJumpPreview(ed);
+  PickerRefilter(ed);
 }
 
 void SearchPreviewJump(Editor& ed) {
@@ -2601,13 +2602,13 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
       switch (key.named) {
         case NamedKey::kEsc: PromptCancel(ed); return;
         case NamedKey::kRet: PromptSubmit(ed); return;
+        // Esc is the only way out of a prompt. A backspace with nothing left
+        // to delete deletes nothing: closing on it costs a picker's whole
+        // scan for one keystroke too many, and the key that got you there is
+        // the key you are already leaning on.
         case NamedKey::kBackspace:
-          if (ed.prompt_input.empty()) {
-            PromptCancel(ed);
-          } else {
-            PromptBackspace(ed);
-            PromptTyped(ed);
-          }
+          PromptBackspace(ed);
+          PromptTyped(ed);
           return;
         case NamedKey::kDelete:
           PromptDeleteForward(ed);
@@ -2616,12 +2617,20 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
         case NamedKey::kLeft: PromptMoveLeft(ed); return;
         case NamedKey::kRight: PromptMoveRight(ed); return;
         case NamedKey::kUp:
-          PromptHistory(ed, true);
-          PromptTyped(ed);
+          if (ed.prompt_kind == PromptKind::kPicker) {
+            PickerStep(ed, false);
+          } else {
+            PromptHistory(ed, true);
+            PromptTyped(ed);
+          }
           return;
         case NamedKey::kDown:
-          PromptHistory(ed, false);
-          PromptTyped(ed);
+          if (ed.prompt_kind == PromptKind::kPicker) {
+            PickerStep(ed, true);
+          } else {
+            PromptHistory(ed, false);
+            PromptTyped(ed);
+          }
           return;
         case NamedKey::kHome: PromptHome(ed); return;
         case NamedKey::kEnd: PromptEnd(ed); return;
@@ -2636,10 +2645,27 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
         // been; when the answer is not in it, the thing that searches the
         // project is one keystroke away and takes the query with it.
         SmartJumpToPicker(ed);
+      } else if (ed.prompt_kind == PromptKind::kPicker) {
+        PickerStep(ed, true);
       } else {
         PromptInsert(ed, "\t");
         PromptTyped(ed);
       }
+      return;
+    }
+    if ((key.named == NamedKey::kTab) && (key.mods == kModShift) &&
+        (ed.prompt_kind == PromptKind::kPicker)) {
+      PickerStep(ed, false);
+      return;
+    }
+    // A digit opens that visible band row directly -- the row the digit is
+    // drawn on, wherever the window is scrolled. Digits are selection keys
+    // here and not pattern text, a literal digit in a query given up for one
+    // press. Accelerators end at five -- any other digit is still typed in,
+    // and a band grown past five (buffers) is walked rather than numbered.
+    if ((ed.prompt_kind == PromptKind::kPicker) && (key.mods == kModNone) &&
+        (key.named == NamedKey::kNone) && (key.code >= '1') && (key.code < ('1' + kPickerRows))) {
+      PickerAccept(ed, static_cast<int>(key.code - '1'));
       return;
     }
     if ((key.mods == kModCtrl) && (key.code == 'u')) {
@@ -3535,6 +3561,12 @@ void SelectRegex(Editor& ed, std::string_view pattern) {
 
 void PromptSubmit(Editor& ed) {
   if (!ed.prompt_active) return;
+  // The picker's enter answers with the selected row, not the input -- an
+  // empty input still opens the top one -- and it closes the prompt itself.
+  if (ed.prompt_kind == PromptKind::kPicker) {
+    PickerAccept(ed);
+    return;
+  }
   const PromptKind kind = ed.prompt_kind;
   std::string line = ed.prompt_input;
   PromptCancel(ed);
@@ -3558,6 +3590,7 @@ void PromptSubmit(Editor& ed) {
     case PromptKind::kSelectRegex: SelectRegex(ed, line); return;
     case PromptKind::kSearchExcerpts: SearchExcerpts(ed, line); return;
     case PromptKind::kSmartJump: SmartJumpSubmit(ed, line); return;
+    case PromptKind::kPicker: return;
   }
 }
 
@@ -3777,6 +3810,7 @@ void CloseBuffer(Editor& ed, bool force) {
                    " has unsaved changes -- :w to write, :bc! to discard");
     return;
   }
+  DropBuffersWalk(ed);
   CloseActiveBuffer(ed);
   ed.mode = Mode::kNormal;
   ApplyModeInvariants(ed);
@@ -3819,6 +3853,7 @@ void CloseOtherBuffers(Editor& ed, bool force) {
       return;
     }
   }
+  DropBuffersWalk(ed);
   std::size_t keep = ed.active;
   int guard = 0;
   std::size_t closed = 0;
@@ -3962,10 +3997,16 @@ void ApplyPaste(Editor& ed, std::string_view raw) {
     }
   }
   if (ed.prompt_active) {
+    // One line, and no tab in it: a prompt is a line, and `last_picker` writes
+    // the query behind a tab, so a pasted one would cut it short coming back.
     std::string flat{text};
     std::ranges::replace(flat, '\n', ' ');
     std::ranges::replace(flat, '\r', ' ');
+    std::ranges::replace(flat, '\t', ' ');
     PromptInsert(ed, flat);
+    // Pasting is typing: the kinds that answer while you type have to answer
+    // for this too, or the band stays on the pattern before the paste.
+    PromptTyped(ed);
     return;
   }
   if (ed.mode == Mode::kInsert) {

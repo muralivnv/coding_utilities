@@ -2166,9 +2166,9 @@ void BracketedPaste() {
     ed.doc.selections.Set(MinWidth1(ed.doc.table, Selection{0, 0, -1}));
     RunCommands(ed, {"command_mode"});
     EXPECT_TRUE(ed.prompt_active);
-    ApplyPaste(ed, "open a.txt\nsecond");
+    ApplyPaste(ed, "open a.txt\nsecond\tthird");
     EXPECT_TRUE(ed.prompt_active);
-    EXPECT_EQ(ed.prompt_input, std::string("open a.txt second"));
+    EXPECT_EQ(ed.prompt_input, std::string("open a.txt second third"));
     EXPECT_EQ(text_of(ed), std::string("alpha\n"));
   }
 

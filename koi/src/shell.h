@@ -3,7 +3,6 @@
 
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include "editor.h"
 
@@ -13,8 +12,7 @@ void PutSelfOnPath();
 
 std::string ShellQuote(std::string_view s);
 
-std::string ExpandVariables(std::string_view command, const Editor& ed,
-                            std::string_view user_query = {});
+std::string ExpandVariables(std::string_view command, const Editor& ed);
 
 enum class ShellMode {
   kDiscard,
@@ -25,9 +23,6 @@ enum class ShellMode {
 };
 
 void RunShellCommand(Editor& ed, std::string_view command, ShellMode mode);
-
-bool RunPickerLines(Editor& ed, std::string_view command, std::string_view items,
-                    std::string& query, std::vector<std::string>& rows);
 
 bool ClipboardCopy(std::string_view text);
 bool ClipboardPaste(std::string& out);

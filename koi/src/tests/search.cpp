@@ -394,6 +394,15 @@ void RegexSearch() {
     EXPECT_TRUE(!ed.prompt_active);
     EXPECT_EQ(ed.doc.selections.Primary().From(), Index{0});
 
+    // A backspace with nothing left to delete deletes nothing: esc is the only
+    // way out, here as in every other prompt.
+    HandleKeyInput(ed, maps, slash, pending);
+    HandleKeyInput(ed, maps, backspace, pending);
+    EXPECT_TRUE(ed.prompt_active);
+    EXPECT_TRUE(ed.prompt_input.empty());
+    HandleKeyInput(ed, maps, esc, pending);
+    EXPECT_TRUE(!ed.prompt_active);
+
     HandleKeyInput(ed, maps, slash, pending);
     type("gamma");
     HandleKeyInput(ed, maps, ret, pending);

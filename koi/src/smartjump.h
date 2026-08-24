@@ -172,13 +172,6 @@ inline constexpr std::size_t kSmartAdaptiveProbe = 16;
 // How much of a stored line the display carries.
 inline constexpr std::size_t kSmartDisplayBytes = 60;
 
-// How long the prompt has to sit on a lone match, with nothing typed into it,
-// before that match jumps without Enter. Extending a query can only shrink the
-// set, so the lone match is nearly always the right place even mid-word; what
-// this waits out is the typing, because a prompt that closes mid-word drops the
-// rest of the word into the buffer as commands. Tune from feel.
-inline constexpr double kSmartAutoJumpSettle = 0.3;
-
 // One evaluation: score every clause against its corpus, intersect by file, and
 // rank what the most specific clause present produced. `store` may be null --
 // then no row gets the adaptive prior, which is exactly what a corpus with no
@@ -232,7 +225,7 @@ std::string_view SmartPickerName(SmartPicker picker);
 
 
 // What the editor holds between two smart jumps. The corpus belongs to the open
-// prompt; the ranked list outlives it, because smart_jump_next steps through
+// prompt; the ranked list outlives it, because picker_jump_next steps through
 // that list long after the prompt has closed and a new query replaces it.
 struct SmartJumpState {
   SmartCorpus corpus;
@@ -242,12 +235,6 @@ struct SmartJumpState {
   std::size_t at{0};
   // The terms that produced `matches`, spelled the way `queries` is keyed.
   std::string typed;
-
-  // What the open prompt says while it is sitting on exactly one match, and
-  // when the last key was typed into it. Empty whenever the live query is not a
-  // lone match, which is the whole of what disarms the auto-jump.
-  std::string auto_query;
-  double auto_since{0};
 };
 
 }  // namespace koi

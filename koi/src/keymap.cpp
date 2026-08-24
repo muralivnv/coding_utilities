@@ -341,6 +341,14 @@ struct Reader {
       out = std::clamp<Index>(static_cast<Index>(v), lo, hi);
     });
   }
+
+  // A byte count. The clamp runs in the signed type the TOML reader hands over,
+  // so a silly number comes out clamped rather than wrapped.
+  void Bytes(std::string_view name, std::uintmax_t& out, std::int64_t lo, std::int64_t hi) const {
+    Get<std::int64_t>(name, "a number of bytes", [&out, lo, hi](std::int64_t v) {
+      out = static_cast<std::uintmax_t>(std::clamp<std::int64_t>(v, lo, hi));
+    });
+  }
 };
 
 std::string UnreachableKeyReason(const Key& key, std::string_view spelling) {
@@ -450,6 +458,10 @@ void ReadSettings(const toml::table& root, Settings& settings, std::vector<std::
   ed.Flag("cursorline", settings.cursorline);
   ed.Number("excerpt-context", settings.excerpt_context, 0, 100);
   ed.Number("scan-workers", settings.scan_workers, 1, 32);
+  ed.Bytes("picker-corpus-max-bytes", settings.picker_corpus_max, std::int64_t{4} << 20,
+           std::int64_t{64} << 30);
+  ed.Bytes("picker-file-max-bytes", settings.picker_file_max, std::int64_t{1} << 20,
+           std::int64_t{1} << 30);
 
   if (const toml::node* node = editor->get("mode-indicator")) {
     if (const auto v = node->value<std::string>(); v && ((*v == "bar") || (*v == "block"))) {
@@ -480,7 +492,6 @@ void ReadSettings(const toml::table& root, Settings& settings, std::vector<std::
 
   ed.Flag("record", settings.record);
   ed.Flag("trim_trailing_whitespace_on_save", settings.trim_trailing_whitespace_on_save);
-  ed.Flag("smart-jump-auto", settings.smart_jump_auto);
 
   ed.Get<std::string>("line-number", "\"relative\" or \"absolute\"",
                       [&settings](const std::string& v) {
@@ -709,8 +720,8 @@ pagedown = ["page_down", "align_view_center"]
 "-" = "decrement_excerpt_context"
 
 h = "smart_jump"
-b = ["smart_jump_next", "align_view_center"]
-B = ["smart_jump_prev", "align_view_center"]
+b = ["picker_jump_next", "align_view_center"]
+B = ["picker_jump_prev", "align_view_center"]
 
 [keys.normal."Z"]
 i = "scroll_up"

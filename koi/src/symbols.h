@@ -19,6 +19,12 @@ struct Symbol {
   Index line{1};
   Index column{1};
   std::string name;
+  // The line the symbol sits on, trimmed and capped the way a row holds one
+  // (TrimAnchorLine). Taken while the scan still has the file's bytes, because
+  // a picker over references shows that line and filters on it -- reading it
+  // back a row at a time is every one of those files read whole a second time.
+  // Empty for a symbol that did not come from a file scan.
+  std::string text;
 };
 
 enum class SymbolKind : std::uint8_t {

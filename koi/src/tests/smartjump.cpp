@@ -594,38 +594,85 @@ void SmartJumpLanding() {
     EXPECT_TRUE(line.picker == SmartPicker::kContent);
     EXPECT_TRUE(line.query.empty());
 
-    // And the terms reach the picker *typed* -- the command each of the three
-    // runs carries them in tooey's --query, which is the whole promise.
-    const auto opens = [&fix](const SmartHandoff& handoff, std::string_view pipeline,
-                              std::string_view prompt, std::string_view typed) {
-      const std::string_view name = SmartPickerPipeline(handoff.picker);
-      EXPECT_EQ(std::string{name}, std::string{pipeline});
-      const std::string command =
-          ExpandPickerCommand(fix.ed, PickerCommand(fix.ed, name), handoff.query);
-      EXPECT_TRUE(command.find(prompt) != std::string::npos);
-      // Quoted the way every other picker query is: what tooey is handed is
-      // the terms, whatever the shell needs around them to carry them.
-      EXPECT_TRUE(command.find("--query " + ShellQuote(typed)) != std::string::npos);
-    };
-    opens(content, "content", "[ Search ]", "zzz");
-    opens(symbol, "symbols", "[ Symbols ]", "zzz");
-    opens(file, "files", "[ Files ]", "zzz");
-    opens(defs, "symbols", "[ Symbols ]", "zzz.*vvv");
-    opens(meta, "content", "[ Search ]", R"(foo\(.*b\.r)");
-    // Nothing to type is nothing typed, not the keywords or the line number.
-    opens(line, "content", "[ Search ]", "");
+    // And the picker each one names is the picker the dead end says it is
+    // opening -- one mapping, so the message and the band cannot disagree. The
+    // blocks below open all three with the terms typed in.
+    EXPECT_EQ(std::string{SmartPickerName(content.picker)}, std::string{"content picker"});
+    EXPECT_EQ(std::string{SmartPickerName(symbol.picker)}, std::string{"symbol picker"});
+    EXPECT_EQ(std::string{SmartPickerName(file.picker)}, std::string{"file picker"});
+    EXPECT_EQ(std::string{SmartPickerName(defs.picker)}, std::string{"symbol picker"});
+    EXPECT_EQ(std::string{SmartPickerName(meta.picker)}, std::string{"content picker"});
+    EXPECT_EQ(std::string{SmartPickerName(line.picker)}, std::string{"content picker"});
   }
   {
-    // And the glue asks for it. The pickers own the screen, so without one to
-    // hand over they refuse -- which is how this sees that one was reached,
-    // where the old contract stopped at "not been there".
+    // And the glue asks for it: the box the query was typed in grows a band,
+    // filtered by the terms it carried. `zqxvw` is in no store row, so it is a
+    // dead end -- and it is a file on disk, so the picker that does search the
+    // project has something to show for it.
+    const fs::path stranger = fix.Write("zqxvw_notes.txt", "x\n");
+    fix.ed.settings.file_filter = "printf '%s\\n' " + stranger.string() + " " +
+                                  (fix.scratch.dir / "koi/src/keymap.cpp").string();
     const std::string was = fix.ed.doc.file.string();
     const std::size_t buffers = BufferCount(fix.ed);
+
     SmartJumpSubmit(fix.ed, "zqxvw");
-    EXPECT_TRUE(fix.ed.status.text().find("no terminal to hand to a picker") !=
-                std::string::npos);
+    EXPECT_TRUE(fix.ed.prompt_active);
+    EXPECT_TRUE(fix.ed.prompt_kind == PromptKind::kPicker);
+    EXPECT_TRUE(fix.ed.picker != nullptr);
+    if (fix.ed.picker == nullptr) return;
+    EXPECT_TRUE(fix.ed.picker->source == PickerState::Source::kFiles);
+    // Typed in, and a typed query is a filter: both rows were offered, one of
+    // them matches.
+    EXPECT_EQ(fix.ed.prompt_input, std::string{"zqxvw"});
+    EXPECT_EQ(fix.ed.picker->rows.size(), std::size_t{2});
+    EXPECT_EQ(fix.ed.picker->shown.size(), std::size_t{1});
+    if (fix.ed.picker->shown.size() != 1) return;
+    EXPECT_EQ(fix.ed.picker->rows[fix.ed.picker->shown[0]].target, stranger.string());
+    // Said over the band it explains, not lost to the prompt that opened.
+    EXPECT_TRUE(fix.ed.status.text().find("not been there -- file picker") != std::string::npos);
+    // Nothing was opened on the way there: the band is the answer, not a jump.
     EXPECT_EQ(fix.ed.doc.file.string(), was);
     EXPECT_EQ(BufferCount(fix.ed), buffers);
+    // And the open path records which picker ran, so last_picker reopens it.
+    std::string name;
+    std::string query;
+    EXPECT_TRUE(ReadLastPicker(name, query));
+    EXPECT_EQ(name, std::string{"files"});
+    EXPECT_EQ(query, std::string{"zqxvw"});
+    PromptCancel(fix.ed);
+  }
+  {
+    // The symbol clause takes the same door: the project scan opens in process
+    // with the query installed as the filter its rows land under.
+    SmartJumpSubmit(fix.ed, "d zqxvw");
+    EXPECT_TRUE(fix.ed.prompt_active);
+    EXPECT_TRUE(fix.ed.prompt_kind == PromptKind::kPicker);
+    EXPECT_TRUE(fix.ed.picker != nullptr);
+    if (fix.ed.picker == nullptr) return;
+    EXPECT_TRUE(fix.ed.picker->source == PickerState::Source::kProjectSymbols);
+    EXPECT_EQ(fix.ed.prompt_input, std::string{"zqxvw"});
+    EXPECT_TRUE(fix.ed.picker->scan != nullptr);
+    if (fix.ed.picker->scan == nullptr) return;
+    EXPECT_EQ(fix.ed.picker->scan->filter, std::string{"zqxvw"});
+    EXPECT_TRUE(fix.ed.status.text().find("not been there -- symbol picker") != std::string::npos);
+    PromptCancel(fix.ed);
+  }
+  {
+    // Content takes the same door, and it needs no terminal to: the scan streams
+    // into the band with the terms installed as the filter its lines land under.
+    SmartJumpSubmit(fix.ed, "c zqxvw");
+    EXPECT_TRUE(fix.ed.prompt_active);
+    EXPECT_TRUE(fix.ed.prompt_kind == PromptKind::kPicker);
+    EXPECT_TRUE(fix.ed.picker != nullptr);
+    if (fix.ed.picker == nullptr) return;
+    EXPECT_TRUE(fix.ed.picker->source == PickerState::Source::kContent);
+    EXPECT_EQ(fix.ed.prompt_input, std::string{"zqxvw"});
+    EXPECT_TRUE(fix.ed.picker->scan != nullptr);
+    if (fix.ed.picker->scan == nullptr) return;
+    EXPECT_EQ(fix.ed.picker->scan->filter, std::string{"zqxvw"});
+    EXPECT_TRUE(fix.ed.status.text().find("not been there -- content picker") !=
+                std::string::npos);
+    PromptCancel(fix.ed);
   }
 
   TEST_CASE("smart jump: Tab opens the same door the dead end does");
@@ -645,8 +692,9 @@ void SmartJumpLanding() {
     EXPECT_TRUE(meta.picker == SmartPicker::kFile);
     EXPECT_EQ(meta.query, std::string{R"(foo\()"});
 
-    // And the key reaches it. Without a terminal the picker gets no further,
-    // which is how this sees that one was asked for at all.
+    // And the key reaches it, in the box already open: one prompt closes and
+    // the next opens on the same keystroke, so what is at the caret goes from a
+    // query to a band without ever being nothing.
     PressKey press;
     press(fix.ed, "h");
     press(fix.ed, "k");
@@ -654,9 +702,16 @@ void SmartJumpLanding() {
     press(fix.ed, "y");
     EXPECT_TRUE(fix.ed.prompt_active);
     press(fix.ed, "tab");
+    EXPECT_TRUE(fix.ed.prompt_active);
+    EXPECT_TRUE(fix.ed.prompt_kind == PromptKind::kPicker);
+    EXPECT_TRUE(fix.ed.picker != nullptr);
+    if (fix.ed.picker == nullptr) return;
+    EXPECT_TRUE(fix.ed.picker->source == PickerState::Source::kFiles);
+    EXPECT_EQ(fix.ed.prompt_input, std::string{"key"});
+    // Filtering, not just prefilled: keymap.cpp of the two rows the filter ran.
+    EXPECT_EQ(fix.ed.picker->shown.size(), std::size_t{1});
+    press(fix.ed, "esc");
     EXPECT_FALSE(fix.ed.prompt_active);
-    EXPECT_TRUE(fix.ed.status.text().find("no terminal to hand to a picker") !=
-                std::string::npos);
   }
 
   TEST_CASE("smart jump: an ambiguous query lands the best match, not a list");
@@ -771,13 +826,22 @@ void SmartJumpAdaptiveLoop() {
 void SmartJumpStepping() {
   TEST_CASE("smart jump: next and prev walk the last query's list, and wrap");
 
+  // Driven through picker_jump_next/_prev rather than SmartJumpStep itself:
+  // with no picker walk standing, the dispatch is smart-jump's stepping, and
+  // that is the half of the contract these cases are about.
   Fixture fix{"koi-smartjump-step"};
   if (fix.ed.project == nullptr) return;
   // Nothing yet.
-  SmartJumpStep(fix.ed, true);
+  PickerJumpStep(fix.ed, true);
   EXPECT_TRUE(fix.ed.status.text().find("no smart jump") != std::string::npos);
 
+  // A picker walk standing, and a submit made after it: the submit's list wins
+  // and the walk is freed, the other half of the handoff.
+  fix.ed.walk = std::make_shared<WalkList>();
+  fix.ed.walk->rows.push_back(WalkRow{"a.txt", "a.txt", {}, 1, 1});
+
   SmartJumpSubmit(fix.ed, "key");
+  EXPECT_TRUE(fix.ed.walk == nullptr);
   // Enter landed match 1 of 3; the list survives the landing for stepping.
   EXPECT_FALSE(IsExcerptView(fix.ed.doc));
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
@@ -790,23 +854,23 @@ void SmartJumpStepping() {
   // An arrival hangs its feedback off the caret rather than the bar.
   EXPECT_TRUE(fix.ed.jump_branch);
 
-  SmartJumpStep(fix.ed, true);
+  PickerJumpStep(fix.ed, true);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keylog.cpp"});
   EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 2/3  koi/src/tooey.cpp"));
 
-  SmartJumpStep(fix.ed, true);
+  PickerJumpStep(fix.ed, true);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"tooey.cpp"});
   // The end of the list, said as what the next press costs. The wrap words
   // stay outside the mark.
   EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 3/3  wraps to koi/src/keymap.cpp"));
   EXPECT_TRUE(fix.ed.status.target().starts_with("koi/src/keymap.cpp"));
 
-  SmartJumpStep(fix.ed, true);
+  PickerJumpStep(fix.ed, true);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
   EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 1/3  koi/src/keylog.cpp"));
   EXPECT_TRUE(fix.ed.status.text().find("wrapped to the top") != std::string::npos);
 
-  SmartJumpStep(fix.ed, false);
+  PickerJumpStep(fix.ed, false);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"tooey.cpp"});
   // Direction-aware: prev from the last row names the row behind it, which is
   // the one prev would give again.
@@ -814,15 +878,15 @@ void SmartJumpStepping() {
   EXPECT_TRUE(fix.ed.status.text().find("wrapped to the bottom") != std::string::npos);
 
   // And prev from the top wraps the other way.
-  SmartJumpStep(fix.ed, false);
-  SmartJumpStep(fix.ed, false);
+  PickerJumpStep(fix.ed, false);
+  PickerJumpStep(fix.ed, false);
   EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
   EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 1/3  wraps to koi/src/tooey.cpp"));
 
   // A new query replaces the list outright.
   SmartJumpSubmit(fix.ed, "piece");
   EXPECT_EQ(fix.ed.smart_jump->matches.size(), std::size_t{1});
-  SmartJumpStep(fix.ed, true);
+  PickerJumpStep(fix.ed, true);
   EXPECT_TRUE(fix.ed.status.text().starts_with("ᛃ 1/1"));
 
   // The branch lives for exactly one decision: the first key that is not a
@@ -864,148 +928,8 @@ void SmartJumpStepping() {
   SmartJumpSubmit(fix.ed, "zqxvw");
   EXPECT_TRUE(fix.ed.smart_jump->matches.empty());
   EXPECT_TRUE(fix.ed.smart_jump->typed.empty());
-  SmartJumpStep(fix.ed, true);
+  PickerJumpStep(fix.ed, true);
   EXPECT_TRUE(fix.ed.status.text().find("no smart jump") != std::string::npos);
-}
-
-void SmartJumpAutoFire() {
-  TEST_CASE("smart jump: a lone match jumps once the typing stops");
-
-  Fixture fix{"koi-smartjump-autofire"};
-  if (fix.ed.project == nullptr) return;
-  PressKey press;
-  press(fix.ed, "h");
-  press(fix.ed, "k");
-  press(fix.ed, "e");
-  press(fix.ed, "y");
-
-  // Three matches: nothing armed, and the settle check is a no-op however long
-  // the prompt sits there.
-  EXPECT_TRUE(fix.ed.status.text().starts_with("3  "));
-  EXPECT_FALSE(SmartJumpSettling(fix.ed));
-  CheckSmartJumpAutoFire(fix.ed);
-  EXPECT_TRUE(fix.ed.prompt_active);
-
-  // One match arms it, and it does not fire on the keystroke that made it lone.
-  press(fix.ed, "m");
-  EXPECT_TRUE(fix.ed.status.text().starts_with("1  "));
-  EXPECT_TRUE(SmartJumpSettling(fix.ed));
-  CheckSmartJumpAutoFire(fix.ed);
-  EXPECT_TRUE(fix.ed.prompt_active);
-
-  // Still typing: a key inside the window restarts the clock, which is the
-  // whole point -- `keym` is lone before `keymap` is finished.
-  fix.ed.smart_jump->auto_since -= kSmartAutoJumpSettle - 0.05;
-  press(fix.ed, "a");
-  EXPECT_EQ(fix.ed.prompt_input, std::string{"keyma"});
-  CheckSmartJumpAutoFire(fix.ed);
-  EXPECT_TRUE(fix.ed.prompt_active);
-
-  // Quiet for the settle, and it goes -- no Enter, and everything Enter does:
-  // the prompt closes, the cursor is there, and the arrival is armed rather
-  // than recorded.
-  fix.ed.smart_jump->auto_since -= kSmartAutoJumpSettle + 0.05;
-  CheckSmartJumpAutoFire(fix.ed);
-  EXPECT_FALSE(fix.ed.prompt_active);
-  EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
-  EXPECT_TRUE(fix.ed.record.pending);
-  EXPECT_EQ(fix.ed.smart_jump->matches.size(), std::size_t{1});
-  EXPECT_EQ(Scalar(fix.db, "SELECT COUNT(*) FROM queries WHERE prefix='keyma';"), std::int64_t{0});
-
-  TEST_CASE("smart jump: reopening after an auto-jump types the query back in");
-  // The fire was a guess nothing was pressed for, so the correction starts
-  // from what fired rather than from an empty prompt -- and the arrival it is
-  // correcting is dropped, the way any reopening drops one.
-  press(fix.ed, "h");
-  EXPECT_TRUE(fix.ed.prompt_active);
-  EXPECT_EQ(fix.ed.prompt_input, std::string{"keyma"});
-  EXPECT_EQ(fix.ed.prompt_cursor, std::size_t{5});
-  EXPECT_FALSE(fix.ed.record.pending);
-  // And the prefill is not armed: firing it again is the one thing this prompt
-  // is open to prevent.
-  EXPECT_FALSE(SmartJumpSettling(fix.ed));
-  CheckSmartJumpAutoFire(fix.ed);
-  EXPECT_TRUE(fix.ed.prompt_active);
-  PromptCancel(fix.ed);
-
-  TEST_CASE("smart jump: two matches never fire by themselves");
-  SmartJumpPrompt(fix.ed);
-  EXPECT_TRUE(fix.ed.prompt_input.empty());
-  for (const std::string_view key : {"c", "space", "s", "p", "l", "i", "t"}) press(fix.ed, key);
-  EXPECT_EQ(fix.ed.prompt_input, std::string{"c split"});
-  EXPECT_TRUE(fix.ed.status.text().starts_with("2  "));
-  EXPECT_FALSE(SmartJumpSettling(fix.ed));
-  CheckSmartJumpAutoFire(fix.ed);
-  EXPECT_TRUE(fix.ed.prompt_active);
-  PromptCancel(fix.ed);
-
-  TEST_CASE("smart jump: a jump submitted by hand leaves no query to reopen with");
-  SmartJumpSubmit(fix.ed, "keyl");
-  EXPECT_EQ(fix.ed.doc.file.filename().string(), std::string{"keylog.cpp"});
-  EXPECT_TRUE(fix.ed.record.pending);
-  SmartJumpPrompt(fix.ed);
-  EXPECT_TRUE(fix.ed.prompt_input.empty());
-  PromptCancel(fix.ed);
-
-  TEST_CASE("smart jump: an auto-fired arrival is still held by the bounce");
-  {
-    Fixture bounced{"koi-smartjump-autofire-bounce"};
-    if (bounced.ed.project == nullptr) return;
-    std::string error;
-    bounced.ed.jumps = JumpStore::Open(bounced.ed.project, "pane", error);
-    const auto described = [&bounced](std::string_view key) {
-      return Scalar(bounced.db,
-                    "SELECT COUNT(*) FROM locations WHERE path=? AND line=1"
-                    " AND content IS NOT NULL;",
-                    key);
-    };
-
-    PressKey keys;
-    for (const std::string_view key : {"h", "k", "e", "y", "m"}) keys(bounced.ed, key);
-    bounced.ed.smart_jump->auto_since -= kSmartAutoJumpSettle + 0.05;
-    CheckSmartJumpAutoFire(bounced.ed);
-    EXPECT_EQ(bounced.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
-    EXPECT_TRUE(bounced.ed.record.pending);
-
-    // Away inside the window: a jump that fired by itself buys no more than one
-    // that was asked for, which is what makes a mis-fire free.
-    EXPECT_TRUE(OpenFile(bounced.ed, bounced.scratch.dir / "koi/src/keylog.cpp"));
-    NoteCommandBoundary(bounced.ed);
-    EXPECT_FALSE(bounced.ed.record.pending);
-    EXPECT_EQ(described("koi/src/keymap.cpp"), std::int64_t{0});
-    EXPECT_EQ(Scalar(bounced.db, "SELECT COUNT(*) FROM queries WHERE prefix='keym';"),
-              std::int64_t{0});
-  }
-
-  TEST_CASE("smart jump: smart-jump-auto off leaves the lone match to enter");
-  {
-    Fixture off{"koi-smartjump-autofire-off"};
-    if (off.ed.project == nullptr) return;
-    off.ed.settings.smart_jump_auto = false;
-
-    PressKey keys;
-    for (const std::string_view key : {"h", "k", "e", "y", "m"}) keys(off.ed, key);
-    // The lone match is still counted and still named -- only the jump is
-    // withheld, and withheld by never arming, so there is no clock to run out.
-    EXPECT_TRUE(off.ed.status.text().starts_with("1  "));
-    EXPECT_TRUE(off.ed.smart_jump->auto_query.empty());
-    EXPECT_FALSE(SmartJumpSettling(off.ed));
-
-    off.ed.smart_jump->auto_since -= kSmartAutoJumpSettle + 0.05;
-    CheckSmartJumpAutoFire(off.ed);
-    EXPECT_TRUE(off.ed.prompt_active);
-    EXPECT_EQ(off.ed.prompt_input, std::string{"keym"});
-
-    // Back on, and the next keystroke arms the way it always did.
-    off.ed.settings.smart_jump_auto = true;
-    keys(off.ed, "a");
-    EXPECT_EQ(off.ed.prompt_input, std::string{"keyma"});
-    EXPECT_TRUE(SmartJumpSettling(off.ed));
-    off.ed.smart_jump->auto_since -= kSmartAutoJumpSettle + 0.05;
-    CheckSmartJumpAutoFire(off.ed);
-    EXPECT_FALSE(off.ed.prompt_active);
-    EXPECT_EQ(off.ed.doc.file.filename().string(), std::string{"keymap.cpp"});
-  }
 }
 
 void SmartJumpBounceRule() {

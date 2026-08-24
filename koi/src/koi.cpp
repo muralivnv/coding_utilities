@@ -7,6 +7,7 @@
 #pragma GCC diagnostic pop
 #undef TB_IMPL
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -78,6 +79,18 @@ void RegisterCrashBuffers(Editor& ed) {
 
 bool TermboxEnter() {
   if (tb_init() != TB_OK) return false;
+  // termbox opens the tty and its resize pipe without O_CLOEXEC, so every
+  // `sh -c` a picker scan or a command job forks inherits all three -- a
+  // pipeline holding the tty open outlives the editor's idea of it. Blunt but
+  // total: koi owns every fd above the standard three at this point, its own
+  // opens all set CLOEXEC already, and nothing it spawns needs to inherit
+  // anything. Measured here: the store's three, the tty, the pipe's two -- 8 is
+  // the highest, so 16 is room to spare.
+  constexpr int kMaxInheritedFd = 16;
+  for (int fd = 3; fd < kMaxInheritedFd; ++fd) {
+    const int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+  }
   tb_set_output_mode(TB_OUTPUT_TRUECOLOR);
   tb_set_input_mode(TB_INPUT_ESC | TB_INPUT_MOUSE | TB_INPUT_PASTE | TB_INPUT_FOCUS);
   return true;
@@ -378,6 +391,10 @@ int Run(const char* arg, std::optional<std::string> piped) {
       tb_event ahead{};
       if (tb_peek_event(&ahead, 0) == TB_OK) queued = ahead;
     }
+    // The picker's scan, drained on every wake there is -- a timed-out poll or
+    // an event just handled. What arrived joins the bottom of the band before
+    // anything draws.
+    PickerPumpScan(ed);
     const bool busy = PumpCommandJobs(ed, pasting || ed.prompt_active ||
                                               (ed.mode == Mode::kInsert) || queued.has_value() ||
                                               (drag_anchor >= 0) || (drag_divider >= 0));
@@ -401,18 +418,21 @@ int Run(const char* arg, std::optional<std::string> piped) {
     } else {
       const bool chord = !pending.empty() && (ed.mode == Mode::kInsert);
       const bool draining = ed.recorder && ed.recorder->Buffered();
-      // A lone match in the smart-jump prompt jumps by itself once the typing
-      // stops, so the settle needs the loop to wake with nothing typed. This is
-      // the only clock it gets, the same way the linger rule takes its clock
-      // from whatever wakes this loop next.
-      const bool settling = !pasting && SmartJumpSettling(ed);
+      // A picker with a child still writing needs the loop to wake with
+      // nothing typed, the way a running job does -- that wake is when its
+      // rows land. Faster than the job poll because these rows are on screen
+      // and a list that fills in visible steps reads as one that is working --
+      // and ahead of it in the ternary for the same reason. A job left pending
+      // by a prompt would otherwise halve the band's fill rate, and the job
+      // pump runs on every wake, so the shorter timeout costs it nothing.
+      const bool scanning = !pasting && PickerScanning(ed);
       constexpr int kJobPollMs = 80;
-      constexpr int kSettlePollMs = static_cast<int>(kSmartAutoJumpSettle * 1000.0);
+      constexpr int kPickerPollMs = 40;
       const int wait = chord ? kChordTimeoutMs : kRecordFlushMs;
       const int rc = pasting               ? tb_peek_event(&ev, kPasteStallMs)
                      : (chord || draining) ? tb_peek_event(&ev, wait)
+                     : scanning            ? tb_peek_event(&ev, kPickerPollMs)
                      : busy                ? tb_peek_event(&ev, kJobPollMs)
-                     : settling            ? tb_peek_event(&ev, kSettlePollMs)
                                            : tb_poll_event(&ev);
       if (rc != TB_OK) {
         if (HangupRequested()) break;
@@ -435,14 +455,9 @@ int Run(const char* arg, std::optional<std::string> piped) {
             ed.recorder->Flush();
             continue;
           }
-          // Nothing arrived, which is what the settle is waiting for. Checked
-          // only here: firing on a turn an event did arrive would close the
-          // prompt in front of a key the user has already pressed.
-          if (settling) {
-            CheckSmartJumpAutoFire(ed);
-            continue;
-          }
-          if (busy) continue;
+          // Nothing typed, which is the turn the scan is polled for: the pump
+          // at the top of the loop is what the wake was for.
+          if (busy || scanning) continue;
           break;
         }
         if ((rc == TB_ERR_POLL) && (tb_last_errno() == EINTR)) continue;

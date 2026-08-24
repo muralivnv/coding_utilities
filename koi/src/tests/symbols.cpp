@@ -525,9 +525,9 @@ void SymbolLookupSaysWhyThePickerIsEmpty() {
   const std::string probe_error = "cannot read " + probe.string() + ": " +
                                   std::make_error_code(std::errc::is_a_directory).message();
 
-  // Exactly one definition, so the lookup opens it instead of handing a picker
-  // a screen this suite does not have. If the query ever captures more, this
-  // fails here rather than by launching tooey.
+  // Exactly one definition, so the lookup opens it instead of opening a picker.
+  // If the query ever captures more, this fails here rather than in whatever
+  // the band does with the extra rows.
   {
     const std::array<std::string, 1> only{defs.string()};
     std::string count_error;
@@ -800,6 +800,48 @@ void SymbolNamesAreCappedNotQuadratic() {
     EXPECT_TRUE(one.name.find("\xE2\x80\xA6") == std::string::npos);
   }
   EXPECT_TRUE(found_widget);
+}
+
+void ScannedSymbolsCarryTheirLine() {
+  TEST_CASE("symbol scan: a symbol comes back with the line it sits on");
+
+  // The scan has the file's bytes open to find the hit at all, so the line the
+  // hit sits on rides back with it. Without that, a picker showing references
+  // -- where the line is the only thing telling one row from another -- reads
+  // every one of those files back, whole, to fill its band and its filter.
+  const Scratch scratch{"koi-symbol-line-test"};
+  std::string error;
+  const std::vector<Symbol> defs =
+      ScanOne(scratch.Write("lines.cpp", "// above\n"
+                                         "    int Indented() { return 1; }\n"
+                                         "\n"
+                                         "int Plain() { return 2; }\n"),
+              SymbolKind::kDefinitions, error);
+  EXPECT_TRUE(error.empty());
+
+  std::string indented;
+  std::string plain;
+  for (const Symbol& one : defs) {
+    if (one.name == "Indented") indented = one.text;
+    if (one.name == "Plain") plain = one.text;
+  }
+  // The whole line, not the capture -- and trimmed, because a row has no column
+  // to align its indent against.
+  EXPECT_EQ(indented, std::string{"int Indented() { return 1; }"});
+  EXPECT_EQ(plain, std::string{"int Plain() { return 2; }"});
+
+  // A line no one reads is not scanned to its ends once per capture: past the
+  // window the text starts at the capture, and it is capped either way.
+  std::string minified = "int Head() { return 0; }\n";
+  for (int i = 0; i < 400; ++i) minified += "int Wide" + std::to_string(i) + "() { return 1; } ";
+  minified += "\n";
+  const std::vector<Symbol> wide =
+      ScanOne(scratch.Write("wide.cpp", minified), SymbolKind::kDefinitions, error);
+  EXPECT_TRUE(wide.size() > 400);
+  for (const Symbol& one : wide) {
+    EXPECT_TRUE(one.text.size() <= kMaxContentBytes);
+    EXPECT_TRUE(one.text.find('\n') == std::string::npos);
+  }
 }
 
 void QueryMatchesAreBoundedLikeQueryTime() {

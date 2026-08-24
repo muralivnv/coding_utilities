@@ -19,10 +19,6 @@ namespace common {
 
 namespace {
 
-// Ceiling on how much one ReadAvailable call will take, so an interactive caller
-// gets a turn back even when the producer is faster than we can consume.
-constexpr size_t kMaxBytesPerCall{8u << 20};
-
 static size_t PageSize() {
   const long queried = sysconf(_SC_PAGESIZE);
   return (queried > 0) ? static_cast<size_t>(queried) : 4096;
@@ -71,7 +67,7 @@ std::optional<MmapStream> MmapStreamFromBytes(const char* data, size_t size) {
   return out;
 }
 
-ReadProgress MmapStream::ReadAvailable(int fd) {
+ReadProgress MmapStream::ReadAvailable(int fd, size_t max_bytes) {
   ReadProgress progress;
   const size_t page_size = PageSize();
 
@@ -86,7 +82,7 @@ ReadProgress MmapStream::ReadAvailable(int fd) {
     size = 0;
   }
 
-  while (progress.new_bytes < kMaxBytesPerCall) {
+  while (progress.new_bytes < max_bytes) {
     size_t available_space = capacity - size;
 
     // Grow when full. One byte of headroom is always left unwritten so the data is
@@ -108,7 +104,7 @@ ReadProgress MmapStream::ReadAvailable(int fd) {
       available_space = capacity - size;
     }
 
-    const size_t want = std::min(available_space - 1, kMaxBytesPerCall - progress.new_bytes);
+    const size_t want = std::min(available_space - 1, max_bytes - progress.new_bytes);
     const ssize_t bytes_read = read(fd, buffer + size, want);
 
     if (bytes_read > 0) {

@@ -20,6 +20,7 @@
 #include <iterator>
 #include <map>
 #include <new>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <tuple>
@@ -33,6 +34,7 @@
 #include "project.h"
 #include "query.h"
 #include "regex.h"
+#include "search.h"
 #include "shell.h"
 #include "subprocess.h"
 #include "textobject.h"
@@ -72,65 +74,6 @@ namespace fs = std::filesystem;
 constexpr std::string_view kDefaultFileFilter =
     R"bash(find . -type f -printf '%P\n' | gai -e '.*(build|.git)')bash";
 
-constexpr std::string_view kTooey = R"bash(
-    tooey --ansi --print-query --query %{user_query} \
-    --preview-dir right --preview-size 55 \
-    --query-process-command 'gai --no-color -f "(?i)"{{@QUERY@}}' \
-    --width 100 --height 50 --position centered \
-    --preview-command '
-      payload=$(printf %s {{@SELECTION@}} | sed "s/.*\t//")
-      f=$payload; l=1
-      case $payload in (*:*)
-        f=${payload%%:*}
-        l=${payload#*:}; l=${l%%:*};;
-      esac
-      [ -n "$l" ] || l=1
-      %{koi} --render-mode "$f" --no-syntax --line-numbers --highlight-line "$l" \
-          --line-range "$(( l > 15 ? l - 15 : 1 )):$(( l + 25 ))"')bash";
-
-enum class Candidates {
-  kRankedFiles,
-  kFromFileList,
-  kSelfContained,
-};
-
-struct Pipeline {
-  std::string_view name;
-  Candidates candidates;
-  std::string_view produce;
-  std::string_view flags;
-};
-
-constexpr std::array<Pipeline, 7> kPipelines{{
-    {"files", Candidates::kRankedFiles, "", R"bash( --prompt '[ Files ] ❯ ')bash"},
-
-    {"content", Candidates::kFromFileList,
-     R"bash(xargs gai --no-color -f '\w' -v -d : --files |
-  awk -F: -v w=300 '{
-    c = ""; for (i = 3; i <= NF; i++) { if (i > 3) c = c ":"; c = c $i }
-    gsub(/^[[:space:]]+/, "", c); gsub(/[[:space:]]+$/, "", c)
-    n = split($1, a, "/")
-    printf "%s\t\033[38;5;246m%s:%s\033[0m%*s\t%s:%s\n", c, a[n], $2, w, "", $1, $2
-  }' |
-  )bash",
-     R"bash( --prompt '[ Search ] ❯ ')bash"},
-
-    {"symbols", Candidates::kFromFileList,
-     R"bash(%{koi} --symbol-mode --picker-rows --definitions \
-      --hot-first --from %{buffer_name} --files - |
-  )bash",
-     R"bash( --prompt '[ Symbols ] ❯ ')bash"},
-
-    {"buffer-symbols", Candidates::kSelfContained,
-     R"bash(%{koi} --symbol-mode --picker-rows --definitions --files %{buffer_name} |
-  )bash",
-     R"bash( --prompt '[ Symbols ] ❯ ')bash"},
-
-    {"buffers", Candidates::kSelfContained, "", R"bash( --prompt '[ Buffers ] ❯ ')bash"},
-    {"definition", Candidates::kSelfContained, "", R"bash( --prompt '[ Defs ] ❯ ')bash"},
-    {"references", Candidates::kSelfContained, "", R"bash( --prompt '[ Refs ] ❯ ')bash"},
-}};
-
 std::generator<std::string_view> CapturedLines(Editor& ed, std::string command) {
   if (command.empty()) co_return;
   const common::CmdResult result =
@@ -148,12 +91,6 @@ std::generator<std::string_view> CapturedLines(Editor& ed, std::string command) 
     if (!line.empty()) co_yield line;
     at = eol + 1;
   }
-}
-
-bool HasScreen(Editor& ed) {
-  if (ed.suspend_terminal != nullptr) return true;
-  ed.status.Warn("no terminal to hand to a picker");
-  return false;
 }
 
 std::string TargetSpec(std::string_view path, Index line, Index column) {
@@ -211,12 +148,29 @@ std::vector<std::string> HotFilesFromHere(ProjectStore& store, std::string_view 
   return hot;
 }
 
-void OpenAt(Editor& ed, std::string_view path, Index line, Index column) {
-  if (path.empty()) return;
-  if (!OpenTarget(ed, TargetSpec(path, line, column))) return;
+// False when the cursor did not move: no path, or a file that would not load --
+// in which case OpenFile has already said why.
+bool OpenAt(Editor& ed, std::string_view path, Index line, Index column) {
+  if (path.empty()) return false;
+  if (!OpenTarget(ed, TargetSpec(path, line, column))) return false;
   if (ed.project) {
     ed.project->RecordVisit(CurrentFile(ed), std::max<Index>(1, line), std::max<Index>(0, column));
   }
+  return true;
+}
+
+// What landing on a symbol tells the store: the symbol to rank higher next
+// time, and the pair of files seen together. The tail every symbol pick shares
+// -- the lone-hit jump and the in-process band land the same way, so both must
+// write the same rows. Called before OpenAt, while the file you came from is
+// still the current one -- or after it with that file passed in, where the row
+// is owed only to a landing that happened.
+void RecordSymbolPick(Editor& ed, std::string_view name, std::string_view path, Index line,
+                      std::string_view from = {}) {
+  if (ed.project == nullptr) return;
+  if (!name.empty()) ed.project->RecordSymbolVisit(name, path, line);
+  const std::string here = from.empty() ? CurrentFile(ed) : std::string{from};
+  ed.project->RecordCoVisit(here, path);
 }
 
 }
@@ -228,7 +182,11 @@ void WriteLastPicker(std::string_view name, std::string_view query) {
   fs::create_directories(path.parent_path(), ec);
   std::ofstream out{path, std::ios::binary | std::ios::trunc};
   if (!out) return;
-  out << name << '\t' << query;
+  // The one tab is the separator, so the query cannot spend one: the reader
+  // cuts at the next one and would hand back half of what was typed.
+  std::string flat{query};
+  std::ranges::replace(flat, '\t', ' ');
+  out << name << '\t' << flat;
 }
 
 bool ReadLastPicker(std::string& name, std::string& query) {
@@ -248,11 +206,9 @@ bool ReadLastPicker(std::string& name, std::string& query) {
   return !name.empty();
 }
 
-std::string RankedFileRows(Editor& ed) {
+std::vector<RankedFile> RankedFiles(Editor& ed) {
   struct Row {
-    std::string path;
-    Index line{1};
-    Index column{1};
+    RankedFile file;
     Index rank{-1};
     double score{0};
   };
@@ -277,14 +233,15 @@ std::string RankedFileRows(Editor& ed) {
   std::unordered_set<std::string> seen;
   for (const std::string_view path : CapturedLines(ed, FileFilterCommand(ed))) {
     if (path.empty() || !seen.emplace(path).second) continue;
-    Row row{std::string{path}, 1, 1, -1, 0};
+    Row row{RankedFile{std::string{path}, 1, 1, false}, -1, 0};
     const std::string key = ProjectPath(fs::path{path});
     const auto hit = frecent.find(key);
     if (hit != frecent.end()) {
       const FileVisit& visit = visits[static_cast<std::size_t>(hit->second)];
       row.rank = hit->second;
-      row.line = std::max<Index>(1, visit.line);
-      row.column = std::max<Index>(1, visit.column);
+      row.file.visited = true;
+      row.file.line = std::max<Index>(1, visit.line);
+      row.file.column = std::max<Index>(1, visit.column);
       // The last of the frecency terms, and the only one the store cannot
       // apply: a file you have touched on this branch is likelier to be the one
       // you want next. Small on purpose -- it reorders inside the frecent set
@@ -306,68 +263,13 @@ std::string RankedFileRows(Editor& ed) {
     return a.rank < b.rank;
   });
 
-  std::string out;
-  for (const Row& row : rows) {
-    const Symbol one{.path = row.path, .line = row.line, .column = row.column, .name = {}};
-    // Empty when the path holds a tab or a newline: the row could not come back
-    // naming the same file, so it is left out rather than made to point
-    // somewhere else.
-    const std::string rendered = PickerRow(row.path, FormatSymbolRow(one));
-    if (rendered.empty()) continue;
-    out += rendered;
-    out += '\n';
-  }
+  std::vector<RankedFile> out;
+  out.reserve(rows.size());
+  for (Row& row : rows) out.push_back(std::move(row.file));
   return out;
 }
 
 namespace {
-
-// `note` is what the caller wants said alongside whatever the pick turns into
-// -- a scan diagnostic, say. Appended only once something was opened, because
-// the picker owns the screen while it runs and a person who backs out of it
-// would otherwise be handed a parenthetical about a scan they abandoned.
-void RunPickerNamed(Editor& ed, std::string_view name, std::string_view query,
-                    std::string staged = {}, std::string_view note = {}) {
-  if (!HasScreen(ed)) return;
-  const std::string command = ExpandPickerCommand(ed, PickerCommand(ed, name), query);
-
-  WriteLastPicker(name, query);
-
-  const std::string items = staged.empty() && (name == "files") ? RankedFileRows(ed)
-                                                                : std::move(staged);
-  std::string chosen_query;
-  std::vector<std::string> rows;
-  if (!RunPickerLines(ed, command, items, chosen_query, rows)) return;
-  if (rows.empty()) return;
-
-  WriteLastPicker(name, chosen_query);
-
-  std::vector<Symbol> chosen;
-  for (const std::string& row : rows) {
-    Symbol parsed;
-    if (ParseSymbolRow(RowPayload(row), parsed)) chosen.push_back(std::move(parsed));
-  }
-  if (chosen.empty()) {
-    ed.status = "the picker returned nothing koi could open";
-    return;
-  }
-
-  if (ed.project) {
-    const std::string from = CurrentFile(ed);
-    for (const Symbol& one : chosen) {
-      if (one.name.empty()) continue;
-      ed.project->RecordSymbolVisit(one.name, one.path, one.line);
-      ed.project->RecordCoVisit(from, one.path);
-    }
-  }
-
-  const Symbol& first = chosen.front();
-  OpenAt(ed, first.path, first.line, first.column);
-  if (!note.empty()) ed.status += note;
-  if (chosen.size() > 1) {
-    ed.status += "  (" + std::to_string(chosen.size() - 1) + " more not opened)";
-  }
-}
 
 std::string SelectedWord(const Editor& ed) {
   const Selection& primary = ed.doc.selections.Primary();
@@ -423,6 +325,8 @@ std::string FileFilterCommand(const Editor& ed) {
   return filter.empty() ? std::string{kDefaultFileFilter} : std::string{filter};
 }
 
+namespace {
+
 void AppendFragment(std::string& command, std::string_view piece) {
   piece = Trim(piece, " \t\n");
   if (piece.empty()) return;
@@ -430,64 +334,61 @@ void AppendFragment(std::string& command, std::string_view piece) {
   command += piece;
 }
 
-std::vector<std::string_view> PickerNames() {
-  std::vector<std::string_view> out;
-  out.reserve(kPipelines.size());
-  for (const Pipeline& one : kPipelines) out.push_back(one.name);
-  return out;
+// The two sources a child produces, and the only pickers that spawn one --
+// everything else the band builds in process. Each is the file filter piped
+// into one producer, and the query rides neither: the child streams every line
+// it finds and the band filters what lands.
+struct ScanSource {
+  std::string_view name;
+  std::string_view produce;
+};
+
+constexpr std::array<ScanSource, 2> kScanSources{{
+    {"content", R"bash(xargs gai --no-color -f '\w' -v -d : --files)bash"},
+
+    {"symbols", R"bash(%{koi} --symbol-mode --picker-rows --definitions \
+      --hot-first --from %{buffer_name} --files -)bash"},
+}};
+
 }
 
-std::string PickerCommand(const Editor& ed, std::string_view name) {
-  for (const Pipeline& one : kPipelines) {
+std::string PickerScanCommand(const Editor& ed, std::string_view name) {
+  for (const ScanSource& one : kScanSources) {
     if (one.name != name) continue;
     std::string command;
-    if (one.candidates == Candidates::kFromFileList) {
-      AppendFragment(command, FileFilterCommand(ed));
-      command += " |";
-    }
+    AppendFragment(command, FileFilterCommand(ed));
+    command += " |";
     AppendFragment(command, one.produce);
-    AppendFragment(command, kTooey);
-    AppendFragment(command, one.flags);
     return command;
   }
   return {};
 }
 
-std::string ExpandPickerCommand(const Editor& ed, std::string_view command,
-                                std::string_view query) {
-  return ExpandVariables(command, ed, query);
-}
-
-std::string BufferPickerItems(const Editor& ed) {
-  std::string items;
+std::vector<BufferRow> BufferPickerRows(const Editor& ed) {
+  std::vector<BufferRow> rows;
   for (std::size_t i = 0; i < BufferCount(ed); ++i) {
     const Document& doc = BufferAt(ed, i);
     const std::string index = "#" + std::to_string(i);
-    std::string item;
     if (!HasDiskFile(doc) && !IsExcerptView(doc)) {
-      item = PickerRow(index + " [scratch]", index);
-    } else {
-      const Index line = LineAt(doc.table, CursorOf(doc.table, doc.selections.Primary()));
-      const Index column =
-          CursorOf(doc.table, doc.selections.Primary()) - LineStart(doc.table, line);
-      const std::string name = IsExcerptView(doc) ? doc.view_name : DisplayPath(doc.file);
-      const std::string where =
-          name + ":" + std::to_string(line + 1) + ":" + std::to_string(column + 1);
-      // A file row is its own payload, so a tab in the name would have
-      // RowPayload hand back a suffix of it and the pick would open a file that
-      // is not this buffer's. Nothing can encode that here; leave the row out.
-      if (where.find_first_of("\t\n\r") != std::string::npos) continue;
-      item = IsExcerptView(doc) ? PickerRow(where, index) : where;
+      rows.push_back(BufferRow{index + " [scratch]", index});
+      continue;
     }
-    if (item.empty()) continue;
-    items += item;
-    items += '\n';
+    const Index line = LineAt(doc.table, CursorOf(doc.table, doc.selections.Primary()));
+    const Index column = CursorOf(doc.table, doc.selections.Primary()) - LineStart(doc.table, line);
+    const std::string name = IsExcerptView(doc) ? doc.view_name : DisplayPath(doc.file);
+    const std::string where =
+        name + ":" + std::to_string(line + 1) + ":" + std::to_string(column + 1);
+    // A row is one line on the band and its payload is opened verbatim, so a
+    // name holding a tab or a newline can be neither drawn as one row nor
+    // reopened as itself. Nothing can encode that here; leave the row out.
+    if (where.find_first_of("\t\n\r") != std::string::npos) continue;
+    rows.push_back(BufferRow{where, IsExcerptView(doc) ? index : where});
   }
-  return items;
+  return rows;
 }
 
-void ChooseBufferRow(Editor& ed, std::string_view payload) {
-  if (payload.empty()) return;
+bool ChooseBufferRow(Editor& ed, std::string_view payload) {
+  if (payload.empty()) return false;
   const std::string_view digits = payload.substr(1);
   const bool indexed = (payload.front() == '#') && !digits.empty() &&
                        std::ranges::all_of(digits, [](char c) { return (c >= '0') && (c <= '9'); });
@@ -495,65 +396,1149 @@ void ChooseBufferRow(Editor& ed, std::string_view payload) {
     std::size_t at = 0;
     for (const char c : digits) {
       at = (at * 10) + static_cast<std::size_t>(c - '0');
-      if (at >= BufferCount(ed)) return;
+      if (at >= BufferCount(ed)) return false;
     }
     RecordJump(ed);
     SwitchToBuffer(ed, at);
     ed.mode = Mode::kNormal;
     ApplyModeInvariants(ed);
     ed.status.clear();
-    return;
+    return true;
   }
-  OpenTarget(ed, payload);
+  return OpenTarget(ed, payload);
 }
 
-void BufferPicker(Editor& ed, std::string_view query) {
-
-  if (BufferCount(ed) <= 1) {
-    ed.status.Warn("only one buffer open");
-    return;
+bool PickerShowsContext(PickerState::Source source) {
+  switch (source) {
+    case PickerState::Source::kDefs:
+    case PickerState::Source::kRefs:
+    case PickerState::Source::kFileSymbols:
+    case PickerState::Source::kProjectSymbols:
+    case PickerState::Source::kContent: return true;
+    case PickerState::Source::kFiles:
+    case PickerState::Source::kBuffers: break;
   }
-  if (!HasScreen(ed)) return;
-  const std::string command = ExpandPickerCommand(ed, PickerCommand(ed, "buffers"), query);
-
-  // Recorded like every other picker, so reopening the last one can land here.
-  // This does not go through RunPickerNamed -- it opens a buffer rather than a
-  // file at a position -- which is how it came to be the one picker that never
-  // wrote its name.
-  WriteLastPicker("buffers", query);
-
-  std::string chosen_query;
-  std::vector<std::string> rows;
-  if (!RunPickerLines(ed, command, BufferPickerItems(ed), chosen_query, rows)) return;
-  if (rows.empty()) return;
-
-  WriteLastPicker("buffers", chosen_query);
-  ChooseBufferRow(ed, RowPayload(rows.front()));
+  return false;
 }
 
-// The pipeline behind each fallback picker, spelled the way kPipelines names
-// it -- one mapping, so the dead end opens the picker it says it does.
-std::string_view SmartPickerPipeline(SmartPicker picker) {
-  switch (picker) {
-    case SmartPicker::kContent: return "content";
-    case SmartPicker::kSymbol: return "symbols";
-    case SmartPicker::kFile: break;
+namespace {
+
+// The corpus a content pick's rows live in: the scan's bytes up to the last
+// complete line. `shown` holds offsets into exactly this, so a mapping that
+// relocated as it grew costs nothing -- there is no pointer to fix up.
+std::string_view PickerCorpus(const PickerState& state) {
+  if (!state.scan || (state.scan->out.buffer == nullptr)) return {};
+  return std::string_view{state.scan->out.buffer, state.scan->parsed};
+}
+
+// The line starting at `from`, without its newline.
+std::string_view PickerCorpusLine(std::string_view corpus, std::size_t from) {
+  if (from >= corpus.size()) return {};
+  const std::size_t eol = std::min(corpus.find('\n', from), corpus.size());
+  std::string_view line = corpus.substr(from, eol - from);
+  while (!line.empty() && (line.back() == '\r')) line.remove_suffix(1);
+  return line;
+}
+
+// `path:line:` off the head of a content row -- gai's own `-v -d :` output, so
+// the first two fields are the path and the number. The rest of the line is the
+// file's, colons and all. The head's length is what the band wants -- it draws
+// the two halves apart -- and `out`, where one is passed, is where the head
+// points. Zero for a line with no head at all.
+std::size_t ContentRowHead(std::string_view line, PickerTarget* out) {
+  const std::size_t colon = line.find(':');
+  if ((colon == std::string_view::npos) || (colon == 0)) return 0;
+  const std::size_t next = line.find(':', colon + 1);
+  if (next == std::string_view::npos) return 0;
+  const std::string_view digits = line.substr(colon + 1, next - colon - 1);
+  // A colon-bearing filename can put a long digit run where the number goes, and
+  // running that into an Index is signed overflow. Eighteen fit with room to
+  // spare, and no file has 10^18 lines: past that it is not a row.
+  constexpr std::size_t kMaxLineDigits = 18;
+  if (digits.empty() || (digits.size() > kMaxLineDigits)) return 0;
+  Index number = 0;
+  for (const char c : digits) {
+    if ((c < '0') || (c > '9')) return 0;
+    number = (number * 10) + (c - '0');
+  }
+  if (out != nullptr) {
+    out->path = line.substr(0, colon);
+    out->line = std::max<Index>(1, number);
+    out->column = 1;
+  }
+  return next + 1;
+}
+
+bool ParseContentRow(std::string_view line, PickerTarget& out) {
+  return ContentRowHead(line, &out) != 0;
+}
+
+}
+
+std::string_view PickerRowText(const PickerState& state, std::size_t at) {
+  if (at >= state.shown.size()) return {};
+  if (state.source != PickerState::Source::kContent) {
+    return PickerRowText(state, state.rows[state.shown[at]]);
+  }
+  return PickerCorpusLine(PickerCorpus(state), state.shown[at]);
+}
+
+std::string_view PickerRowLead(const PickerState& state, std::size_t at) {
+  const std::string_view text = PickerRowText(state, at);
+  if (state.source != PickerState::Source::kContent) return text;
+  // The head is the detail here, so what leads the row is the file's own line,
+  // trimmed and capped the way a defs or refs row's line is -- the two read as
+  // the same kind of row because they are. A line with no head has none to take
+  // off: it is drawn whole, and it opens nothing (PickerAccept says so).
+  return TrimAnchorLine(text.substr(ContentRowHead(text, nullptr)));
+}
+
+std::string_view PickerRowDetail(const PickerState& state, std::size_t at) {
+  if (at >= state.shown.size()) return {};
+  if (state.source != PickerState::Source::kContent) return state.rows[state.shown[at]].detail;
+  const std::string_view text = PickerRowText(state, at);
+  const std::size_t head = ContentRowHead(text, nullptr);
+  // Without the colon that joined it to the line: `path:line`, which is what
+  // every other source's detail says.
+  return (head == 0) ? std::string_view{} : text.substr(0, head - 1);
+}
+
+bool PickerRowTarget(const PickerState& state, std::size_t at, PickerTarget& out) {
+  out = PickerTarget{};
+  if (at >= state.shown.size()) return false;
+  if (state.source == PickerState::Source::kContent) {
+    return ParseContentRow(PickerRowText(state, at), out);
+  }
+  const PickerEntry& row = state.rows[state.shown[at]];
+  out.path = row.target;
+  out.line = row.line;
+  out.column = row.column;
+  out.name = row.name;
+  return true;
+}
+
+std::size_t PickerTotal(const PickerState& state) {
+  if (state.source != PickerState::Source::kContent) return state.rows.size();
+  return state.scan ? state.scan->lines : 0;
+}
+
+void PickerScrollToSelected(PickerState& state) {
+  const std::size_t window = std::max<std::size_t>(1, state.window);
+  if (state.shown.size() <= window) {
+    state.offset = 0;
+    return;
+  }
+  if (state.selected < state.offset) state.offset = state.selected;
+  if (state.selected >= (state.offset + window)) state.offset = state.selected - window + 1;
+  state.offset = std::min(state.offset, state.shown.size() - window);
+}
+
+namespace {
+
+// The width `shown[from..]` alone asks for. The append path measures only the
+// rows that just landed and widens with them; a scan of thousands must not
+// re-measure the whole list on every wake.
+int PickerCardWidthFrom(const PickerState& state, std::size_t from) {
+  // A card whose rows point into files maximises the line: it takes the screen,
+  // and no row is measured to find that out. That is every source with a block
+  // -- defs, refs, both symbol lists and content -- so the loop below is files
+  // and buffers, whose rows are one short path each. Measuring the others cost a
+  // DisplayWidth pass per shown row per keystroke over a list a scan grows
+  // without limit, to land on a width the screen could not give anyway.
+  if (PickerShowsContext(state.source)) return kPickerCardWide;
+  // `i/n/m` and the two slashes, with a column of air either side. The index is
+  // drawn padded to the shown count's width, so stepping from row 9 to row 10
+  // cannot move what the count's column is kept off.
+  const int count = (2 * PickerCountDigits(state.shown.size())) +
+                    PickerCountDigits(PickerTotal(state)) + 4 +
+                    static_cast<int>(DisplayWidth(PickerCountNote(state), 1));
+  int card = kPickerCardMin;
+  for (std::size_t at = from; at < state.shown.size(); ++at) {
+    const PickerEntry& row = state.rows[state.shown[at]];
+    // Text and detail read as one here -- a path with the line it was left on --
+    // so they take one column between them.
+    const int text = static_cast<int>(DisplayWidth(PickerRowText(state, row), 1));
+    const int detail = static_cast<int>(DisplayWidth(row.detail, 1));
+    card = std::max(card, 8 + text + detail + count);
+  }
+  return card;
+}
+
+}
+
+// From the shown rows only: the block's lines change with every step, and a
+// card that resized as you stepped is what this is here to stop. Pad,
+// connector, digit, text, detail, the count's column, pad -- what
+// DrawPickerBand lays out.
+int PickerCardWidth(const PickerState& state) { return PickerCardWidthFrom(state, 0); }
+
+std::string_view PickerSourceName(PickerState::Source source) {
+  switch (source) {
+    case PickerState::Source::kBuffers: return "buffers";
+    case PickerState::Source::kDefs: return "definition";
+    case PickerState::Source::kRefs: return "references";
+    case PickerState::Source::kFileSymbols: return "buffer-symbols";
+    case PickerState::Source::kProjectSymbols: return "symbols";
+    case PickerState::Source::kContent: return "content";
+    case PickerState::Source::kFiles: break;
   }
   return "files";
 }
 
-void FilePicker(Editor& ed, std::string_view query) { RunPickerNamed(ed, "files", query); }
+namespace {
 
-void ContentPicker(Editor& ed, std::string_view query) { RunPickerNamed(ed, "content", query); }
+// Whether what is typed into the band is this source's query. Defs and refs
+// were opened for a word the selection named, and reopening them with a half
+// of a filter pattern would look that up instead.
+bool PickerQueryIsTyped(PickerState::Source source) {
+  return (source != PickerState::Source::kDefs) && (source != PickerState::Source::kRefs);
+}
 
-void SymbolPicker(Editor& ed, std::string_view query) { RunPickerNamed(ed, "symbols", query); }
+// Whose rows lead with the symbol's name rather than the line it points at. In
+// a symbol list the name is the information, and every row names a different
+// one; in defs and refs they all name the same word, so the line is. The name
+// is in hand when the row is built, which is why filtering a symbol list reads
+// no files -- the block alone reads the selected target's.
+bool PickerRowIsName(PickerState::Source source) {
+  return (source == PickerState::Source::kFileSymbols) ||
+         (source == PickerState::Source::kProjectSymbols);
+}
+
+void ShowAllPickerRows(PickerState& state) {
+  state.shown.resize(state.rows.size());
+  for (std::size_t i = 0; i < state.shown.size(); ++i) state.shown[i] = i;
+  state.selected = 0;
+  state.offset = 0;
+}
+
+// A query change on content: the pattern is put down and the pump carries it
+// over the corpus-so-far, a budget of bytes per wake. Nothing on the band moves
+// here -- the last good list stands until the catch-up reaches what the pump has
+// parsed, which is what a pattern that will not compile leaves there too. Empty
+// is the empty query, which every non-empty line meets. This is what makes each
+// byte meet each query exactly once: the bytes before the change were met by the
+// old pattern as they landed, the bytes after it are left to the catch-up, and
+// here the corpus-so-far meets the new one.
+void PickerStartRefilter(PickerState& state, std::string_view pattern) {
+  if (!state.scan) {
+    // No corpus, so no rows: content without a scan is a picker over nothing.
+    state.shown.clear();
+    state.selected = 0;
+    state.offset = 0;
+    return;
+  }
+  PickerScan& scan = *state.scan;
+  scan.refiltering = true;
+  scan.refilter_pattern = pattern;
+  scan.refilter_at = 0;
+  scan.refilter_shown.clear();
+}
+
+// Drops the coldest files until the cache is within its cap. Called with the
+// file just read already in, so the newest is never the one that goes.
+void PickerEvictFiles(PickerState& state) {
+  while (state.lines.size() > kPickerCacheFiles) {
+    auto coldest = state.lines.begin();
+    for (auto at = state.lines.begin(); at != state.lines.end(); ++at) {
+      if (at->second.used < coldest->second.used) coldest = at;
+    }
+    state.lines.erase(coldest);
+  }
+}
+
+// A file's bytes and line index, read once per stamp. Null when it cannot be
+// stat'ed, is past the prompt's `file_max`, or will not read: a row whose file
+// went away shows no line rather than a stale one, and one whose file is too
+// big to hold is told the same thing. The pointer is good until the next call --
+// eviction is the only thing that ends an entry, and nothing keeps one across a
+// lookup.
+const PickerFileLines* PickerFileCache(PickerState& state, const std::string& path) {
+  FileStamp now;
+  if (!StampFile(path, now)) return nullptr;
+  // The stamp's own size, so the ceiling is judged on the same stat the TOCTOU
+  // idiom below is built on rather than on a third look at the file. Before the
+  // cache lookup as well as before the read: a file that grew past the ceiling
+  // stops being served, and the entry it had ages out.
+  if (now.size > state.file_max) return nullptr;
+  const std::uint64_t tick = ++state.lines_clock;
+  const auto found = state.lines.find(path);
+  if ((found != state.lines.end()) && found->second.stamp.SameFile(now)) {
+    found->second.used = tick;
+    return &found->second;
+  }
+  std::error_code ec;
+  std::string text = ReadWholeFile(path, ec);
+  if (ec) return nullptr;
+  PickerFileLines entry;
+  // Stamped on both sides of the read. Agreeing, the stamp describes the bytes;
+  // disagreeing, the read raced a write and neither one does -- the file was
+  // replaced between the stat and the read, and caching it under either stamp
+  // leaves the wrong bytes there until something moves the file again. So the
+  // older of the two is kept, and the oldest stamp there is is the default one:
+  // no stat can return it, so the next look reads the file instead.
+  FileStamp after;
+  const bool settled = StampFile(path, after) && now.SameFile(after);
+  entry.stamp = settled ? std::move(now) : FileStamp{};
+  entry.used = tick;
+  for (std::size_t at = 0; at < text.size();) {
+    const std::size_t eol = std::min(text.find('\n', at), text.size());
+    entry.eols.push_back(eol);
+    at = eol + 1;
+  }
+  entry.bytes = std::move(text);
+  PickerFileLines& slot = state.lines[path];
+  slot = std::move(entry);
+  // This one carries the newest tick, so eviction cannot take it, and erasing
+  // other nodes leaves the reference to this one good.
+  PickerEvictFiles(state);
+  return &slot;
+}
+
+// `want` lines of `path` from `from`, 1-based and clipped to the file. `first`
+// comes back the number of the first line handed over, 0 for none. A file open
+// as a buffer answers from its table -- unsaved edits are what a jump would
+// land in -- and every other file from the cache above. Nothing here opens a
+// buffer: reading the lines is what makes stepping free of that.
+void PickerLinesOf(Editor& ed, PickerState& state, const std::string& path, Index from, Index want,
+                   Index& first, std::vector<std::string>& out) {
+  out.clear();
+  first = 0;
+  if (path.empty() || (want <= 0)) return;
+  from = std::max<Index>(1, from);
+
+  const std::size_t at = FindFileBuffer(ed, fs::path{path});
+  if (at < BufferCount(ed)) {
+    const Document& doc = BufferAt(ed, at);
+    const Index count = LineCount(doc.table);
+    if (from > count) return;
+    first = from;
+    for (Index line = from; (line < (from + want)) && (line <= count); ++line) {
+      out.push_back(ReadDocRange(doc.table, LineContentRange(doc.table, line - 1)));
+    }
+    return;
+  }
+
+  const PickerFileLines* file = PickerFileCache(state, path);
+  if (file == nullptr) return;
+  const auto count = static_cast<Index>(file->LineCount());
+  if (from > count) return;
+  first = from;
+  // The only copies the cache ever makes: `want` is three for the block and one
+  // for a row, so what is displayed is materialised and the file's bytes stay
+  // one buffer.
+  for (Index line = from; (line < (from + want)) && (line <= count); ++line) {
+    out.emplace_back(file->Line(static_cast<std::size_t>(line - 1)));
+  }
+}
+
+// A defs or refs row's own text: the line it points at, freshened. The row
+// arrived owning that line -- the scan that found it had the file's bytes in
+// hand -- so this is not what makes the row showable, it is what keeps it
+// honest: a file rewritten under an open picker says what it says now. Only the
+// rows the band is showing ask, which is why a keystroke reads nothing. A line
+// that will not read -- the file gone, or past the prompt's `file_max` -- leaves
+// the row saying what it arrived saying. Nothing to do for a row that is
+// already its name.
+void PickerReadRow(Editor& ed, PickerState& state, PickerEntry& row, bool again) {
+  // Content is the third source with nothing to read: its row is the line, sent
+  // by the scan and living in the corpus. Guarded here as well as at every
+  // caller, because a read for it would be a file opened per row of a list that
+  // has hundreds of thousands.
+  if (!PickerShowsContext(state.source) || PickerRowIsName(state.source) ||
+      (state.source == PickerState::Source::kContent) || (row.read && !again)) {
+    return;
+  }
+  std::vector<std::string> got;
+  Index first = 0;
+  PickerLinesOf(ed, state, row.target, row.line, 1, first, got);
+  // Trimmed and capped exactly as the scan trimmed and capped what the row
+  // arrived with, so a row that is re-read does not change shape under the
+  // band; the leading indent is the line's, not the row's, and a row that is
+  // most of a minified file is not a row.
+  if (!got.empty()) row.text = std::string{TrimAnchorLine(got.front())};
+  if (row.text.empty()) row.text = row.name;
+  row.read = true;
+}
+
+// The lines the band and the block need, and no others: a picker over thousands
+// of refs reads only the handful of files whose rows the window is on, and
+// scrolling is what makes it read the next. A symbol list's rows need none, so
+// the loop below is a no-op there and the block is its only read.
+void PickerFillShown(Editor& ed, PickerState& state) {
+  state.context.clear();
+  state.context_first = 0;
+  state.context_target = 0;
+  if (!PickerShowsContext(state.source)) return;
+
+  // The band's rows read nothing for content -- a row is the corpus line the
+  // scan sent -- so only the block reads, and it reads the file: the corpus
+  // holds the matched lines and not their neighbours.
+  const bool content = (state.source == PickerState::Source::kContent);
+  if (!content) {
+    const std::size_t window = std::max<std::size_t>(1, state.window);
+    const std::size_t last = std::min(state.shown.size(), state.offset + window);
+    for (std::size_t r = state.offset; r < last; ++r) {
+      PickerReadRow(ed, state, state.rows[state.shown[r]], true);
+    }
+  }
+  PickerTarget target;
+  if (!PickerRowTarget(state, state.selected, target)) return;
+  PickerLinesOf(ed, state, target.path, target.line - static_cast<Index>(kPickerContext / 2),
+                static_cast<Index>(kPickerContext), state.context_first, state.context);
+  state.context_target = target.line;
+}
+
+// Symbol rows for the band: where the symbol is, dimmed at the card's right
+// edge. What leads the row is the source's business (PickerRowIsName): the
+// name for a symbol list, settled here, or the line's own content for defs and
+// refs, read lazily.
+PickerEntry SymbolPickerEntry(Symbol one, PickerState::Source source) {
+  PickerEntry row;
+  row.detail = one.path + ":" + std::to_string(one.line);
+  row.line = one.line;
+  row.column = one.column;
+  row.name = std::move(one.name);
+  row.target = std::move(one.path);
+  // A symbol list's row is its name. Defs and refs lead with the line, which
+  // the scan captured for them -- so a filter pass over the whole list reads
+  // nothing, and only the handful of rows the band is showing go back to the
+  // file to say what it says now. A scan that came without a line (a row parsed
+  // back off a child's output) falls back to the name, so a row always has
+  // something to show and something to be judged by.
+  row.text = (PickerRowIsName(source) || one.text.empty()) ? row.name : std::move(one.text);
+  return row;
+}
+
+std::vector<PickerEntry> SymbolPickerEntries(std::vector<Symbol> found,
+                                             PickerState::Source source) {
+  std::vector<PickerEntry> rows;
+  rows.reserve(found.size());
+  for (Symbol& one : found) rows.push_back(SymbolPickerEntry(std::move(one), source));
+  return rows;
+}
+
+// What the branch row calls a row once the band is gone. A path with the line
+// worth naming, the way smart-jump names a destination -- except a buffer row,
+// whose target is an index into the buffer list, so the band's own text stands.
+std::string WalkLabel(PickerState::Source source, const PickerEntry& row) {
+  if (source == PickerState::Source::kBuffers) return row.text;
+  // Files carry ":line" as their detail only where the store knows the file;
+  // an unvisited one is its path and nothing else, as on the band.
+  if (source == PickerState::Source::kFiles) {
+    return row.detail.empty() ? row.target : (row.target + ":" + std::to_string(row.line));
+  }
+  return row.target + ":" + std::to_string(row.line);
+}
+
+// One shown row copied out for the walk, resolved per source. Content parses its
+// `path:line` off the corpus line here and nowhere else: what survives the
+// prompt owns its strings outright, because the corpus does not survive it. A
+// content hit is a place, not a symbol, so it records no name. False for a
+// corpus line with no parseable head -- it names nowhere, so it is no step.
+bool PickerWalkRow(const PickerState& state, std::size_t at, WalkRow& out) {
+  if (state.source == PickerState::Source::kContent) {
+    PickerTarget target;
+    if (!PickerRowTarget(state, at, target)) return false;
+    const std::string label = target.path + ":" + std::to_string(target.line);
+    out = WalkRow{std::move(target.path), label, {}, target.line, target.column};
+    return true;
+  }
+  const PickerEntry& row = state.rows[state.shown[at]];
+  out = WalkRow{row.target, WalkLabel(state.source, row), row.name, row.line, row.column};
+  return true;
+}
+
+// Both defined with the walk at the bottom of this file, where the smart-jump
+// wording they share lives.
+bool OpenWalkRow(Editor& ed, PickerState::Source source, const WalkRow& row);
+void SayWalk(Editor& ed, const WalkList& list, bool forward, bool wrapped);
+
+// A pattern that will not compile keeps the last good list -- and on the open
+// itself there is no last good anything: the card has never been measured, and
+// a card of zero is drawn as its connector and its digit with no room left for
+// a row. So the list the open made stands, and it gets a width. Only ever the
+// first pass: every later one is measured already, and remeasuring here would
+// resize the card under a half-typed pattern.
+void PickerBadPatternCard(Editor& ed, PickerState& state) {
+  if (state.card_w != 0) return;
+  PickerFillShown(ed, state);
+  state.card_w = PickerCardWidth(state);
+}
+
+// Opens the picker prompt over `rows`. A non-empty query arrives typed in: what
+// the smart-jump handoff and last_picker carry is a filter, and what defs and
+// refs carry is the word the hits were found for -- the search term, which
+// belongs in the search box where it can be edited.
+void OpenPicker(Editor& ed, PickerState::Source source, std::vector<PickerEntry> rows,
+                std::string_view query, std::unique_ptr<PickerScan> scan = nullptr) {
+  auto state = std::make_shared<PickerState>();
+  state->source = source;
+  state->rows = std::move(rows);
+  state->query = query;
+  // The setting is read here and never again while this prompt lives, so the
+  // cache's per-lookup test is against a member and a :config-reload under an
+  // open picker changes what the next one reads, not this one.
+  state->file_max = ed.settings.picker_file_max;
+  // Before the filter pass below, which is what tells a scan the pattern its
+  // rows will be judged by as they land.
+  state->scan = std::move(scan);
+  ShowAllPickerRows(*state);
+  ed.picker = std::move(state);
+  PromptOpen(ed, PromptKind::kPicker);
+  if (!query.empty()) {
+    ed.prompt_input = query;
+    ed.prompt_cursor = ed.prompt_input.size();
+  }
+  PickerRefilter(ed);
+  // After the filter pass and not before it, so the query recorded is one that
+  // compiled. A stored pattern that throws would otherwise be stored again by
+  // the reopen it broke, and last_picker would keep handing it back.
+  WriteLastPicker(PickerSourceName(source),
+                  PickerQueryIsTyped(source) ? std::string_view{ed.picker->good_input} : query);
+}
+
+}
+
+void PickerRefilter(Editor& ed) {
+  if (!ed.prompt_active || (ed.prompt_kind != PromptKind::kPicker) || !ed.picker) return;
+  PickerState& state = *ed.picker;
+  // An input that did not change rebuilds nothing. Delete at the end of the
+  // input and ctrl-u at column 0 are keys that edit nothing and still land
+  // here, and what a rebuild costs is the selection: the list is made again and
+  // the band goes back to its top row. What is said stays said too, so a
+  // half-typed pattern's reason survives a key that did not finish it.
+  if (state.last_input && (*state.last_input == ed.prompt_input)) return;
+  state.last_input = ed.prompt_input;
+  ed.status.clear();
+  // The word defs and refs open with is a search term, not a filter: every row
+  // was found for it, so a pass over it can only drop rows it should keep -- a
+  // line that spells the name differently, or a name that is not a pattern
+  // (`operator[]`). The band opens whole and narrows from the next keystroke.
+  const bool content = (state.source == PickerState::Source::kContent);
+  if (ed.prompt_input.empty() ||
+      (!PickerQueryIsTyped(state.source) && (ed.prompt_input == state.query))) {
+    // Nothing was compiled and nothing had to be: an empty filter is the whole
+    // list, and a source whose query is not typed opened with the word it holds.
+    // Either way it is a query that can be reopened.
+    state.good_input = ed.prompt_input;
+    if (content) {
+      PickerStartRefilter(state, {});
+      return;
+    }
+    ShowAllPickerRows(state);
+    if (state.scan) state.scan->filter.clear();
+    PickerFillShown(ed, state);
+    state.card_w = PickerCardWidth(state);
+    return;
+  }
+  // Compiled fresh each keystroke, and always JIT: content's corpus is
+  // megabytes, a streamed list has no ceiling on its rows, and the second
+  // compile is tens of microseconds -- never worth branching over. (?i)
+  // because what is typed into a band is a filter, not a spelling test.
+  std::optional<gai::Pcre2Regex> regex;
+  try {
+    regex.emplace(gai::Regex(gai::Compile("(?i)" + ed.prompt_input, true, true)));
+  } catch (const std::exception& e) {
+    // A half-typed pattern keeps the last good list on the band, and the
+    // branch row says why instead of flashing the band empty.
+    ed.status.Warn(OneLineReason(e.what()));
+    PickerBadPatternCard(ed, state);
+    return;
+  } catch (...) {
+    ed.status.Warn("bad pattern");
+    PickerBadPatternCard(ed, state);
+    return;
+  }
+  // Written down only now, so what last_picker records is a query that
+  // compiled: one that threw filtered nothing, and reopening on it would throw
+  // again on the way in.
+  state.good_input = ed.prompt_input;
+  // Only a pattern that compiled is carried, so rows landing under a half-typed
+  // one are filtered by the list's last good pattern -- the band keeps saying
+  // what it said, and keeps growing by the same rule. Content puts its pattern
+  // down for the pump instead: the corpus is megabytes, and a keystroke that
+  // matched all of them before it drew is the one thing this cannot do.
+  if (content) {
+    PickerStartRefilter(state, ed.prompt_input);
+    return;
+  }
+  if (state.scan) state.scan->filter = ed.prompt_input;
+  std::vector<std::size_t> shown;
+  // Every row already owns the text it is judged by -- its name for a symbol
+  // list, the line the scan captured for defs and refs -- so this sweep touches
+  // no file at all. It used to read one per row that had never been on the
+  // band: a list of a thousand references is a thousand files read whole,
+  // inside one keystroke, with nothing bounding what any of them cost.
+  for (std::size_t i = 0; i < state.rows.size(); ++i) {
+    // A match-time failure on one row is that row unproven, not the pattern
+    // bad: a non-match, and the sweep goes on.
+    if (gai::Find(*regex, PickerRowText(state, state.rows[i]))) shown.push_back(i);
+  }
+  state.shown = std::move(shown);
+  state.selected = 0;
+  state.offset = 0;
+  PickerFillShown(ed, state);
+  state.card_w = PickerCardWidth(state);
+}
+
+void PickerStep(Editor& ed, bool forward) {
+  if (!ed.prompt_active || (ed.prompt_kind != PromptKind::kPicker) || !ed.picker) return;
+  PickerState& state = *ed.picker;
+  // The whole filtered list, wrapping at its ends and not at the window's: the
+  // band is five rows of a list that is as long as it is.
+  const std::size_t count = state.shown.size();
+  if (count == 0) return;
+  state.selected =
+      forward ? ((state.selected + 1) % count) : ((state.selected + count - 1) % count);
+  PickerScrollToSelected(state);
+  // The block follows the selection, and a window that scrolled brought rows
+  // onto the band that have not read their line yet.
+  PickerFillShown(ed, state);
+}
+
+void PickerAccept(Editor& ed, int at) {
+  if (!ed.prompt_active || (ed.prompt_kind != PromptKind::kPicker) || !ed.picker) return;
+  // The rows the band drew, which is none of them when the screen had no room
+  // for a band at all: a digit names a row that is on it, so with no band it
+  // names nothing. Enter is still the selection -- what the query in the box
+  // was typed for, and a filter leaves the selection on the list's head.
+  const std::size_t window = ed.picker->window;
+  const std::size_t last = std::min(ed.picker->shown.size(), ed.picker->offset + window);
+  // A digit names a row of the window wherever it is scrolled; enter takes the
+  // selection, which the scroll keeps inside it.
+  const std::size_t pick =
+      (at < 0) ? ed.picker->selected : (ed.picker->offset + static_cast<std::size_t>(at));
+  // A digit past the band's end, or enter over an empty band: nothing to open,
+  // and the prompt stays for the pattern to be fixed.
+  if ((pick >= ed.picker->shown.size()) || ((at >= 0) && (pick >= last))) return;
+  // A corpus line with no `path:line:` head names nowhere, so there is nothing
+  // to open and no walk to build around it: said, and the prompt stays for the
+  // pattern to be fixed. Resolved here so the copy-out below can take the pick
+  // being in the list it keeps.
+  WalkRow picked;
+  if (!PickerWalkRow(*ed.picker, pick, picked)) {
+    ed.status.Warn("no path in that row");
+    return;
+  }
+  // Out of the editor before PromptCancel frees what is left there.
+  const std::shared_ptr<PickerState> taken = std::move(ed.picker);
+  // The last query that compiled, not what is in the box: accepting a row out
+  // of the last good list with a half-typed pattern still in the prompt must
+  // not write that pattern down as the way back to this list.
+  WriteLastPicker(PickerSourceName(taken->source),
+                  PickerQueryIsTyped(taken->source) ? taken->good_input : taken->query);
+
+  // The filtered list in the order the band showed it, copied into rows the
+  // walk owns outright: the prompt's state dies below, and what survives it may
+  // not point back into a line cache or a corpus. Capped, so accepting out of a
+  // huge list keeps a walk and not the pick.
+  auto walk = std::make_shared<WalkList>();
+  walk->source = taken->source;
+  const std::size_t keep = std::min(taken->shown.size(), kWalkRows);
+  // The cap is a window around the pick, not the head of the list: picking the
+  // three thousandth row must still leave somewhere to step back to.
+  const std::size_t from =
+      std::min(pick - std::min(pick, keep / 2), taken->shown.size() - keep);
+  walk->rows.reserve(keep);
+  // Rows that name nowhere are left out rather than stepped onto, so `at`
+  // follows the rows that stayed: the pick is one of them, checked above.
+  for (std::size_t r = from; r < (from + keep); ++r) {
+    if (r == pick) {
+      walk->at = walk->rows.size();
+      walk->rows.push_back(std::move(picked));
+      continue;
+    }
+    WalkRow row;
+    if (!PickerWalkRow(*taken, r, row)) continue;
+    walk->rows.push_back(std::move(row));
+  }
+  // The walk holds what had arrived, so the scan has nothing left to say: ended
+  // here rather than left to `taken` going out of scope, so the child is gone
+  // before the pick opens anything. What it had already sent is kept.
+  taken->scan.reset();
+
+  PromptCancel(ed);
+  // Whichever list was made last owns n/N, so smart-jump's goes here -- its
+  // corpus belongs to its own prompt, but the matches are the list this
+  // replaces, and a freed one cannot be stepped into by accident.
+  if (ed.smart_jump) {
+    ed.smart_jump->matches.clear();
+    ed.smart_jump->matches.shrink_to_fit();
+    ed.smart_jump->typed.clear();
+    ed.smart_jump->at = 0;
+  }
+  ed.walk = std::move(walk);
+  // Copied, not referenced: the open runs arbitrary editor machinery, and the
+  // rows are what it could move.
+  const WalkRow row = ed.walk->rows[ed.walk->at];
+  if (!OpenWalkRow(ed, ed.walk->source, row)) {
+    // Nothing arrived, so nothing is said about where it arrived: what the open
+    // wrote stands, and no branch row is drawn over it. The walk is kept -- the
+    // list is still good, and stepping off the bad row is the way out.
+    ed.jump_branch = false;
+  } else if (ed.walk->rows.size() == 1) {
+    // A lone row lands in silence, as a lone smart-jump match does: the cursor
+    // arriving is the whole answer.
+    ed.status.clear();
+    ed.jump_branch = false;
+  } else {
+    SayWalk(ed, *ed.walk, true, false);
+  }
+}
+
+void BufferPicker(Editor& ed, std::string_view query) {
+  if (BufferCount(ed) <= 1) {
+    ed.status.Warn("only one buffer open");
+    return;
+  }
+  std::vector<PickerEntry> rows;
+  for (BufferRow& row : BufferPickerRows(ed)) {
+    rows.push_back(PickerEntry{std::move(row.text), {}, std::move(row.payload), 1, 1});
+  }
+  OpenPicker(ed, PickerState::Source::kBuffers, std::move(rows), query);
+}
+
+void FilePicker(Editor& ed, std::string_view query) {
+  std::vector<PickerEntry> rows;
+  for (RankedFile& file : RankedFiles(ed)) {
+    PickerEntry row;
+    row.detail = file.visited ? (":" + std::to_string(file.line)) : std::string{};
+    row.line = file.line;
+    row.column = file.column;
+    row.text = std::move(file.path);
+    row.target = row.text;
+    rows.push_back(std::move(row));
+  }
+  OpenPicker(ed, PickerState::Source::kFiles, std::move(rows), query);
+}
+
+void ContentPicker(Editor& ed, std::string_view query) {
+  // gai's own `path:line:text`, streamed. The query does not ride the command:
+  // the child sends every line it finds and the band filters what lands, so a
+  // keystroke never restarts the scan.
+  std::ignore = PickerStartScan(ed, PickerState::Source::kContent,
+                                ExpandVariables(PickerScanCommand(ed, "content"), ed), query);
+}
+
+namespace {
+
+// Ends a child koi owns -- signal the group, reap it, close the pipe. Returns
+// the waitpid status, or -1 when there was nothing to reap or the reap gave up:
+// the child's stderr goes to /dev/null by design, so for a scan that produced
+// nothing this status is the only surviving word on why. Defined with the
+// command jobs below, which end theirs the same way and are where the unreapable
+// ones are swept from.
+int EndChild(int& pid, int& fd);
+
+// Forks `command` under $SHELL with its stdout on a non-blocking pipe, in a
+// process group of its own so ending it ends the whole pipeline and not just
+// the last stage. A command job wants the child's stderr on the pipe too --
+// its diagnostics are half of what it is showing -- while a picker scan does
+// not: a warning from the file filter would arrive on the band as a row.
+bool SpawnPipedChild(const std::string& command, bool stderr_to_pipe, int& pid, int& fd,
+                     std::string& why) {
+  int fds[2] = {-1, -1};
+  if (pipe2(fds, O_CLOEXEC) != 0) {
+    why = std::strerror(errno);
+    return false;
+  }
+  const pid_t forked = fork();
+  if (forked < 0) {
+    why = std::strerror(errno);
+    close(fds[0]);
+    close(fds[1]);
+    return false;
+  }
+  if (forked == 0) {
+    setpgid(0, 0);
+    // A child that cannot set up its stdio does not run: closing fd 0 instead
+    // would leave the next open landing on it, and with no /dev/null for fd 2 a
+    // warning from the pipeline would be written over the drawn screen. 127 is
+    // the exec failure below, which is the same news -- the command did not run.
+    const int null = open("/dev/null", O_RDWR);
+    if (null < 0) _exit(127);
+    dup2(null, 0);
+    if (!stderr_to_pipe) dup2(null, 2);
+    if (null > 2) close(null);
+    dup2(fds[1], 1);
+    if (stderr_to_pipe) dup2(fds[1], 2);
+    const char* shell = std::getenv("SHELL");
+    if ((shell == nullptr) || (*shell == '\0')) shell = "/bin/sh";
+    execl(shell, shell, "-c", command.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  setpgid(forked, forked);
+  close(fds[1]);
+  if (fcntl(fds[0], F_SETFL, O_NONBLOCK) != 0) {
+    // Read from the editor thread, so a blocking pipe is the editor waiting on
+    // whatever the child feels like writing. Nothing has been handed back yet:
+    // end what was just spawned and fail like the arms above.
+    why = std::strerror(errno);
+    int spawned = static_cast<int>(forked);
+    EndChild(spawned, fds[0]);
+    return false;
+  }
+  pid = static_cast<int>(forked);
+  fd = fds[0];
+  return true;
+}
+
+}
+
+// The one cleanup path there is: whatever frees the state ends the child.
+PickerScan::~PickerScan() { EndChild(pid, fd); }
+
+// A catch-up counts as live: the child can be reaped and the pipe closed while a
+// pattern still has megabytes of corpus to meet, and until it has, the band is
+// showing a list that is not the answer to what is typed.
+bool PickerScanLive(const PickerState& state) {
+  return state.scan && (!state.scan->done || state.scan->refiltering);
+}
+
+bool PickerScanning(const Editor& ed) {
+  return ed.prompt_active && (ed.prompt_kind == PromptKind::kPicker) && ed.picker &&
+         PickerScanLive(*ed.picker);
+}
+
+std::string_view PickerCountNote(const PickerState& state) {
+  if (PickerScanLive(state)) return kPickerScanNote;
+  if (state.scan && state.scan->truncated) return kPickerCutNote;
+  return {};
+}
+
+namespace {
+
+// The pattern blew a match-time limit, which is the pattern's doing and not the
+// line's: every line after it would blow it too, so the pass ends on the first
+// one rather than paying the limit out over a hundred thousand of them. The band
+// keeps the list it had -- and picks its own pattern up again, because bytes
+// landed while this one was being carried and the pump left them to the
+// catch-up. A live pattern that blows is the one case nothing can be picked up
+// again, so that one stops.
+void PickerFailRefilter(Editor& ed, PickerScan& scan, const std::string& why) {
+  ed.status.Warn(OneLineReason(why));
+  const bool was_live = (scan.refilter_pattern == scan.filter);
+  scan.refilter_pattern = scan.filter;
+  scan.refilter_at = 0;
+  scan.refilter_shown.clear();
+  scan.refiltering = !was_live;
+}
+
+// One wake of a query change: at most kPickerMatchBudget bytes of the parsed
+// corpus met by the new pattern, resuming where the last wake stopped. An empty
+// pattern is the empty query, which every non-empty line meets -- empty lines
+// are not rows, they carry no path:line, and the pump does not count them
+// either, so an empty query shows n out of n. True when the list changed hands.
+bool PickerCatchUp(Editor& ed, PickerState& state, PickerScan& scan) {
+  if (!scan.refiltering) return false;
+  std::optional<gai::Pcre2Regex> regex;
+  if (!scan.refilter_pattern.empty()) {
+    try {
+      // JIT from the start: this runs over a corpus of megabytes, where
+      // compiling twice costs less than matching once without it.
+      regex.emplace(gai::Regex(gai::Compile("(?i)" + scan.refilter_pattern, true, true)));
+    } catch (...) {
+      // Only a pattern that already compiled is ever put down, so this is
+      // unreachable; reached, the catch-up is dropped and the last good list
+      // stands rather than being replaced by a list nobody asked for.
+      scan.refiltering = false;
+      scan.refilter_shown.clear();
+      return false;
+    }
+  }
+  const std::string_view corpus = PickerCorpus(state);
+  const std::size_t limit = std::min(scan.parsed, scan.refilter_at + kPickerMatchBudget);
+  std::string error;
+  while (scan.refilter_at < limit) {
+    const std::size_t at = scan.refilter_at;
+    const std::size_t eol = std::min(corpus.find('\n', at), corpus.size());
+    std::string_view line = corpus.substr(at, eol - at);
+    scan.refilter_at = eol + 1;
+    while (!line.empty() && (line.back() == '\r')) line.remove_suffix(1);
+    if (line.empty()) continue;
+    if (regex && !gai::Find(*regex, line, &error)) {
+      // A limit failure is not a non-match: reading it as one drops rows in
+      // silence, which is a filter that lies about what is in the corpus.
+      if (!error.empty()) {
+        PickerFailRefilter(ed, scan, error);
+        return false;
+      }
+      continue;
+    }
+    scan.refilter_shown.push_back(at);
+  }
+  // Everything the pump has parsed -- the flushed tail included, because pipe
+  // close moves `parsed` to the end of the corpus and this chases `parsed`.
+  if (scan.refilter_at < scan.parsed) return false;
+  state.shown = std::move(scan.refilter_shown);
+  scan.refilter_shown.clear();
+  scan.filter = std::move(scan.refilter_pattern);
+  scan.refilter_pattern.clear();
+  scan.refilter_at = 0;
+  scan.refiltering = false;
+  // The one moment a shown row moves: a new list is not the old one scrolled,
+  // so the selection goes back to the top the way a keystroke's did.
+  state.selected = 0;
+  state.offset = 0;
+  PickerFillShown(ed, state);
+  state.card_w = PickerCardWidth(state);
+  return true;
+}
+
+}
+
+bool PickerPumpScan(Editor& ed) {
+  if (!ed.prompt_active || (ed.prompt_kind != PromptKind::kPicker) || !ed.picker) return false;
+  PickerState& state = *ed.picker;
+  if (!state.scan) return false;
+  PickerScan& scan = *state.scan;
+  // A finished scan still wakes while a catch-up is mid-corpus: the pattern has
+  // the rest of the bytes to meet, and the band is showing the last good list
+  // until it has.
+  if (scan.done && !scan.refiltering) return false;
+
+  const bool content = (state.source == PickerState::Source::kContent);
+  const std::size_t was_rows = state.rows.size();
+  const std::size_t was_lines = scan.lines;
+  const std::size_t was_shown = state.shown.size();
+  const std::size_t was_selected = state.selected;
+  // Two ways a stream stops, and the tail is the difference. `ended` is the
+  // child having said everything: the half-line at `parsed` is the last row and
+  // is flushed. `stopped` is the stream being cut -- a read that failed, or the
+  // corpus reaching its ceiling -- where that half-line is half of something,
+  // and committing it would put a chopped path:line:text on the band.
+  bool ended = false;
+  bool stopped = false;
+  bool failed = false;
+
+  if (!scan.done) {
+    ended = (scan.fd < 0);
+    if (scan.fd >= 0) {
+      // A budget of this wake's own, well under ReadAvailable's ceiling: what
+      // the pipe still holds waits for the next wake, the partial tail carries
+      // as it always did, and what is parsed and matched below is bounded by
+      // what was taken here. Nothing is kept but the byte offset, which is why a
+      // mapping that relocated as it grew costs nothing.
+      const common::ReadProgress got = scan.out.ReadAvailable(scan.fd, kPickerWakeBudget);
+      // EOF and a failed read are not the same answer. A read that failed, or a
+      // mapping that would not grow, leaves a corpus that stops mid-project: the
+      // rows it did yield stay, and the reader is told, rather than being handed
+      // a partial list with the note dropped as if it were the whole one.
+      ended = got.eof;
+      failed = got.error;
+    }
+    // The corpus is the row storage, so the project's text is the editor's
+    // memory. What landed is kept and the child is ended here; past this nothing
+    // is read, and the count says so.
+    if (!ended && !failed && (scan.out.size >= scan.corpus_max)) scan.truncated = true;
+    stopped = failed || scan.truncated;
+
+    const std::string_view text{(scan.out.buffer == nullptr) ? "" : scan.out.buffer, scan.out.size};
+    // The live pattern, compiled once per wake and only where a content line is
+    // there to judge: content is filtered as it is parsed, because the corpus is
+    // the row storage and there is no second pass over "the new rows" to make.
+    std::optional<gai::Pcre2Regex> live;
+    bool compiled = false;
+    while (scan.parsed < text.size()) {
+      // From the high-water mark, not from `parsed`: inside a stretch with no
+      // newline in it the two differ, and searching the same megabytes again on
+      // every read is what makes one enormous line quadratic.
+      const std::size_t eol = text.find('\n', std::max(scan.parsed, scan.searched));
+      // Half a row is not a row: it waits for the next read. Pipe close is what
+      // flushes an unterminated tail, because nothing more is coming for it.
+      if ((eol == std::string_view::npos) && !ended) {
+        scan.searched = text.size();
+        break;
+      }
+      const std::size_t end = (eol == std::string_view::npos) ? text.size() : eol;
+      const std::size_t from = scan.parsed;
+      std::string_view line = text.substr(scan.parsed, end - scan.parsed);
+      scan.parsed = (eol == std::string_view::npos) ? text.size() : (eol + 1);
+      while (!line.empty() && (line.back() == '\r')) line.remove_suffix(1);
+      if (line.empty()) continue;
+      if (content) {
+        // A content row is where it starts, and nothing else is kept: the whole
+        // line stays in the corpus and is read back from `from` whenever
+        // anything wants it.
+        ++scan.lines;
+        // A catch-up is carrying a pattern up towards `parsed`, and these bytes
+        // are ahead of it. Judging them here would judge them by the pattern the
+        // band is about to stop showing, and the catch-up would judge them
+        // again: the line structure is all this loop takes from them, and the
+        // catch-up is what decides whether they are rows. Each byte meets each
+        // query exactly once.
+        if (scan.refiltering) continue;
+        if (!scan.filter.empty()) {
+          if (!compiled) {
+            compiled = true;
+            try {
+              live.emplace(gai::Regex(gai::Compile("(?i)" + scan.filter, true, true)));
+            } catch (...) {
+              live.reset();
+            }
+          }
+          // Only a pattern that already compiled is stored, so a reset `live` is
+          // unreachable; reached, the line stays off the band rather than
+          // joining it unjudged, and the next keystroke rescans it with the
+          // rest.
+          std::string error;
+          if (!live) continue;
+          if (!gai::Find(*live, line, &error)) {
+            if (error.empty()) continue;
+            // A match-time limit is the pattern's doing and not the line's: the
+            // rest of what the child is still writing would blow it too, a line
+            // at a time, for as long as the scan runs. So the pattern is
+            // retired, said out loud, and the band goes back to every line --
+            // the query is still in the box, and the next keystroke compiles a
+            // new one over it.
+            ed.status.Warn(OneLineReason(error));
+            scan.filter.clear();
+            PickerStartRefilter(state, {});
+            continue;
+          }
+        }
+        state.shown.push_back(from);
+        continue;
+      }
+      Symbol one;
+      // A `--picker-rows` row: display, padding, tab, payload. The payload is
+      // the whole row koi can open; the display half is the child's own
+      // formatting.
+      if (!ParseSymbolRow(RowPayload(line), one)) continue;
+      state.rows.push_back(SymbolPickerEntry(std::move(one), state.source));
+    }
+  }
+
+  if (state.rows.size() > was_rows) {
+    std::optional<gai::Pcre2Regex> regex;
+    const bool filtering = !scan.filter.empty();
+    if (filtering) {
+      try {
+        regex.emplace(gai::Regex(gai::Compile("(?i)" + scan.filter, true, true)));
+      } catch (...) {
+        // Only a pattern that already compiled is stored, so this is unreachable
+        // -- and if it is ever reached, the new rows stay off the band rather
+        // than joining it unjudged. The next keystroke filters them with the
+        // rest.
+        regex.reset();
+      }
+    }
+    for (std::size_t i = was_rows; i < state.rows.size(); ++i) {
+      if (filtering) {
+        if (!regex) continue;
+        // A project symbol row is its name and was its name the moment it
+        // parsed, so a row lands, is judged and joins the band without a file
+        // being opened for it.
+        PickerReadRow(ed, state, state.rows[i], false);
+        if (!gai::Find(*regex, PickerRowText(state, state.rows[i]))) continue;
+      }
+      // Appended, never inserted and never sorted: the hot head the child sent
+      // first stays first, every shown index keeps its meaning, and the
+      // selection is where the eyes left it.
+      state.shown.push_back(i);
+    }
+  }
+
+  if (state.shown.size() > was_shown) {
+    // Growth only, and only over what just landed. A card that shrank mid-scan
+    // would reflow the list under the reader; a keystroke recomputes it whole.
+    state.card_w = std::max(state.card_w, PickerCardWidthFrom(state, was_shown));
+    // The rows just appended start at was_shown and run to the end, so one of
+    // them is on the band only if was_shown is inside the window. Below it they
+    // change nothing the window shows, and refilling for them would be five or
+    // six stats every wake for the whole life of the scan.
+    // kPickerRows, not state.window: window is what the band drew last frame,
+    // which is short while the list is shorter than the band, and the rows that
+    // just landed are what the next frame grows it with.
+    const std::size_t window = std::max(state.window, kPickerRows);
+    if ((was_shown < (state.offset + window)) || (state.selected != was_selected)) {
+      PickerFillShown(ed, state);
+    }
+  }
+
+  if (ended || stopped) {
+    scan.done = true;
+    // The pipe is closed, so the child is done writing; ended here rather than
+    // left for the prompt, so a finished scan is not a process still around.
+    // What is not ended here is the scan state: a catch-up may still have the
+    // corpus to walk, and it walks it out of the same object.
+    const int status = EndChild(scan.pid, scan.fd);
+    // Content counts lines, because the corpus is the rows and there are none to
+    // count; every other source counts rows.
+    const bool nothing = content ? (scan.lines == 0) : state.rows.empty();
+    if (failed) {
+      ed.status.Warn("scan read failed; the list is partial");
+    } else if (nothing && (status != -1) && WIFEXITED(status) && (WEXITSTATUS(status) != 0)) {
+      // An empty band and a child that failed: the child's stderr goes to
+      // /dev/null by design, so its exit code is the only thing left that knows
+      // why -- a missing program, a file_filter that will not run, a shell that
+      // could not parse the command. Without this a broken scan is a clean 0/0.
+      ed.status.Warn((WEXITSTATUS(status) == 127)
+                         ? std::string{"a program in the scan command was not found"}
+                         : ("the scan exited " + std::to_string(WEXITSTATUS(status))));
+    }
+  }
+  // After the parse, so a catch-up chases `parsed` and reaches it -- with the
+  // read budget under the match budget it gains on a live scan, and on a
+  // finished one it is all there is left to do.
+  const bool caught = PickerCatchUp(ed, state, scan);
+  return (state.rows.size() > was_rows) || (scan.lines > was_lines) || ended || stopped || caught;
+}
+
+bool PickerStartScan(Editor& ed, PickerState::Source source, const std::string& command,
+                     std::string_view query) {
+  if (command.empty()) {
+    ed.status.Warn("nothing to scan");
+    return false;
+  }
+  auto scan = std::make_unique<PickerScan>();
+  // Same rule as the file ceiling: read once, at the spawn, so the pump's
+  // per-wake test costs a member load and a reload lands on the next scan.
+  scan->corpus_max = ed.settings.picker_corpus_max;
+  std::string why;
+  if (!SpawnPipedChild(command, false, scan->pid, scan->fd, why)) {
+    ed.status.Fail("cannot start the scan: " + why);
+    return false;
+  }
+  OpenPicker(ed, source, {}, query, std::move(scan));
+  // Whatever is already there before the first frame: a scan that answers at
+  // once opens with rows rather than with an empty band.
+  PickerPumpScan(ed);
+  return true;
+}
+
+void SymbolPicker(Editor& ed, std::string_view query) {
+  // The file filter into koi's own symbol mode, with the prompt as the
+  // consumer. The query filters what lands, so it rides nothing here either.
+  std::ignore = PickerStartScan(ed, PickerState::Source::kProjectSymbols,
+                                ExpandVariables(PickerScanCommand(ed, "symbols"), ed), query);
+}
 
 void BufferSymbolPicker(Editor& ed, std::string_view query) {
   if (!HasDiskFile(ed.doc)) {
     ed.status.Warn("no file -- :w <path> first");
     return;
   }
-  RunPickerNamed(ed, "buffer-symbols", query);
+  // The scan the `koi --symbol-mode` subprocess ran on this one file, run here
+  // instead: koi is already linked against the grammars it would have loaded.
+  const std::array<std::string, 1> only{ed.doc.file.string()};
+  std::string error;
+  std::vector<Symbol> found = CollectSymbols(only, SymbolKind::kDefinitions, error);
+  const std::string note = error.empty() ? std::string{} : (" (" + error + ")");
+  if (found.empty()) {
+    ed.status.Warn("no definitions in " + DisplayPath(ed.doc.file) + note);
+    return;
+  }
+  // Hot head first, the way the project scan orders its rows: what this
+  // project's database ranks highest leads, the rest keeps the file's order.
+  // Every row is in the current file, so the ranking keeps all of them and
+  // there is no unranked tail to sweep in behind it.
+  if (ed.project != nullptr) std::ignore = ed.project->RankSymbols(found, CurrentFile(ed));
+  OpenPicker(ed, PickerState::Source::kFileSymbols,
+             SymbolPickerEntries(std::move(found), PickerState::Source::kFileSymbols), query);
+  // Said after the prompt is up, because a partial list that says nothing
+  // reads as a complete one; the first keystroke into the band clears it.
+  if (!note.empty()) ed.status = "definitions in " + DisplayPath(ed.doc.file) + note;
 }
 
 namespace {
@@ -610,7 +1595,6 @@ void LookUpSymbol(Editor& ed, std::string_view name, SymbolKind kind, std::strin
     ed.status.Warn("nothing selected");
     return;
   }
-  if (!HasScreen(ed)) return;
 
   // Said in every outcome the scan has, the way the job path says it
   // (PresentCommandJob's `note`): "no definition for X" with a grammar quietly
@@ -618,7 +1602,7 @@ void LookUpSymbol(Editor& ed, std::string_view name, SymbolKind kind, std::strin
   // result set with symbols missing from a whole language reads as a complete
   // one. The picker path carries it through to whatever the pick opens.
   std::string error;
-  const std::vector<Symbol> found = FindSymbols(ed, word, kind, error);
+  std::vector<Symbol> found = FindSymbols(ed, word, kind, error);
   const std::string note = error.empty() ? std::string{} : (" (" + error + ")");
   if (found.empty()) {
     ed.status.Warn("no " + std::string{what} + " for " + word + note);
@@ -627,23 +1611,18 @@ void LookUpSymbol(Editor& ed, std::string_view name, SymbolKind kind, std::strin
 
   if (found.size() == 1) {
     const Symbol& one = found.front();
-    if (ed.project != nullptr) {
-      if (!one.name.empty()) ed.project->RecordSymbolVisit(one.name, one.path, one.line);
-      ed.project->RecordCoVisit(CurrentFile(ed), one.path);
-    }
+    RecordSymbolPick(ed, one.name, one.path, one.line);
     OpenAt(ed, one.path, one.line, one.column);
     if (!note.empty()) ed.status += note;
     return;
   }
 
-  std::string staged;
-  for (const Symbol& one : found) {
-    const std::string row = SymbolPickerRow(one);
-    if (row.empty()) continue;
-    staged += row;
-    staged += '\n';
-  }
-  RunPickerNamed(ed, name, word, std::move(staged), note);
+  // The rows are already in hand and already hot-head-first: onto the band in
+  // that order, with no child and nothing to parse back.
+  const PickerState::Source source =
+      (name == "definition") ? PickerState::Source::kDefs : PickerState::Source::kRefs;
+  OpenPicker(ed, source, SymbolPickerEntries(std::move(found), source), word);
+  if (!note.empty()) ed.status = "found " + std::string{what} + "s for " + word + note;
 }
 
 }
@@ -1759,40 +2738,75 @@ void ReapAbandoned() {
   });
 }
 
-void EndCommandJob(PendingCommand& job) {
-  if (job.pid > 0) {
-    kill(-job.pid, SIGTERM);
-    kill(-job.pid, SIGKILL);
+// Shared with the picker's streaming scan, which owns its child the same way a
+// command job owns one and must end it on every path the prompt can close.
+int EndChild(int& pid, int& fd) {
+  int status = -1;
+  if (pid > 0) {
+    // Before the signals, because after them a child that had already exited on
+    // its own would be indistinguishable from one koi killed. Reaping the leader
+    // does not dissolve the group while a grandchild is still in it, so the kill
+    // below still ends the whole pipeline.
+    int exited = 0;
+    const bool already = (waitpid(pid, &exited, WNOHANG) == pid);
+    if (already) status = exited;
+    // TERM first and the hammer a nap later, from inside the loop: the two sent
+    // back to back are just the SIGKILL, and a child with a handler never gets
+    // to run it. Nothing is waited for once the leader is reaped, so there is no
+    // nap to hang the escalation on -- what is left of the group is killed at
+    // once rather than costing every finished scan five milliseconds.
+    kill(-pid, SIGTERM);
+    if (already) kill(-pid, SIGKILL);
     // Bounded, not blocking. SIGKILL is not deliverable to a process in
     // uninterruptible sleep -- a child blocked on a stalled NFS or FUSE mount,
     // say -- and this runs on the editor thread, from :from-cancel and from
     // quit, with the terminal in raw mode and nothing drawing. An unbounded
     // wait there froze the editor with no way out.
     //
-    // A child that took the SIGKILL is reapable within microseconds, so the
-    // loop below almost always ends on its first or second turn; the deadline
-    // is only what stops the pathological case from being unbounded. Whatever
+    // A child that took a signal is reapable within microseconds of it, so the
+    // loop below almost always ends a turn or two after whichever one landed;
+    // the deadline is only what stops the pathological case. Whatever
     // is left is a zombie, swept by ReapAbandoned on a later pump, and
     // reparented to init if koi exits first.
     constexpr int kReapAttempts = 20;
     constexpr long kReapNapNs = 5L * 1000 * 1000;  // 5 ms; 100 ms in total
-    bool reaped = false;
+    bool reaped = already;
     for (int attempt = 0; (attempt < kReapAttempts) && !reaped; ++attempt) {
-      int status = 0;
-      const pid_t got = waitpid(job.pid, &status, WNOHANG);
-      reaped = (got == job.pid) || ((got < 0) && (errno != EINTR));
+      // One nap was the grace; past it the child is not handling anything.
+      if (attempt == 1) kill(-pid, SIGKILL);
+      int killed = 0;
+      const pid_t got = waitpid(pid, &killed, WNOHANG);
+      // A pid nobody can wait for is as ended as one that was waited for, but it
+      // says nothing about how: only a real reap carries a status.
+      if (got == pid) status = killed;
+      reaped = (got == pid) || ((got < 0) && (errno != EINTR));
       if (reaped) break;
-      const timespec nap{0, kReapNapNs};
-      nanosleep(&nap, nullptr);
+      // Against the remainder: no handler koi installs sets SA_RESTART, so a
+      // resize drag would otherwise cut every nap short and spend the whole
+      // budget in microseconds -- the deadline has to be time, not turns.
+      timespec nap{0, kReapNapNs};
+      timespec left{};
+      while ((nanosleep(&nap, &left) == -1) && (errno == EINTR)) nap = left;
     }
-    if (!reaped) g_unreaped.push_back(job.pid);
-    job.pid = -1;
+    // A zombie until koi exits, and init's after that. Losing the pid to a bad
+    // alloc is worth less than the throw would cost: this runs from ~PickerScan,
+    // which is noexcept, so the ESC path would be std::terminate.
+    if (!reaped) {
+      try {
+        g_unreaped.push_back(pid);
+      } catch (...) {
+      }
+    }
+    pid = -1;
   }
-  if (job.fd >= 0) {
-    close(job.fd);
-    job.fd = -1;
+  if (fd >= 0) {
+    close(fd);
+    fd = -1;
   }
+  return status;
 }
+
+void EndCommandJob(PendingCommand& job) { EndChild(job.pid, job.fd); }
 
 void AbandonJob(PendingCommand& job) {
   if (job.scan != nullptr) {
@@ -2044,37 +3058,15 @@ bool StartCommandJob(Editor& ed, std::string_view command, bool watched, bool wi
     return true;
   });
 
-  int fds[2] = {-1, -1};
-  if (pipe2(fds, O_CLOEXEC) != 0) {
-    ed.status.Fail("cannot start " + cmd + ": " + std::strerror(errno));
+  int pid = -1;
+  int fd = -1;
+  std::string why;
+  // The child's stderr on the pipe: a command job shows what its command said
+  // as well as what it printed.
+  if (!SpawnPipedChild(cmd, true, pid, fd, why)) {
+    ed.status.Fail("cannot start " + cmd + ": " + why);
     return false;
   }
-  const pid_t pid = fork();
-  if (pid < 0) {
-    close(fds[0]);
-    close(fds[1]);
-    ed.status.Fail("cannot start " + cmd + ": " + std::strerror(errno));
-    return false;
-  }
-  if (pid == 0) {
-    setpgid(0, 0);
-    const int null = open("/dev/null", O_RDONLY);
-    if (null >= 0) {
-      dup2(null, 0);
-      if (null > 2) close(null);
-    } else {
-      close(0);
-    }
-    dup2(fds[1], 1);
-    dup2(fds[1], 2);
-    const char* shell = std::getenv("SHELL");
-    if ((shell == nullptr) || (*shell == '\0')) shell = "/bin/sh";
-    execl(shell, shell, "-c", cmd.c_str(), static_cast<char*>(nullptr));
-    _exit(127);
-  }
-  setpgid(pid, pid);
-  close(fds[1]);
-  fcntl(fds[0], F_SETFL, O_NONBLOCK);
 
   PendingCommand job;
   job.command = cmd;
@@ -2082,8 +3074,8 @@ bool StartCommandJob(Editor& ed, std::string_view command, bool watched, bool wi
   job.with_msg = with_msg;
   job.then = then;
   job.view_name = view_name;
-  job.pid = static_cast<int>(pid);
-  job.fd = fds[0];
+  job.pid = pid;
+  job.fd = fd;
   job.started = std::chrono::steady_clock::now();
   ed.pending_commands.push_back(std::move(job));
   return true;
@@ -3836,7 +4828,6 @@ void ArmSmartJumpBounce(Editor& ed, Index line) {
   ed.record.pending_since = NowSeconds();
   ed.record.pending_typed.clear();
   ed.record.pending_target.clear();
-  ed.record.pending_query.clear();
 }
 
 // The arrival is dropped: no row, no credit, no trace. Both halves go together
@@ -3845,7 +4836,6 @@ void DropSmartJumpArrival(Editor& ed) {
   ed.record.pending = false;
   ed.record.pending_typed.clear();
   ed.record.pending_target.clear();
-  ed.record.pending_query.clear();
 }
 
 // The other half, run at both boundaries: the arrival is written once it has
@@ -3885,7 +4875,6 @@ void CheckSmartJumpArrival(Editor& ed) {
   }
   ed.record.pending_typed.clear();
   ed.record.pending_target.clear();
-  ed.record.pending_query.clear();
 }
 
 }
@@ -4133,12 +5122,6 @@ void SmartJumpPrompt(Editor& ed) {
   // nothing would cancel it -- and credit the very pair being abandoned. An
   // arrival that had already earned its row earned it at the boundary that ran
   // on the keystroke opening this prompt, so nothing confirmed is taken back.
-  //
-  // An arrival that fired by itself is a guess -- no key was pressed to accept
-  // it -- so the prompt that rejects one opens with the query that fired typed
-  // back in, to be extended rather than retyped. One submitted by hand leaves
-  // nothing behind: that landing was asked for.
-  const std::string again = ed.record.pending ? ed.record.pending_query : std::string{};
   DropSmartJumpArrival(ed);
   PromptOpen(ed, PromptKind::kSmartJump);
   // The caret box hangs whatever ed.status holds off itself as its feedback
@@ -4149,33 +5132,6 @@ void SmartJumpPrompt(Editor& ed) {
   // full and touches nothing else -- no disk, no parser, no subprocess.
   SmartJumpState& state = SmartJumpStateOf(ed);
   BuildSmartCorpus(*ed.project, state.corpus);
-  state.auto_query.clear();
-  if (!again.empty()) {
-    ed.prompt_input = again;
-    ed.prompt_cursor = ed.prompt_input.size();
-  }
-  // Deliberately not previewed: the prefill is still a lone match, and arming
-  // the auto-jump on it would fire the very jump this prompt is taking back.
-}
-
-bool SmartJumpSettling(const Editor& ed) {
-  return ed.prompt_active && (ed.prompt_kind == PromptKind::kSmartJump) &&
-         (ed.smart_jump != nullptr) && !ed.smart_jump->auto_query.empty();
-}
-
-void CheckSmartJumpAutoFire(Editor& ed) {
-  if (!SmartJumpSettling(ed)) return;
-  SmartJumpState& state = *ed.smart_jump;
-  if ((NowSeconds() - state.auto_since) < kSmartAutoJumpSettle) return;
-  const std::string fired = state.auto_query;
-  state.auto_query.clear();
-  // Enter's own path, minus the keystroke: the bounce arming, the deferred
-  // credit, the prompt history and the status all belong to the landing, and a
-  // second way in here would be a second set of them to keep in step.
-  PromptSubmit(ed);
-  // Stamped after the landing rather than before it, because arming the arrival
-  // is what clears the field.
-  if (ed.record.pending) ed.record.pending_query = fired;
 }
 
 void SmartJumpPreview(Editor& ed) {
@@ -4188,19 +5144,6 @@ void SmartJumpPreview(Editor& ed) {
   // prompt is up. The summary and not the list: this runs on every keystroke
   // and the rest of the ranking is strings nothing here reads.
   const SmartSummary summary = SummariseSmartMatches(state.corpus, query, ed.project.get());
-  // One match arms the auto-jump; every other count disarms it -- a parse
-  // error, a term too short and a corpus that answered nothing all count zero.
-  // The clock restarts on every keystroke, so what the settle measures is quiet
-  // and not how long the match has been lone: a query passes through one match
-  // mid-word, and firing there would leave the rest of the word to the buffer.
-  //
-  // smart-jump-auto off never arms, which is the whole of the setting: with
-  // nothing armed SmartJumpSettling stays false and the input loop never polls.
-  state.auto_query.clear();
-  if ((summary.count == 1) && ed.settings.smart_jump_auto) {
-    state.auto_query = ed.prompt_input;
-    state.auto_since = NowSeconds();
-  }
   const std::string said = SmartJumpFeedback(query, summary);
   if (said.empty()) {
     ed.status.clear();
@@ -4213,6 +5156,23 @@ void SmartJumpPreview(Editor& ed) {
       ed.status.Highlight(said.size() - summary.display.size(), summary.display.size());
     }
   }
+}
+
+namespace {
+
+// Where a handoff lands. Every picker opens in process at the caret: the box the
+// query was typed in grows a band under it rather than the screen swapping. The
+// query is already a PCRE2 pattern (PickerPattern), which is what the band
+// filters with, so it goes in typed.
+void OpenHandoffPicker(Editor& ed, const SmartHandoff& handoff) {
+  switch (handoff.picker) {
+    case SmartPicker::kContent: ContentPicker(ed, handoff.query); return;
+    case SmartPicker::kSymbol: SymbolPicker(ed, handoff.query); return;
+    case SmartPicker::kFile: break;
+  }
+  FilePicker(ed, handoff.query);
+}
+
 }
 
 void SmartJumpSubmit(Editor& ed, std::string_view line) {
@@ -4231,6 +5191,9 @@ void SmartJumpSubmit(Editor& ed, std::string_view line) {
     return;
   }
   std::vector<SmartMatch> matches = RankSmartMatches(state.corpus, query, ed.project.get());
+  // Either way this query is what n/N answer to now, so the picker walk that
+  // held them is freed here -- one list at a time, whichever was made last.
+  ed.walk.reset();
   if (matches.empty()) {
     // Said plainly -- nothing found means you have not been there, and this
     // list never widens on its own -- and then handed straight to the picker
@@ -4242,10 +5205,15 @@ void SmartJumpSubmit(Editor& ed, std::string_view line) {
     state.typed.clear();
     state.at = 0;
     const SmartHandoff handoff = SmartJumpHandoff(query);
-    ed.status = "not been there -- " + std::string{SmartPickerName(handoff.picker)};
+    const std::string said = "not been there -- " + std::string{SmartPickerName(handoff.picker)};
+    ed.status = said;
     // Terms and all, so the picker opens with them typed: this has to be the
     // same place you would have got to by choosing the picker yourself.
-    RunPickerNamed(ed, SmartPickerPipeline(handoff.picker), handoff.query);
+    OpenHandoffPicker(ed, handoff);
+    // Opening a prompt clears the status, so the sentence explaining the band is
+    // said again over it -- and only where a band opened, so a picker that
+    // refused keeps its own reason on the line.
+    if (ed.prompt_active && (ed.prompt_kind == PromptKind::kPicker)) ed.status = said;
     return;
   }
 
@@ -4255,16 +5223,16 @@ void SmartJumpSubmit(Editor& ed, std::string_view line) {
 
   // Enter lands on the best match, always -- the way a search lands on its
   // first hit -- and stepping is the disambiguator, not a list view. A wrong
-  // landing costs one keypress (smart_jump_next) and teaches nothing: both the
+  // landing costs one keypress (picker_jump_next) and teaches nothing: both the
   // row and the query credit wait out the bounce.
   const std::size_t count = state.matches.size();
   Index landed = 0;
   if (AcceptSmartJump(ed, 0, landed)) {
     // A lone match lands in silence: the cursor arriving is the whole answer,
-    // and a box naming the place it already stands -- after an auto-jump
-    // especially -- would be noise. Several leave the walk's box at the
-    // caret, naming the second: the first is under the cursor, and what is
-    // worth saying is where smart_jump_next would take you from it.
+    // and a box naming the place it already stands would be noise. Several
+    // leave the walk's box at the caret, naming the second: the first is under
+    // the cursor, and what is worth saying is where picker_jump_next would take
+    // you from it.
     if (count == 1) {
       ed.status.clear();
       ed.jump_branch = false;
@@ -4284,8 +5252,10 @@ void SmartJumpToPicker(Editor& ed) {
   // clause names the picker and hands over its own terms, escaped and joined the
   // way a picker query is a pattern.
   const SmartHandoff handoff = SmartJumpHandoff(ParseSmartQuery(ed.prompt_input));
+  // Read before the cancel clears it, opened after: both halves are this one
+  // keystroke, so the box at the caret is never drawn without a prompt in it.
   PromptCancel(ed);
-  RunPickerNamed(ed, SmartPickerPipeline(handoff.picker), handoff.query);
+  OpenHandoffPicker(ed, handoff);
 }
 
 void SmartJumpStep(Editor& ed, bool forward) {
@@ -4306,9 +5276,9 @@ void SmartJumpStep(Editor& ed, bool forward) {
     return;
   }
   state.at = landed;
-  // Not an accept: stepping is how a wrong auto-jump gets corrected, and
-  // teaching `queries` every row walked past on the way is how the correction
-  // would make the next query worse.
+  // Not an accept: stepping is how a wrong landing gets corrected, and teaching
+  // `queries` every row walked past on the way is how the correction would make
+  // the next query worse.
   // Where the next press goes, not where this one landed -- and for a list of
   // one there is no next, so that one names itself. The wrap note is about the
   // step just taken; "next wraps to" is about the one after it.
@@ -4325,5 +5295,90 @@ void SmartJumpStep(Editor& ed, bool forward) {
   ed.jump_branch = true;
 }
 
+// -- the walk -----------------------------------------------------------------
+//
+// The other list n/N step: a picker's own rows, kept past the prompt that
+// filtered them. Nothing here reaches into smart-jump's state -- no
+// jump_cursor, no arrival credit, no bounce, because a picker row is not a
+// store location and has none of that behind it. What is shared is the wording:
+// the same badge, the same count, the same "where the next press goes".
+
+namespace {
+
+// One walk landing, and what accept does for the same row: a symbol records a
+// visit -- a landing is a visit, whichever key produced it -- and a file or
+// buffer row records nothing beyond what the open itself writes. False when the
+// cursor did not move, so that the caller leaves the walk where it was instead
+// of saying it went somewhere: SmartJumpStep's contract, on a picker's rows.
+bool OpenWalkRow(Editor& ed, PickerState::Source source, const WalkRow& row) {
+  if (source == PickerState::Source::kBuffers) {
+    if (ChooseBufferRow(ed, row.target)) return true;
+    // The only failure a path row does not already announce: an `#index` with
+    // no buffer under it any more.
+    ed.status.Warn("cannot open " + row.display);
+    return false;
+  }
+  // The pair a symbol visit records is where you were and where you went, so
+  // the file you came from is read before the open moves it -- and written only
+  // once the open has happened, because an arrival that did not happen is not a
+  // visit.
+  const std::string from = CurrentFile(ed);
+  if (!OpenAt(ed, row.target, row.line, row.column)) return false;
+  if (!row.name.empty()) RecordSymbolPick(ed, row.name, row.target, row.line, from);
+  return true;
+}
+
+// The branch row for where the walk now stands. Where the next press in this
+// direction goes, not the row under the cursor, and no next at all for a list
+// of one -- so that one names itself. `wrapped` is the step just taken; the
+// "wraps to" note is about the one after it.
+void SayWalk(Editor& ed, const WalkList& list, bool forward, bool wrapped) {
+  const auto count = static_cast<std::ptrdiff_t>(list.rows.size());
+  std::size_t dest = 0;
+  std::string said = list.rows[list.at].display;
+  if (count > 1) {
+    const std::ptrdiff_t step = static_cast<std::ptrdiff_t>(list.at) + (forward ? 1 : -1);
+    const std::string ahead = ((step < 0) || (step >= count)) ? "wraps to " : "";
+    dest = ahead.size();
+    said = ahead + list.rows[static_cast<std::size_t>(((step % count) + count) % count)].display;
+  }
+  const std::string head =
+      SmartJumpBadge(ed) + std::to_string(list.at + 1) + "/" + std::to_string(count) + "  ";
+  ed.status = head + said +
+              ((!wrapped || (count == 1)) ? ""
+               : forward                  ? " -- wrapped to the top"
+                                          : " -- wrapped to the bottom");
+  if (!said.empty()) ed.status.Highlight(head.size() + dest, said.size() - dest);
+  ed.jump_branch = true;
+}
+
+}
+
+void PickerJumpStep(Editor& ed, bool forward) {
+  // One pair of keys, whichever list was made last. A pick clears smart-jump's
+  // matches and a submit frees the walk, so there is never a choice to make.
+  if (!ed.walk || ed.walk->rows.empty()) {
+    SmartJumpStep(ed, forward);
+    return;
+  }
+  WalkList& list = *ed.walk;
+  const auto count = static_cast<std::ptrdiff_t>(list.rows.size());
+  const std::ptrdiff_t target = static_cast<std::ptrdiff_t>(list.at) + (forward ? 1 : -1);
+  const bool wrapped = (target < 0) || (target >= count);
+  const auto landed = static_cast<std::size_t>(((target % count) + count) % count);
+  // Copied, not referenced: the open runs arbitrary editor machinery between
+  // here and the say below.
+  const WalkRow row = list.rows[landed];
+  // Committed only once the cursor is there. A step that could not open leaves
+  // the walk where it stood and what the open said standing with it, which is
+  // what a smart-jump step onto an unopenable match does.
+  if (!OpenWalkRow(ed, list.source, row)) return;
+  list.at = landed;
+  SayWalk(ed, list, forward, wrapped);
+}
+
+void DropBuffersWalk(Editor& ed) {
+  if (ed.walk && (ed.walk->source == PickerState::Source::kBuffers)) ed.walk.reset();
+}
 
 }

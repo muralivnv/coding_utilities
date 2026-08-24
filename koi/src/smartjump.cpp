@@ -440,9 +440,9 @@ SmartMatch MatchOf(const Candidate& one) {
   return match;
 }
 
-// The picker's query is a PCRE2 pattern -- tooey re-filters its rows with
-// `gai -f "(?i)"<query>` -- so terms join with `.*`: `key zzz` means key and
-// then zzz, which is what the terms meant, where a space would mean the literal
+// The picker's query is a PCRE2 pattern -- the band filters its rows with
+// `(?i)` and the query -- so terms join with `.*`: `key zzz` means key and then
+// zzz, which is what the terms meant, where a space would mean the literal
 // "key zzz". Each term is escaped first, because they are typed as
 // abbreviations and `foo(` is a broken pattern rather than a search.
 std::string PickerPattern(const std::vector<std::string>& terms) {

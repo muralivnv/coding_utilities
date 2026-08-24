@@ -83,7 +83,7 @@ void ShippedConfigsLoad() {
   ed.doc.file = "a.cpp";
   ed.settings = settings;
   EXPECT_TRUE(!settings.file_filter.empty());
-  EXPECT_TRUE(ExpandPickerCommand(ed, PickerCommand(ed, "symbols"), "q").find("%{") ==
+  EXPECT_TRUE(ExpandVariables(PickerScanCommand(ed, "symbols"), ed).find("%{") ==
               std::string::npos);
 }
 
@@ -305,19 +305,6 @@ tab = "→"
 )", maps, off, off_errors);
     EXPECT_TRUE(off_errors.empty());
     EXPECT_FALSE(off.render_tabs);
-  }
-  {
-    KeyMaps maps;
-    Settings settings;
-    std::vector<std::string> errors;
-    // On by default, so the off case is the only one the parser has to carry.
-    EXPECT_TRUE(settings.smart_jump_auto);
-    EXPECT_FALSE(ParseKeyMapConfig(R"(
-[editor]
-smart-jump-auto = false
-)", maps, settings, errors));
-    EXPECT_TRUE(errors.empty());
-    EXPECT_FALSE(settings.smart_jump_auto);
   }
   {
     KeyMaps maps;

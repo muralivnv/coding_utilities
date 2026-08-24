@@ -1460,7 +1460,8 @@ std::vector<std::string>& PromptHistoryOf(Editor& ed) {
     case PromptKind::kSmartJump: return ed.jump_history;
     case PromptKind::kSearch:
     case PromptKind::kSelectRegex:
-    case PromptKind::kSearchExcerpts: break;
+    case PromptKind::kSearchExcerpts:
+    case PromptKind::kPicker: break;
   }
   return ed.search_history;
 }
@@ -1471,8 +1472,10 @@ std::string_view PromptSigil(const Editor& ed) {
     case PromptKind::kSelectRegex: return "select:";
     case PromptKind::kSearchExcerpts: return "search:";
     // The jera rune -- the j -- where the box has no room for a word. Icons
-    // off falls back to the word.
-    case PromptKind::kSmartJump: return ed.settings.icons ? "ᛃ " : "jump:";
+    // off falls back to the word. The picker wears the same one: its box is
+    // the jump prompt's box.
+    case PromptKind::kSmartJump:
+    case PromptKind::kPicker: return ed.settings.icons ? "ᛃ " : "jump:";
     case PromptKind::kCommand: break;
   }
   return ":";
@@ -1505,6 +1508,9 @@ void PromptCancel(Editor& ed) {
     PromptRestoreSearchOrigin(ed);
     ed.prompt_return_ranges.clear();
   }
+  // The picker's rows live only while its prompt does; the accept path moves
+  // them out before coming through here.
+  ed.picker.reset();
   ed.prompt_active = false;
   ed.prompt_input.clear();
   ed.prompt_cursor = 0;
@@ -1685,11 +1691,15 @@ StatusLine StatusBar(const Editor& ed, const Document& doc, const SelectionSet& 
   // between two keystrokes. Only the focused pane's bar: the hint belongs to
   // the pane the labels are drawn in.
   const std::string_view hint = focused ? LeapHint(ed) : std::string_view{};
-  // The smart-jump box hangs the match feedback under itself, and an arrival
-  // hangs its branch row off the caret; the bar saying either would say
-  // everything twice.
+  // The smart-jump and picker boxes hang their feedback under themselves, and
+  // an arrival hangs its branch row off the caret; the bar saying either would
+  // say everything twice. Only while the box actually drew that row, though --
+  // a stack shrunk into a short side gives it up, and then the bar is the only
+  // place left for the message to be.
   const bool branch_has_it =
-      (ed.prompt_active && (ed.prompt_kind == PromptKind::kSmartJump)) || ed.jump_branch;
+      (ed.prompt_active && ed.prompt_box_said &&
+       ((ed.prompt_kind == PromptKind::kSmartJump) || (ed.prompt_kind == PromptKind::kPicker))) ||
+      ed.jump_branch;
   if (focused && (!hint.empty() || (!branch_has_it && !ed.status.empty()))) {
     const StatusLevel level = hint.empty() ? ed.status.level() : StatusLevel::kInfo;
     const StatusTone tone = (level == StatusLevel::kError)     ? StatusTone::kError

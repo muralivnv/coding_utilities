@@ -802,7 +802,7 @@ void Rendering() {
     EXPECT_TRUE(frame.Row(input_y + 2).find("▸") == std::string::npos);
   }
 
-  TEST_CASE("render: no room by the caret and the smart-jump prompt keeps the bottom row");
+  TEST_CASE("render: no room by the caret and the smart-jump prompt takes the row above the bar");
   {
     Editor ed;
     ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
@@ -810,9 +810,13 @@ void Rendering() {
     PromptOpen(ed, PromptKind::kSmartJump);
     PromptInsert(ed, "na");
 
+    // Nothing was reserved for this prompt, so the bottom row is the pane's
+    // status line and the fallback sits above it rather than over it.
     const Surface frame = draw(ed, 40, 4);
-    EXPECT_TRUE(frame.Row(3).find("ᛃ na") != std::string::npos);
-    EXPECT_EQ(frame.cursor_y, 3);
+    EXPECT_TRUE(frame.Row(2).find("ᛃ na") != std::string::npos);
+    EXPECT_EQ(frame.cursor_y, 2);
+    EXPECT_TRUE(frame.Row(3).find("ᛃ") == std::string::npos);
+    EXPECT_TRUE(frame.Row(3).find("1:1") != std::string::npos);
   }
 
   TEST_CASE("render: an arrival's feedback is the rounded box at the caret, bar quiet");
@@ -847,6 +851,659 @@ void Rendering() {
     const Surface floor = draw(low, 60, 12);
     EXPECT_TRUE(floor.Row(7).find("╭") != std::string::npos);
     EXPECT_TRUE(floor.Row(8).find("12 zz/yy.cpp") != std::string::npos);
+  }
+
+  TEST_CASE("render: the picker's band hangs off the box, with digits and a count");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    // BuiltinTheme paints no cursorline, so the selected row's band would be
+    // the popup fill and the difference below would prove nothing.
+    ed.theme.scopes["ui.cursorline.primary"] = Style{{}, Color{true, 0x303030}, 0};
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\ncharlie\ndelta\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+    PromptInsert(ed, "c");
+
+    auto state = std::make_shared<PickerState>();
+    for (const std::string_view name :
+         {"alpha.cpp", "bravo.cpp", "charlie.cpp", "delta.cpp", "echo.cpp"}) {
+      state->rows.push_back(PickerEntry{std::string{name}, ":12", std::string{name}, 12, 1});
+    }
+    // Three of the five kept, the middle one selected: the count reads what the
+    // filter left of the list, not how many rows the band has room for.
+    state->shown = {0, 2, 4};
+    state->selected = 1;
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    const Surface frame = draw(ed, 60, 16);
+
+    // The connector on the row touching the box, the others indented to the
+    // same text column, and the digit on each is what opens it.
+    EXPECT_TRUE(frame.Row(4).find("╰─▸ 1 alpha.cpp:12") != std::string::npos);
+    EXPECT_TRUE(frame.Row(5).find("2 charlie.cpp:12") != std::string::npos);
+    EXPECT_TRUE(frame.Row(6).find("3 echo.cpp:12") != std::string::npos);
+    EXPECT_TRUE(frame.Row(5).find("▸") == std::string::npos);
+    // The count is where the selection is, of what the filter left, of what
+    // there was: the second of the three kept, of five rows.
+    EXPECT_TRUE(frame.Row(6).find("2/3/5") != std::string::npos);
+
+    const auto column_of = [&frame](int y, std::string_view glyph) {
+      for (int x = 0; x < frame.width; ++x) {
+        if (frame.At(x, y).text == glyph) return x;
+      }
+      return -1;
+    };
+    // The selected row wears the cursorline band, and its text the colour a
+    // destination wears.
+    const int alpha_x = column_of(4, "a");
+    const int charlie_x = column_of(5, "c");
+    EXPECT_TRUE((alpha_x >= 0) && (charlie_x >= 0));
+    EXPECT_TRUE(frame.At(charlie_x, 5).bg != frame.At(alpha_x, 4).bg);
+    EXPECT_TRUE(frame.At(charlie_x, 5).fg != frame.At(alpha_x, 4).fg);
+  }
+
+  TEST_CASE("render: a symbol picker draws its block between the box and the band");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\ncharlie\ndelta\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kDefs;
+    for (const std::string_view where : {"src/a.cpp", "src/b.cpp"}) {
+      PickerEntry row;
+      // Defs: the line the row points at is the row, the name being in it
+      // already. A symbol list leads with the name instead, same right edge.
+      row.text = "int Widget = 1;";
+      row.read = true;
+      row.detail = std::string{where} + ":12";
+      row.target = std::string{where};
+      row.line = 12;
+      row.name = "Widget";
+      state->rows.push_back(std::move(row));
+    }
+    state->shown = {0, 1};
+    state->context = {"void Above() {}", "  int Widget = 1;", "}"};
+    state->context_first = 11;
+    state->context_target = 12;
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    const Surface frame = draw(ed, 60, 16);
+
+    // The box takes rows 1..3, so the block is 4..6, the rule is 7 and the band
+    // starts at 8. A card this wide is the screen's width and starts at the
+    // margin, so it hangs off nothing and draws the plain indent.
+    EXPECT_TRUE(frame.Row(4).find("11 void Above() {}") != std::string::npos);
+    EXPECT_TRUE(frame.Row(4).find("▸") == std::string::npos);
+    EXPECT_TRUE(frame.Row(5).find("12   int Widget = 1;") != std::string::npos);
+    EXPECT_TRUE(frame.Row(6).find("13 }") != std::string::npos);
+    // A rule between the two, so context lines and list rows do not read as one
+    // list, and nothing of the block's own on it.
+    EXPECT_TRUE(frame.Row(7).find("───") != std::string::npos);
+    EXPECT_TRUE(frame.Row(7).find("Widget") == std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("1 int Widget = 1;") != std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("▸") == std::string::npos);
+
+    // The line on the left, where it is at the right edge of the card -- and
+    // the same right edge on both rows, the count's column kept off them.
+    const int a_at = static_cast<int>(frame.Row(8).find("src/a.cpp:12"));
+    const int b_at = static_cast<int>(frame.Row(9).find("src/b.cpp:12"));
+    EXPECT_TRUE(a_at > static_cast<int>(frame.Row(8).find("int Widget")));
+    EXPECT_EQ(a_at, b_at);
+    EXPECT_TRUE(frame.Row(9).find("1/2/2") != std::string::npos);
+
+    const auto column_of = [](const Surface& f, int y, std::string_view glyph) {
+      for (int x = 0; x < f.width; ++x) {
+        if (f.At(x, y).text == glyph) return x;
+      }
+      return -1;
+    };
+    // The target line is the only one marked, and it is marked in the
+    // foreground -- ui.excerpt.match, the way --no-syntax previews mark it.
+    const int above_x = column_of(frame, 4, "v");
+    const int target_x = column_of(frame, 5, "W");
+    EXPECT_TRUE((above_x >= 0) && (target_x >= 0));
+    EXPECT_TRUE(frame.At(target_x, 5).fg != frame.At(above_x, 4).fg);
+    EXPECT_TRUE(frame.At(target_x, 5).bg == frame.At(above_x, 4).bg);
+
+    // Flipped, the whole stack goes with it: the box's rows are counted with
+    // the block's, the rule's and the band's, so nothing lands on the status
+    // line and the order away from the caret is the same one.
+    ResetToOriginal(ed.doc.table, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n");
+    ed.doc.selections.Set(Selection{24, 24, -1});
+    const Surface up = draw(ed, 60, 16);
+    const auto row_with = [](const Surface& f, std::string_view needle) {
+      for (int y = 0; y < f.height; ++y) {
+        if (f.Row(y).find(needle) != std::string::npos) return y;
+      }
+      return -1;
+    };
+    const int band = row_with(up, "1 int Widget = 1;");
+    const int block = row_with(up, "12   int Widget = 1;");
+    const int box = row_with(up, "ᛃ");
+    EXPECT_TRUE((band >= 0) && (block >= 0) && (box >= 0));
+    EXPECT_TRUE(band < block);
+    EXPECT_TRUE(block < box);
+    EXPECT_EQ(row_with(up, "13 }"), block + 1);
+    // The rule keeps its place between the two, whichever way the stack hangs.
+    EXPECT_EQ(row_with(up, "───"), band + 2);
+
+    // A file row is its own evidence: no lines are read for it, so there is no
+    // block, no rule, and the band goes back to touching the box. Text and
+    // detail read as one there -- a path with the line it was left on.
+    state->source = PickerState::Source::kFiles;
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    state->context.clear();
+    for (PickerEntry& row : state->rows) {
+      row.text = row.target;
+      row.detail = ":12";
+    }
+    state->card_w = PickerCardWidth(*state);
+    const Surface plain = draw(ed, 60, 16);
+    EXPECT_TRUE(plain.Row(4).find("╰─▸ 1 src/a.cpp:12") != std::string::npos);
+    EXPECT_TRUE(plain.Row(5).find("2 src/b.cpp:12") != std::string::npos);
+    EXPECT_TRUE(plain.Row(6).find("Above") == std::string::npos);
+    EXPECT_TRUE(plain.Row(6).find("───") == std::string::npos);
+  }
+
+  TEST_CASE("render: a content row leads with the line and keeps its path at the edge");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\ncharlie\ndelta\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    // Content's rows are byte offsets into the scan's corpus, and `rows` stays
+    // empty -- so the fixture is the corpus, built the way the scan's reader
+    // would have left it.
+    const std::string first =
+        "src/a.cpp:12:  int Widget = 1;  // " + std::string(80, 'x') + "ZZEND\n";
+    const std::string corpus = first + "src/b.cpp:3:another line\n";
+    auto stream = common::MmapStreamFromBytes(corpus.data(), corpus.size());
+    EXPECT_TRUE(stream.has_value());
+    if (!stream) return;
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kContent;
+    state->scan = std::make_unique<PickerScan>();
+    state->scan->out = std::move(*stream);
+    state->scan->parsed = corpus.size();
+    state->scan->lines = 2;
+    // Not live, so the count is the plain i/n/m without the scanning note.
+    state->scan->done = true;
+    state->shown = {0, first.size()};
+    state->context = {"void Above() {}", "  int Widget = 1;", "}"};
+    state->context_first = 11;
+    state->context_target = 12;
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    // Nothing was measured to get there: the card is the screen's answer.
+    EXPECT_EQ(state->card_w, kPickerCardWide);
+
+    const Surface frame = draw(ed, 60, 16);
+
+    // Box on rows 1..3, then the block -- the lines only, with no heading of
+    // its own: the row below says which file this is.
+    EXPECT_TRUE(frame.Row(4).find("11 void Above() {}") != std::string::npos);
+    EXPECT_TRUE(frame.Row(5).find("12   int Widget = 1;") != std::string::npos);
+    EXPECT_TRUE(frame.Row(6).find("13 }") != std::string::npos);
+    EXPECT_TRUE(frame.Row(7).find("───") != std::string::npos);
+
+    // The row leads with the line, trimmed as a defs row's line is, and the
+    // `path:line:` head is off it: what clips is the far end of the line, not
+    // its first columns.
+    EXPECT_TRUE(frame.Row(8).find("1 int Widget = 1;  // xxx") != std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("src/a.cpp:12:") == std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("ZZEND") == std::string::npos);
+    EXPECT_TRUE(frame.Row(9).find("2 another line") != std::string::npos);
+
+    // The head rides the right edge instead -- ending on the same column for
+    // both rows, whatever each one's length, with the count's room kept off
+    // them: a symbol band, in other words.
+    const int a_at = static_cast<int>(frame.Row(8).find("src/a.cpp:12"));
+    const int b_at = static_cast<int>(frame.Row(9).find("src/b.cpp:3"));
+    EXPECT_TRUE(a_at > static_cast<int>(frame.Row(8).find("int Widget")));
+    EXPECT_EQ(a_at + 12, b_at + 11);
+    // The selection is the first row, of two shown, of two lines scanned.
+    EXPECT_TRUE(frame.Row(9).find("1/2/2") != std::string::npos);
+
+    const auto column_of = [](const Surface& f, int y, std::string_view glyph) {
+      for (int x = 0; x < f.width; ++x) {
+        if (f.At(x, y).text == glyph) return x;
+      }
+      return -1;
+    };
+    // The target line in the block wears ui.excerpt.match, as it does for every
+    // other source -- the block does not care what holds the row.
+    const int above_x = column_of(frame, 4, "v");
+    const int target_x = column_of(frame, 5, "W");
+    EXPECT_TRUE((above_x >= 0) && (target_x >= 0));
+    EXPECT_TRUE(frame.At(target_x, 5).fg != frame.At(above_x, 4).fg);
+
+    // The card takes the room at the box's edge and stops there: the count is
+    // the card's last column, and nothing is painted past the screen.
+    const int edge = column_of(frame, 8, "1");
+    EXPECT_TRUE(edge > 0);
+    EXPECT_EQ(frame.At(frame.width - 2, 9).text, std::string{"2"});
+    EXPECT_EQ(frame.At(frame.width - 1, 9).text, std::string{" "});
+  }
+
+  TEST_CASE("render: the buffers band grows to what the screen fits");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kBuffers;
+    for (int i = 0; i < 12; ++i) {
+      const std::string name = "buffer" + std::to_string(i) + ".txt";
+      state->rows.push_back(PickerEntry{name, {}, name, 1, 1});
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    // Room below the caret for all twelve: every buffer is on screen, which is
+    // the whole point of reading a buffer list.
+    const Surface tall = draw(ed, 60, 24);
+    EXPECT_TRUE(tall.Row(4).find("1 buffer0.txt") != std::string::npos);
+    EXPECT_TRUE(tall.Row(15).find("buffer11.txt") != std::string::npos);
+    EXPECT_EQ(ed.picker->window, std::size_t{12});
+
+    // The digits stop where the accept gate stops: a grown band is walked past
+    // its fifth row, so those rows carry no number to press, and the text
+    // column is the same one a numbered row uses.
+    EXPECT_TRUE(tall.Row(8).find("5 buffer4.txt") != std::string::npos);
+    EXPECT_TRUE(tall.Row(9).find("6 buffer5.txt") == std::string::npos);
+    EXPECT_TRUE(tall.Row(15).find("12 buffer11.txt") == std::string::npos);
+    EXPECT_EQ(tall.Row(15).find("buffer11.txt"), tall.Row(5).find("buffer1.txt"));
+
+    // The index is padded to the shown count's width, so stepping past the
+    // ninth row does not widen the count and shift what sits left of it.
+    const std::size_t count_at = tall.Row(15).find(" 1/12/12");
+    EXPECT_TRUE(count_at != std::string::npos);
+    for (int i = 0; i < 9; ++i) PickerStep(ed, true);
+    const Surface tenth = draw(ed, 60, 24);
+    EXPECT_EQ(tenth.Row(15).find("10/12/12"), count_at);
+    for (int i = 0; i < 3; ++i) PickerStep(ed, true);
+    EXPECT_EQ(ed.picker->selected, std::size_t{0});
+
+    // A short screen takes what it can and the rest is walked: the box still
+    // hangs off the caret rather than falling to the bottom row.
+    const Surface squat = draw(ed, 60, 12);
+    EXPECT_TRUE(squat.Row(4).find("1 buffer0.txt") != std::string::npos);
+    EXPECT_TRUE(ed.picker->window < std::size_t{12});
+    EXPECT_TRUE(ed.picker->window >= kPickerRows);
+
+    // Files is not buffers: five rows and a window over the rest.
+    state->source = PickerState::Source::kFiles;
+    const Surface files = draw(ed, 60, 24);
+    EXPECT_TRUE(files.Row(8).find("5 buffer4.txt") != std::string::npos);
+    EXPECT_TRUE(files.Row(9).find("buffer5.txt") == std::string::npos);
+    EXPECT_EQ(ed.picker->window, kPickerRows);
+  }
+
+  TEST_CASE("render: the band draws its window, wherever the selection scrolled it");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    for (int i = 0; i < 9; ++i) {
+      const std::string name = "file" + std::to_string(i) + ".txt";
+      state->rows.push_back(PickerEntry{name, {}, name, 1, 1});
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    // Stepped to the last row: the window has scrolled to the end of the list,
+    // the digits still number the five rows drawn, and the count says how far
+    // in the list the band is showing from.
+    for (int i = 0; i < 8; ++i) PickerStep(ed, true);
+    EXPECT_EQ(ed.picker->offset, std::size_t{4});
+    const Surface frame = draw(ed, 60, 20);
+    EXPECT_TRUE(frame.Row(4).find("1 file4.txt") != std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("5 file8.txt") != std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("9/9/9") != std::string::npos);
+    // Drawing settles the window, it does not move it.
+    EXPECT_EQ(ed.picker->offset, std::size_t{4});
+  }
+
+  TEST_CASE("render: the count says a scan is still coming, until it is not");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kProjectSymbols;
+    for (int i = 0; i < 2; ++i) {
+      PickerEntry row;
+      row.text = "int Sym" + std::to_string(i) + "();";
+      row.read = true;
+      row.detail = "s.cpp:" + std::to_string(i + 1);
+      row.target = "s.cpp";
+      row.line = i + 1;
+      state->rows.push_back(std::move(row));
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    // No pid and no fd: what makes this a live scan is that nothing has closed
+    // it, which is the same thing the band asks.
+    state->scan = std::make_unique<PickerScan>();
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    const Surface scanning = draw(ed, 70, 20);
+    EXPECT_TRUE(scanning.Row(5).find("1/2/2 scanning") != std::string::npos);
+
+    // The pipe closes and the count is the plain answer it was waiting to be.
+    state->scan->done = true;
+    const Surface done = draw(ed, 70, 20);
+    EXPECT_TRUE(done.Row(5).find("scanning") == std::string::npos);
+    EXPECT_TRUE(done.Row(5).find("1/2/2") != std::string::npos);
+
+    // Unless it stopped at the corpus ceiling, where a plain 2/2 would be the
+    // band claiming a slice of the project as the whole of it.
+    state->scan->truncated = true;
+    const Surface cut = draw(ed, 70, 20);
+    EXPECT_TRUE(cut.Row(5).find("1/2/2 truncated") != std::string::npos);
+  }
+
+  TEST_CASE("render: a card with room for one of the two keeps the line, not the detail");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kDefs;
+    // A path most of an 80-column screen wide: keeping its column at the right
+    // edge would leave the line it belongs to nowhere to draw.
+    const std::string deep = "packages/design-system/src/components/nav/sidebar/SideBarItem.tsx:1234";
+    for (int i = 0; i < 2; ++i) {
+      PickerEntry row;
+      row.text = "int Widget" + std::to_string(i) + " = 1;";
+      row.read = true;
+      row.detail = deep;
+      row.target = "SideBarItem.tsx";
+      row.line = 1234;
+      state->rows.push_back(std::move(row));
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    // The line is what the row is for, so the line is what survives: the detail
+    // goes rather than the row reading as a bare digit.
+    const Surface tight = draw(ed, 80, 20);
+    EXPECT_TRUE(tight.Row(4).find("1 int Widget0 = 1;") != std::string::npos);
+    EXPECT_TRUE(tight.Row(5).find("2 int Widget1 = 1;") != std::string::npos);
+    EXPECT_TRUE(tight.Row(4).find("SideBarItem") == std::string::npos);
+
+    // A detail with room left over for some of the line keeps its column, and
+    // the line clips beside it.
+    const std::string mid = std::string(48, 'p') + "/Item.tsx:12";
+    for (PickerEntry& row : state->rows) row.detail = mid;
+    state->card_w = PickerCardWidth(*state);
+    const Surface both = draw(ed, 80, 20);
+    EXPECT_TRUE(both.Row(4).find("1 int W") != std::string::npos);
+    EXPECT_TRUE(both.Row(4).find("int Widget0 = 1;") == std::string::npos);
+    EXPECT_TRUE(both.Row(4).find("/Item.tsx:12") != std::string::npos);
+
+    // And the scanning note is width like any other: while it rides the count
+    // the detail gives way, and the rows say more of what they are about rather
+    // than blanking until the scan ends.
+    state->scan = std::make_unique<PickerScan>();
+    state->card_w = PickerCardWidth(*state);
+    const Surface live = draw(ed, 80, 20);
+    EXPECT_TRUE(live.Row(5).find("scanning") != std::string::npos);
+    EXPECT_TRUE(live.Row(4).find("1 int Widget0 = 1;") != std::string::npos);
+    EXPECT_TRUE(live.Row(4).find("/Item.tsx:12") == std::string::npos);
+  }
+
+  TEST_CASE("render: a clipped row stops short of the count the last row carries");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    // A file row runs to the card's edge -- its detail reads as part of the path
+    // rather than taking a column at the right -- so the count's row is the one
+    // that has to give its column up.
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kFiles;
+    for (const char c : {'a', 'b'}) {
+      const std::string path = "src/" + std::string(90, c) + ".cpp";
+      state->rows.push_back(PickerEntry{path, {}, path, 1, 1});
+      state->shown.push_back(state->shown.size());
+    }
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    const Surface frame = draw(ed, 60, 20);
+    // A gap between the two, not a count stamped over the path under it.
+    EXPECT_TRUE(frame.Row(5).find("b 1/2/2") != std::string::npos);
+    EXPECT_TRUE(frame.Row(5).find("bb1/2/2") == std::string::npos);
+    // The rows the count does not ride still run to the card's last column.
+    EXPECT_TRUE(frame.At(frame.width - 2, 4).text == "a");
+  }
+
+  TEST_CASE("render: a card pulled off the box's edge draws no connector back to it");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    std::string text;
+    for (int i = 0; i < 12; ++i) text += std::string(70, '.') + "\n";
+    ResetToOriginal(ed.doc.table, text);
+    ed.settings.scrolloff = 0;
+    ed.doc.selections.Set(Selection{4 * 71, 4 * 71, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    // A measured card, which is a file band: the ones over file content take
+    // the screen and start at the margin, so they never touch the box at all.
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kFiles;
+    for (int i = 0; i < 2; ++i) {
+      const std::string path = "src/pick" + std::to_string(i) + std::string(60, 'w') + ".cpp";
+      state->rows.push_back(PickerEntry{path, ":12", path, 12, 1});
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    const auto rows_with = [](const Surface& f, std::string_view needle) {
+      std::vector<std::string> found;
+      for (int y = 0; y < f.height; ++y) {
+        if (f.Row(y).find(needle) != std::string::npos) found.push_back(f.Row(y));
+      }
+      return found;
+    };
+
+    // At the left margin the card starts under the box and says so.
+    const Surface hung = draw(ed, 100, 24);
+    const std::vector<std::string> attached = rows_with(hung, "src/pick");
+    EXPECT_EQ(attached.size(), std::size_t{2});
+    EXPECT_TRUE(!attached.empty() && (attached[0].find("╰─▸") != std::string::npos));
+
+    // Out at column 60 the card cannot both start under the box and end on the
+    // screen, so it is pulled left -- and an arrow from there would point at
+    // the code in between rather than at the box.
+    ed.doc.selections.Set(Selection{(4 * 71) + 60, (4 * 71) + 60, -1});
+    const Surface pulled = draw(ed, 100, 24);
+    const std::vector<std::string> loose = rows_with(pulled, "src/pick");
+    EXPECT_EQ(loose.size(), std::size_t{2});
+    for (const std::string& row : loose) EXPECT_TRUE(row.find("▸") == std::string::npos);
+    // The box did not move with the card: it is still out at the caret.
+    const auto column_of = [](const Surface& f, std::string_view glyph) {
+      for (int y = 0; y < f.height; ++y) {
+        for (int x = 0; x < f.width; ++x) {
+          if (f.At(x, y).text == glyph) return x;
+        }
+      }
+      return -1;
+    };
+    EXPECT_TRUE(column_of(pulled, "ᛃ") > 50);
+  }
+
+  // A defs picker with everything a stack can hold: three context lines, the
+  // rule under them, five band rows and a warning wanting a branch row of its
+  // own. The rows say "pick", the block says "ctx", so counting either in a
+  // frame says what was drawn.
+  const auto squeezed = [](Editor& ed, Index caret_line) {
+    ed.theme = BuiltinTheme();
+    std::string text;
+    for (int i = 0; i < 12; ++i) text += "line" + std::to_string(i) + "\n";
+    ResetToOriginal(ed.doc.table, text);
+    ed.settings.scrolloff = 0;
+    const Index at = caret_line * 6;
+    ed.doc.selections.Set(Selection{at, at, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kDefs;
+    for (int i = 0; i < 9; ++i) {
+      PickerEntry row;
+      row.text = "int pick" + std::to_string(i) + "();";
+      row.read = true;
+      row.detail = "s.cpp:" + std::to_string(i + 1);
+      row.target = "s.cpp";
+      row.line = i + 1;
+      row.name = "pick" + std::to_string(i);
+      state->rows.push_back(std::move(row));
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    state->context = {"ctx above", "ctx target", "ctx below"};
+    state->context_first = 11;
+    state->context_target = 12;
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+    // What a half-typed pattern leaves behind: the list stands and the box says
+    // why. The row it wants is what pushes the stack past a short side.
+    ed.status.Warn("bad pattern");
+  };
+
+  TEST_CASE("render: a caret with no room for the whole stack shrinks it, block first");
+  {
+    Editor ed;
+    squeezed(ed, 6);
+
+    // Room below the caret for the box, the branch row and four band rows, and
+    // that is what draws: the block and its rule are given up first, the band
+    // takes what is left, and nothing falls to the bottom row.
+    const Surface frame = draw(ed, 100, 16);
+    EXPECT_EQ(frame.cursor_y, 8);
+    EXPECT_TRUE(frame.Row(10).find("╰─▸ bad pattern") != std::string::npos);
+    EXPECT_TRUE(frame.Row(11).find("1 int pick0();") != std::string::npos);
+    EXPECT_TRUE(frame.Row(14).find("4 int pick3();") != std::string::npos);
+    EXPECT_EQ(ed.picker->window, std::size_t{4});
+    for (int y = 0; y < frame.height; ++y) {
+      EXPECT_TRUE(frame.Row(y).find("ctx ") == std::string::npos);
+    }
+    // The bar is still the bar: the prompt did not land on it, and with the box
+    // saying the warning the bar does not say it twice.
+    EXPECT_TRUE(frame.Row(15).find("ᛃ") == std::string::npos);
+    EXPECT_TRUE(frame.Row(15).find("7:1") != std::string::npos);
+    EXPECT_TRUE(frame.Row(15).find("bad pattern") == std::string::npos);
+
+    // The band drew four rows, so the fifth digit names nothing and is refused
+    // rather than opening a row nobody can see.
+    PickerAccept(ed, 4);
+    EXPECT_TRUE(ed.prompt_active);
+    EXPECT_TRUE(ed.picker != nullptr);
+
+    // Room for the whole stack, and the whole stack is back: block, rule, five
+    // rows, the window with them.
+    const Surface tall = draw(ed, 100, 24);
+    EXPECT_EQ(ed.picker->window, kPickerRows);
+    EXPECT_TRUE(tall.Row(11).find("ctx above") != std::string::npos);
+    EXPECT_TRUE(tall.Row(14).find("───") != std::string::npos);
+    EXPECT_TRUE(tall.Row(15).find("1 int pick0();") != std::string::npos);
+    EXPECT_TRUE(tall.Row(19).find("5 int pick4();") != std::string::npos);
+  }
+
+  TEST_CASE("render: a box with no room at all keeps its keys and its message honest");
+  {
+    Editor ed;
+    squeezed(ed, 2);
+
+    // Neither side has room for the box: the input keeps a row above the bar,
+    // the band drew nothing, and the warning the box would have said is the
+    // bar's again.
+    const Surface frame = draw(ed, 100, 6);
+    EXPECT_EQ(frame.cursor_y, 4);
+    EXPECT_TRUE(frame.Row(4).find("ᛃ") != std::string::npos);
+    EXPECT_TRUE(frame.Row(5).find("ᛃ") == std::string::npos);
+    EXPECT_TRUE(frame.Row(5).find("bad pattern") != std::string::npos);
+    EXPECT_EQ(ed.picker->window, std::size_t{0});
+    for (int y = 0; y < frame.height; ++y) {
+      EXPECT_TRUE(frame.Row(y).find("pick") == std::string::npos);
+    }
+
+    // No band, no accelerators: every digit names a row that was never drawn.
+    PickerAccept(ed, 0);
+    EXPECT_TRUE(ed.prompt_active);
+    EXPECT_TRUE(ed.picker != nullptr);
+  }
+
+  TEST_CASE("render: a picker prompt at every size draws what its keys walk");
+  {
+    const std::vector<int> widths{1, 2, 5, 12, 16, 20, 24, 40, 60, 100};
+    // Every caret row of a short screen, and a split, where the pane the box
+    // hangs in is shorter than the screen and its bar is not the bottom row.
+    for (const Index caret_line : {Index{0}, Index{4}, Index{9}}) {
+      for (const bool split : {false, true}) {
+        Editor ed;
+        squeezed(ed, caret_line);
+        if (split) SplitWindow(ed, false);
+        for (const int w : widths) {
+          for (int h = 1; h <= 24; ++h) {
+            const Surface frame = draw(ed, w, h);
+            EXPECT_EQ(frame.cells.size(), static_cast<std::size_t>(w) * h);
+            if (frame.cursor_visible) {
+              EXPECT_TRUE((frame.cursor_x >= 0) && (frame.cursor_x < w));
+              EXPECT_TRUE((frame.cursor_y >= 0) && (frame.cursor_y < h));
+            }
+            // The window is what the digits accept on, so it may never be more
+            // than the band drew: a row that never fit is a row the eyes never
+            // saw.
+            EXPECT_TRUE(ed.picker->window <= kPickerRows);
+            if (w >= 40) {
+              int drawn = 0;
+              for (int y = 0; y < h; ++y) {
+                if (frame.Row(y).find("int pick") != std::string::npos) ++drawn;
+              }
+              EXPECT_EQ(ed.picker->window, static_cast<std::size_t>(drawn));
+            }
+            // The bottom row belongs to a bar: a prompt that could not fit at
+            // the caret sits above it, never on it.
+            if (h >= 2) EXPECT_TRUE(frame.Row(h - 1).find("ᛃ") == std::string::npos);
+            // And whoever ends up saying the warning, someone does.
+            const StatusLine bar = StatusBar(ed, true);
+            EXPECT_TRUE(ed.prompt_box_said || (bar.message_from < bar.left.size()));
+          }
+        }
+      }
+    }
   }
 
   TEST_CASE("render: the smart-jump box behaves at every size");
