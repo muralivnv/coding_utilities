@@ -99,6 +99,14 @@ Attr Bg(const Style& style, const Palette& ui) {
   return 0;
 }
 
+// What a box drawn over code outlines itself in. `ui.window` is the wrong scope
+// for it: that one is sized for a window split, where a line between two panes
+// of text wants to disappear, and a theme that dims it is right to. A box's edge
+// is the opposite job -- it is the only thing telling the box from what it
+// covers. So it takes the colour the theme already trusts to be legible on its
+// own background, whichever direction that theme runs.
+Attr BorderFg(const Palette& ui) { return Fg(ui.text, ui); }
+
 Attr CaretBarFg(const Style& cursor, const Palette& ui) {
   if (cursor.bg.set) return ToTb(cursor.bg.rgb);
   if (cursor.fg.set) return ToTb(cursor.fg.rgb);
@@ -974,12 +982,30 @@ void DrawCompletions(const Editor& ed, const Palette& ui, int width, int height)
   const int rows = std::min({kMaxRows, static_cast<int>(matches.size()), room});
   if (rows <= 0) return;
 
+  // Measured over the rows drawn, not over every match: a help column aligned
+  // to the widest name in a list of seventy-six leaves the twelve on screen
+  // reading as two lists with a void between them.
   int widest = 0;
-  for (const TypableDef* def : matches) {
+  int helpest = 0;
+  for (int r = 0; r < rows; ++r) {
+    const TypableDef* def = matches[static_cast<std::size_t>(r)];
     widest = std::max(widest, DisplayWidthOf(def->name) + DisplayWidthOf(def->args) +
                                   (def->args.empty() ? 0 : 1));
+    helpest = std::max(helpest, DisplayWidthOf(def->help));
   }
   widest = std::min(widest, std::max(1, width / 2));
+
+  const std::string more =
+      (static_cast<int>(matches.size()) > rows)
+          ? ("+" + std::to_string(static_cast<int>(matches.size()) - rows))
+          : std::string{};
+  // The badge takes room of its own rather than being stamped over the first
+  // row's help.
+  const int badge = more.empty() ? 0 : (DisplayWidthOf(more) + 2);
+  // The block is only as wide as what it says, and its own edge is what holds
+  // it apart from the code either side of it. No border: those are the picker's,
+  // and being the one surface that wears them is how a picker is told apart.
+  const int block = std::min(width, widest + 3 + helpest + 1 + badge);
 
   const Attr fg = Fg(ui.statusline, ui);
   const Attr bg = Bg(ui.statusline, ui);
@@ -987,23 +1013,22 @@ void DrawCompletions(const Editor& ed, const Palette& ui, int width, int height)
   for (int r = 0; r < rows; ++r) {
     const TypableDef* def = matches[static_cast<std::size_t>(r)];
     const int y = top + r;
-    for (int x = 0; x < width; ++x) Cell(x, y, ' ', fg, bg);
+    for (int x = 0; x < block; ++x) Cell(x, y, ' ', fg, bg);
 
-    int x = DrawText(1, y, width, def->name, fg | kAttrBold, bg);
+    int x = DrawText(1, y, block, def->name, fg | kAttrBold, bg);
     if (!def->args.empty()) {
-      x = DrawText(x + 1, y, width, def->args, fg | kAttrDim, bg);
+      x = DrawText(x + 1, y, block, def->args, fg | kAttrDim, bg);
     }
 
     if (!def->help.empty()) {
       const int at = std::max(x + 1, widest + 3);
-      if (at < width) DrawText(at, y, width, def->help, fg | kAttrDim, bg);
+      if (at < block) DrawText(at, y, block, def->help, fg | kAttrDim, bg);
     }
   }
 
-  if (static_cast<int>(matches.size()) > rows) {
-    const std::string more = "+" + std::to_string(static_cast<int>(matches.size()) - rows);
-    const int at = width - DisplayWidthOf(more) - 1;
-    if (at > 0) DrawText(at, height - 1 - rows, width, more, fg | kAttrDim, bg);
+  if (!more.empty()) {
+    const int at = block - DisplayWidthOf(more) - 1;
+    if (at > 0) DrawText(at, top, block, more, fg | kAttrDim, bg);
   }
 }
 
@@ -1064,7 +1089,7 @@ void DrawPromptInput(Editor& ed, const Palette& ui, int x0, int y, int width, At
 // box's own interior under the box, chrome elsewhere.
 void DrawBranchRow(Editor& ed, const Palette& ui, const FlatStatus& said, int x0, int y,
                    int width, bool below, Attr bg) {
-  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const Attr border = BorderFg(ui);
   const StatusLevel level = ed.status.level();
   const Style& sev = (level == StatusLevel::kError)     ? ui.status_error
                      : (level == StatusLevel::kWarning) ? ui.status_warning
@@ -1117,6 +1142,11 @@ struct PromptFit {
   int context_rows{0};
   int rule_rows{0};
   int band_rows{0};
+  // The card's border rows. The far one is always spent; the near one only when
+  // a branch row stands between the box and the card, because otherwise the
+  // box's border row on that side is the card's.
+  int frame_near{0};
+  int frame_far{0};
   int x{0};
   int context_top{0};
   int rule_top{0};
@@ -1151,18 +1181,21 @@ PromptFit FitPromptBox(const Editor& ed, int caret_x, int caret_y, const Rect& c
   // list growing into the room it found cannot move the box off it. Below is
   // preferred; above is taken when the whole stack fits there and not below;
   // when neither side fits whole the roomier one wins.
-  const int whole = kPromptBoxRows + (fit.said.empty() ? 0 : 1) + want.context_rows +
-                    want.rule_rows + want.band_rows;
+  const int frame = (want.band_rows > 0) ? 1 : 0;
+  const int whole = kPromptBoxRows + (fit.said.empty() ? 0 : (1 + frame)) + want.context_rows +
+                    want.rule_rows + want.band_rows + frame;
   const bool below =
       (whole <= below_room) || ((whole > above_room) && (below_room >= above_room));
   const int room = below ? below_room : above_room;
 
   const int band_min = (want.band_rows > 0) ? 1 : 0;
   int said_rows = fit.said.empty() ? 0 : 1;
-  int left = room - kPromptBoxRows - said_rows;
+  int near = (said_rows > 0) ? frame : 0;
+  int left = room - kPromptBoxRows - said_rows - near - frame;
   if (left < band_min) {
     said_rows = 0;
-    left = room - kPromptBoxRows;
+    near = 0;
+    left = room - kPromptBoxRows - frame;
   }
   if (left < band_min) return fit;
 
@@ -1181,14 +1214,16 @@ PromptFit FitPromptBox(const Editor& ed, int caret_x, int caret_y, const Rect& c
   fit.inner = inner;
   fit.box_w = inner + 4;
   fit.said_rows = said_rows;
+  fit.frame_near = near;
+  fit.frame_far = (band > 0) ? frame : 0;
   fit.context_rows = context;
   fit.rule_rows = rule;
   fit.band_rows = band;
   fit.x0 = std::clamp(caret_x - 2, 0, std::max(0, width - fit.box_w));
   fit.y0 = below ? (caret_y + 1) : (caret_y - kPromptBoxRows);
   fit.x = fit.x0 + 1;
-  fit.context_top =
-      below ? (fit.y0 + kPromptBoxRows + said_rows) : (fit.y0 - said_rows - context);
+  fit.context_top = below ? (fit.y0 + kPromptBoxRows + said_rows + near)
+                          : (fit.y0 - said_rows - near - context);
   // Away from the box either way: box, block, rule, band.
   fit.rule_top = below ? (fit.context_top + context) : (fit.context_top - rule);
   fit.band_top = below ? (fit.rule_top + rule) : (fit.rule_top - band);
@@ -1203,9 +1238,13 @@ void DrawPromptBox(Editor& ed, const Palette& ui, const PromptFit& fit, int widt
   const int y0 = fit.y0;
   const int box_w = fit.box_w;
 
-  const Attr bg = Bg(ui.popup, ui);
+  // The editor's own fill, not the popup's: the box and the card it carries are
+  // one surface, and two greys meeting at their shared border row reads as a
+  // bleed rather than as a join. The border is what holds the box apart from
+  // the code, which is why it is lifted.
+  const Attr bg = Bg(ui.background, ui);
   const Attr fg = Fg(ui.text, ui);
-  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const Attr border = BorderFg(ui);
 
   const auto hline = [&](int y, std::string_view left, std::string_view mid,
                          std::string_view right) {
@@ -1251,9 +1290,9 @@ PickerCard PickerCardAt(const PickerState& state, int x0, int width) {
 // it the context lines and the list rows read as one list.
 void DrawPickerRule(const Editor& ed, const Palette& ui, int x0, int y, int width) {
   if (ed.picker == nullptr) return;
-  const Attr bg = Bg(ui.popup, ui);
+  const Attr bg = Bg(ui.background, ui);
   const Attr fg = Fg(ui.text, ui);
-  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const Attr border = BorderFg(ui);
   const PickerCard card = PickerCardAt(*ed.picker, x0, width);
   const int card_w = card.w;
   const int bx = card.x;
@@ -1272,9 +1311,9 @@ void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int row
                     bool below, bool touches) {
   if (ed.picker == nullptr) return;
   const PickerState& state = *ed.picker;
-  const Attr bg = Bg(ui.popup, ui);
+  const Attr bg = Bg(ui.background, ui);
   const Attr fg = Fg(ui.text, ui);
-  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const Attr border = BorderFg(ui);
 
   // i/n/m -- where the selection is in the filtered list, how much of the list
   // the filter left, how many candidates there were -- and while a child is
@@ -1312,6 +1351,9 @@ void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int row
     for (int x = 0; x < band_w; ++x) Cell(bx + x, y, ' ', fg, row_bg);
     const bool joins = touches && (below ? (r == 0) : (r == (rows - 1)));
     int x = DrawText(bx + 1, y, limit, joins ? (below ? "╰─▸ " : "╭─▸ ") : "    ", border, row_bg);
+    // A bar down the row's left edge, in what the row's text wears: the row
+    // enter opens, findable without reading anything.
+    if (selected) Put(bx + 1, y, "▌", Fg(ui.jump_next, ui), row_bg);
     // A tailed row has the count's column kept off it already. An untailed one
     // runs to the card's edge, so it gives that column up on the row the count
     // rides, rather than being stamped over there.
@@ -1354,7 +1396,7 @@ void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int row
       if (cx > bx) {
         DrawText(cx, y, limit,
                  common::FormatIntoStringView<"%*lu/%lu/%lu%s">(index_w, index, shown, total, note),
-                 fg | kAttrDim, row_bg);
+                 fg, row_bg);
       }
     }
   }
@@ -1375,9 +1417,9 @@ void DrawPickerContext(const Editor& ed, const Palette& ui, int x0, int y0, int 
   // the row -- content's is a byte offset into a corpus.
   const Index target = state.context_target;
 
-  const Attr bg = Bg(ui.popup, ui);
+  const Attr bg = Bg(ui.background, ui);
   const Attr fg = Fg(ui.text, ui);
-  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const Attr border = BorderFg(ui);
   const Attr match = Fg(ui.excerpt_match, ui) | Attrs(ui.excerpt_match);
 
   // No heading over the lines: the selected row says which file this is, at the
@@ -1407,6 +1449,77 @@ void DrawPickerContext(const Editor& ed, const Palette& ui, int x0, int y0, int 
   }
 }
 
+// The box around the block, the rule and the band, in the prompt box's own
+// language and joined to it on the row the two share: the box's border row is
+// the card's on that side, so the pair reads as one surface instead of a
+// bordered box sitting on an unbordered slab.
+void DrawPickerFrame(const Editor& ed, const Palette& ui, const PromptFit& fit, int width) {
+  if ((ed.picker == nullptr) || (fit.frame_far == 0)) return;
+  const Attr bg = Bg(ui.background, ui);
+  const Attr fg = Fg(ui.text, ui);
+  const Attr border = BorderFg(ui);
+  const PickerCard card = PickerCardAt(*ed.picker, fit.x0, width);
+  const int bx = card.x;
+  const int right = bx + card.w - 1;
+
+  int lo = fit.band_top;
+  int hi = fit.band_top + fit.band_rows - 1;
+  if (fit.context_rows > 0) {
+    lo = std::min(lo, fit.context_top);
+    hi = std::max(hi, fit.context_top + fit.context_rows - 1);
+  }
+  if (fit.rule_rows > 0) {
+    lo = std::min(lo, fit.rule_top);
+    hi = std::max(hi, fit.rule_top);
+  }
+  for (int y = lo; y <= hi; ++y) {
+    Put(bx, y, "│", border, bg);
+    Put(right, y, "│", border, bg);
+  }
+
+  // The shared row, which the two boxes have to agree about. Three cases per
+  // card edge, and the box is not always the wider of the two -- the box is
+  // sized from the caret's screen (`inner`), the card from its rows, so either
+  // can be wider: the edges coincide (a junction, the wall passing through),
+  // the card's edge falls inside the box's span (a tee off the box's own
+  // border), or it falls outside it (the card's own corner). Columns of the box
+  // the card does not reach keep what the box drew there.
+  const int near_y = fit.below ? (lo - 1) : (hi + 1);
+  const bool joined = (fit.frame_near == 0);
+  const int box_l = fit.x0;
+  const int box_r = fit.x0 + fit.box_w - 1;
+  const auto edge = [&](int c, std::string_view corner, std::string_view junction,
+                        std::string_view tee) {
+    if (!joined) return corner;
+    if ((c == box_l) || (c == box_r)) return junction;
+    return ((c > box_l) && (c < box_r)) ? tee : corner;
+  };
+  for (int c = bx; c <= right; ++c) {
+    std::string_view glyph = "─";
+    if (c == bx) {
+      glyph = fit.below ? edge(c, "╭", "├", "┬") : edge(c, "╰", "├", "┴");
+    } else if (c == right) {
+      glyph = fit.below ? edge(c, "╮", "┤", "┬") : edge(c, "╯", "┤", "┴");
+    } else if (joined && ((c == box_l) || (c == box_r))) {
+      glyph = fit.below ? "┴" : "┬";
+    }
+    Cell(c, near_y, ' ', fg, bg);
+    Put(c, near_y, glyph, border, bg);
+  }
+
+  const int far_y = fit.below ? (hi + 1) : (lo - 1);
+  for (int c = bx; c <= right; ++c) {
+    std::string_view glyph = "─";
+    if (c == bx) {
+      glyph = fit.below ? "╰" : "╭";
+    } else if (c == right) {
+      glyph = fit.below ? "╯" : "╮";
+    }
+    Cell(c, far_y, ' ', fg, bg);
+    Put(c, far_y, glyph, border, bg);
+  }
+}
+
 // A smart-jump arrival answers the walk's only question -- press again or
 // stay -- right where the eyes are: the prompt's rounded box at the caret,
 // sized to what it holds, naming where the next press goes. Below the caret,
@@ -1432,8 +1545,8 @@ void DrawJumpBranch(Editor& ed, const Palette& ui, int caret_x, int caret_y,
 
   const int x0 = std::clamp(caret_x - 2, 0, std::max(0, width - box_w));
 
-  const Attr bg = Bg(ui.popup, ui);
-  const Attr border = Fg(ui.window.fg.set ? ui.window : ui.linenr, ui);
+  const Attr bg = Bg(ui.background, ui);
+  const Attr border = BorderFg(ui);
   const StatusLevel level = ed.status.level();
   const Style& sev = (level == StatusLevel::kError)     ? ui.status_error
                      : (level == StatusLevel::kWarning) ? ui.status_warning
@@ -1599,12 +1712,15 @@ void RenderInto(Editor& ed, int width, int height) {
         // connector drawn from a card that no longer starts under the box
         // points at the code between the two. The plain indent is what is
         // honest there; the box stays where the caret put it either way.
-        const bool attached = PickerCardAt(*ed.picker, fit.x, width).x == fit.x;
-        DrawPickerContext(ed, ui, fit.x, fit.context_top, fit.context_rows, width, fit.below,
-                          attached);
-        if (fit.rule_rows > 0) DrawPickerRule(ed, ui, fit.x, fit.rule_top, width);
-        DrawPickerBand(ed, ui, fit.x, fit.band_top, fit.band_rows, width, fit.below,
-                       attached && (fit.context_rows == 0));
+        // The card's left edge is the box's, not one column in from it: the two
+        // share a border row, and an edge a column out from under the box
+        // leaves its corner dangling over the code with a gap beside it. A card
+        // that takes the screen lands on the margin either way.
+        DrawPickerContext(ed, ui, fit.x0, fit.context_top, fit.context_rows, width, fit.below,
+                          false);
+        if (fit.rule_rows > 0) DrawPickerRule(ed, ui, fit.x0, fit.rule_top, width);
+        DrawPickerBand(ed, ui, fit.x0, fit.band_top, fit.band_rows, width, fit.below, false);
+        DrawPickerFrame(ed, ui, fit, width);
       }
     } else {
       // PanesOf reserves no row for a prompt that lives in a box, so the bottom

@@ -585,6 +585,62 @@ void Rendering() {
     EXPECT_EQ(frame.cursor_y, frame.height - 1);
   }
 
+  TEST_CASE("render: the completion list is a block sized to the rows it draws");
+  {
+    Editor ed;
+    // BuiltinTheme fills the bar with the background, so the block's own fill
+    // would be the code's and the edge below would prove nothing.
+    ed.theme = BuiltinTheme();
+    ed.theme.scopes["ui.statusline"] = Style{{}, Color{true, 0x303030}, 0};
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    // Every command, which is far more than a screen holds: the rows drawn are
+    // the short ones at the head of the list, and the long ones behind them are
+    // what the help column used to be aligned to.
+    PromptOpen(ed, PromptKind::kCommand);
+
+    const Surface frame = draw(ed, 100, 20);
+    constexpr int kRows = 12;
+    const int top = frame.height - 1 - kRows;
+    // The badge saying how many did not fit rides the first row.
+    EXPECT_TRUE(frame.Row(top).find("+") != std::string::npos);
+
+    // The fill stops at what the block says instead of running to the screen
+    // edge, so code stays visible either side of it. No border: those are the
+    // picker's, and the block's own edge is what holds it apart.
+    const auto fill = frame.At(1, top).bg;
+    int edge = frame.width;
+    while ((edge > 0) && (frame.At(edge - 1, top).bg != fill)) --edge;
+    EXPECT_TRUE(edge > 1);
+    EXPECT_TRUE(edge < frame.width);
+    EXPECT_TRUE(frame.At(edge, top).bg != fill);
+
+    // One help column across the rows, and near the names rather than out at
+    // the middle of the screen: it is measured over the rows drawn, not over
+    // every match, most of which is not on screen.
+    const auto help_at = [&frame](int y) {
+      int at = 1;
+      while ((at + 1) < frame.width) {
+        if ((frame.At(at, y).text == " ") && (frame.At(at + 1, y).text == " ")) break;
+        ++at;
+      }
+      while ((at < frame.width) && (frame.At(at, y).text == " ")) ++at;
+      return at;
+    };
+    int column = -1;
+    int helped = 0;
+    for (int y = top; y < (frame.height - 1); ++y) {
+      const int at = help_at(y);
+      if (at >= edge) continue;
+      if (column < 0) column = at;
+      EXPECT_EQ(at, column);
+      ++helped;
+    }
+    EXPECT_TRUE(helped >= (kRows - 1));
+    EXPECT_TRUE(column > 1);
+    EXPECT_TRUE(column < (frame.width / 4));
+  }
+
   // A command or a pattern longer than the terminal is wide used to be typed
   // blind: the row drew from column 0, stopped at the width, and the caret
   // stuck to the last column while the text stopped changing.
@@ -879,12 +935,23 @@ void Rendering() {
 
     const Surface frame = draw(ed, 60, 16);
 
-    // The connector on the row touching the box, the others indented to the
-    // same text column, and the digit on each is what opens it.
-    EXPECT_TRUE(frame.Row(4).find("╰─▸ 1 alpha.cpp:12") != std::string::npos);
+    // Every row on the same text column, and the digit on each is what opens
+    // it. No connector back to the box: the card is boxed itself now and shares
+    // the box's border row, so an arrow would point at what it is joined to.
+    EXPECT_TRUE(frame.Row(4).find("1 alpha.cpp:12") != std::string::npos);
     EXPECT_TRUE(frame.Row(5).find("2 charlie.cpp:12") != std::string::npos);
     EXPECT_TRUE(frame.Row(6).find("3 echo.cpp:12") != std::string::npos);
-    EXPECT_TRUE(frame.Row(5).find("▸") == std::string::npos);
+    for (int y = 0; y < frame.height; ++y) {
+      EXPECT_TRUE(frame.Row(y).find("▸") == std::string::npos);
+    }
+    // The row the box's bottom shares with the card's top, and the card's own
+    // bottom under the last row.
+    EXPECT_TRUE(frame.Row(3).find("├") != std::string::npos);
+    EXPECT_TRUE(frame.Row(7).find("╰") != std::string::npos);
+    EXPECT_TRUE(frame.Row(7).find("╯") != std::string::npos);
+    // The bar down the selected row's left edge, inside the card's wall.
+    EXPECT_TRUE(frame.Row(5).find("▌") != std::string::npos);
+    EXPECT_TRUE(frame.Row(4).find("▌") == std::string::npos);
     // The count is where the selection is, of what the filter left, of what
     // there was: the second of the three kept, of five rows.
     EXPECT_TRUE(frame.Row(6).find("2/3/5") != std::string::npos);
@@ -935,9 +1002,9 @@ void Rendering() {
 
     const Surface frame = draw(ed, 60, 16);
 
-    // The box takes rows 1..3, so the block is 4..6, the rule is 7 and the band
-    // starts at 8. A card this wide is the screen's width and starts at the
-    // margin, so it hangs off nothing and draws the plain indent.
+    // The box takes rows 1..3, its last row being the card's first, so the block
+    // is 4..6, the rule is 7, the band starts at 8 and the card's own bottom is
+    // 10. A card this wide is the screen's width and starts at the margin.
     EXPECT_TRUE(frame.Row(4).find("11 void Above() {}") != std::string::npos);
     EXPECT_TRUE(frame.Row(4).find("▸") == std::string::npos);
     EXPECT_TRUE(frame.Row(5).find("12   int Widget = 1;") != std::string::npos);
@@ -948,12 +1015,28 @@ void Rendering() {
     EXPECT_TRUE(frame.Row(7).find("Widget") == std::string::npos);
     EXPECT_TRUE(frame.Row(8).find("1 int Widget = 1;") != std::string::npos);
     EXPECT_TRUE(frame.Row(8).find("▸") == std::string::npos);
+    EXPECT_TRUE(frame.Row(10).find("╰") != std::string::npos);
+
+    // Byte offsets into a row shift when a multi-byte glyph lands on it, and the
+    // selected row wears one -- so what these compare is columns.
+    const auto column_of_text = [](const Surface& f, int y, std::string_view needle) {
+      for (int x = 0; x < f.width; ++x) {
+        std::string seen;
+        for (int at = x; (at < f.width) && (seen.size() < needle.size()); ++at) {
+          seen += f.At(at, y).text;
+        }
+        if ((seen.size() >= needle.size()) && (seen.compare(0, needle.size(), needle) == 0)) {
+          return x;
+        }
+      }
+      return -1;
+    };
 
     // The line on the left, where it is at the right edge of the card -- and
     // the same right edge on both rows, the count's column kept off them.
-    const int a_at = static_cast<int>(frame.Row(8).find("src/a.cpp:12"));
-    const int b_at = static_cast<int>(frame.Row(9).find("src/b.cpp:12"));
-    EXPECT_TRUE(a_at > static_cast<int>(frame.Row(8).find("int Widget")));
+    const int a_at = column_of_text(frame, 8, "src/a.cpp:12");
+    const int b_at = column_of_text(frame, 9, "src/b.cpp:12");
+    EXPECT_TRUE(a_at > column_of_text(frame, 8, "int Widget"));
     EXPECT_EQ(a_at, b_at);
     EXPECT_TRUE(frame.Row(9).find("1/2/2") != std::string::npos);
 
@@ -977,8 +1060,8 @@ void Rendering() {
     ResetToOriginal(ed.doc.table, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n");
     ed.doc.selections.Set(Selection{24, 24, -1});
     const Surface up = draw(ed, 60, 16);
-    const auto row_with = [](const Surface& f, std::string_view needle) {
-      for (int y = 0; y < f.height; ++y) {
+    const auto row_with = [](const Surface& f, std::string_view needle, int from = 0) {
+      for (int y = from; y < f.height; ++y) {
         if (f.Row(y).find(needle) != std::string::npos) return y;
       }
       return -1;
@@ -990,8 +1073,10 @@ void Rendering() {
     EXPECT_TRUE(band < block);
     EXPECT_TRUE(block < box);
     EXPECT_EQ(row_with(up, "13 }"), block + 1);
-    // The rule keeps its place between the two, whichever way the stack hangs.
-    EXPECT_EQ(row_with(up, "───"), band + 2);
+    // The rule keeps its place between the two, whichever way the stack hangs --
+    // searched past the band, because the card's own border is a run of the same
+    // glyph on the far side of it.
+    EXPECT_EQ(row_with(up, "───", band), band + 2);
 
     // A file row is its own evidence: no lines are read for it, so there is no
     // block, no rule, and the band goes back to touching the box. Text and
@@ -1005,10 +1090,15 @@ void Rendering() {
     }
     state->card_w = PickerCardWidth(*state);
     const Surface plain = draw(ed, 60, 16);
-    EXPECT_TRUE(plain.Row(4).find("╰─▸ 1 src/a.cpp:12") != std::string::npos);
+    // No block and no rule, so the band starts on the row under the one the box
+    // and the card share, and the card's bottom is straight under the last row.
+    EXPECT_TRUE(plain.Row(3).find("├") != std::string::npos);
+    EXPECT_TRUE(plain.Row(4).find("1 src/a.cpp:12") != std::string::npos);
     EXPECT_TRUE(plain.Row(5).find("2 src/b.cpp:12") != std::string::npos);
-    EXPECT_TRUE(plain.Row(6).find("Above") == std::string::npos);
-    EXPECT_TRUE(plain.Row(6).find("───") == std::string::npos);
+    EXPECT_TRUE(plain.Row(6).find("╰") != std::string::npos);
+    for (int y = 0; y < plain.height; ++y) {
+      EXPECT_TRUE(plain.Row(y).find("Above") == std::string::npos);
+    }
   }
 
   TEST_CASE("render: a content row leads with the line and keeps its path at the edge");
@@ -1064,12 +1154,27 @@ void Rendering() {
     EXPECT_TRUE(frame.Row(8).find("ZZEND") == std::string::npos);
     EXPECT_TRUE(frame.Row(9).find("2 another line") != std::string::npos);
 
+    // Byte offsets into a row shift when a multi-byte glyph lands on it, and the
+    // selected row wears one -- so what these compare is columns.
+    const auto column_of_text = [](const Surface& f, int y, std::string_view needle) {
+      for (int x = 0; x < f.width; ++x) {
+        std::string seen;
+        for (int at = x; (at < f.width) && (seen.size() < needle.size()); ++at) {
+          seen += f.At(at, y).text;
+        }
+        if ((seen.size() >= needle.size()) && (seen.compare(0, needle.size(), needle) == 0)) {
+          return x;
+        }
+      }
+      return -1;
+    };
+
     // The head rides the right edge instead -- ending on the same column for
     // both rows, whatever each one's length, with the count's room kept off
     // them: a symbol band, in other words.
-    const int a_at = static_cast<int>(frame.Row(8).find("src/a.cpp:12"));
-    const int b_at = static_cast<int>(frame.Row(9).find("src/b.cpp:3"));
-    EXPECT_TRUE(a_at > static_cast<int>(frame.Row(8).find("int Widget")));
+    const int a_at = column_of_text(frame, 8, "src/a.cpp:12");
+    const int b_at = column_of_text(frame, 9, "src/b.cpp:3");
+    EXPECT_TRUE(a_at > column_of_text(frame, 8, "int Widget"));
     EXPECT_EQ(a_at + 12, b_at + 11);
     // The selection is the first row, of two shown, of two lines scanned.
     EXPECT_TRUE(frame.Row(9).find("1/2/2") != std::string::npos);
@@ -1087,12 +1192,13 @@ void Rendering() {
     EXPECT_TRUE((above_x >= 0) && (target_x >= 0));
     EXPECT_TRUE(frame.At(target_x, 5).fg != frame.At(above_x, 4).fg);
 
-    // The card takes the room at the box's edge and stops there: the count is
-    // the card's last column, and nothing is painted past the screen.
+    // The card takes the screen and stops there: the count is its last column
+    // inside the wall, the wall is the screen's last, and nothing is painted
+    // past it.
     const int edge = column_of(frame, 8, "1");
     EXPECT_TRUE(edge > 0);
     EXPECT_EQ(frame.At(frame.width - 2, 9).text, std::string{"2"});
-    EXPECT_EQ(frame.At(frame.width - 1, 9).text, std::string{" "});
+    EXPECT_EQ(frame.At(frame.width - 1, 9).text, std::string{"│"});
   }
 
   TEST_CASE("render: the buffers band grows to what the screen fits");
@@ -1308,7 +1414,7 @@ void Rendering() {
     EXPECT_TRUE(frame.At(frame.width - 2, 4).text == "a");
   }
 
-  TEST_CASE("render: a card pulled off the box's edge draws no connector back to it");
+  TEST_CASE("render: a card pulled off the box's edge is boxed where it lands");
   {
     Editor ed;
     ed.theme = BuiltinTheme();
@@ -1339,20 +1445,33 @@ void Rendering() {
       return found;
     };
 
-    // At the left margin the card starts under the box and says so.
+    // At the left margin the card starts under the box: the row the two share
+    // carries the junction where their left edges meet.
     const Surface hung = draw(ed, 100, 24);
     const std::vector<std::string> attached = rows_with(hung, "src/pick");
     EXPECT_EQ(attached.size(), std::size_t{2});
-    EXPECT_TRUE(!attached.empty() && (attached[0].find("╰─▸") != std::string::npos));
+    const auto row_holding = [](const Surface& f, std::string_view needle) {
+      for (int y = 0; y < f.height; ++y) {
+        if (f.Row(y).find(needle) != std::string::npos) return y;
+      }
+      return -1;
+    };
+    const int hung_band = row_holding(hung, "src/pick");
+    EXPECT_TRUE(hung_band > 0);
+    EXPECT_TRUE(hung.Row(hung_band - 1).find("├") != std::string::npos);
 
     // Out at column 60 the card cannot both start under the box and end on the
-    // screen, so it is pulled left -- and an arrow from there would point at
-    // the code in between rather than at the box.
+    // screen, so it is pulled left. Its own corner is what it draws there, and
+    // the box's walls come down onto the row as tees.
     ed.doc.selections.Set(Selection{(4 * 71) + 60, (4 * 71) + 60, -1});
     const Surface pulled = draw(ed, 100, 24);
     const std::vector<std::string> loose = rows_with(pulled, "src/pick");
     EXPECT_EQ(loose.size(), std::size_t{2});
     for (const std::string& row : loose) EXPECT_TRUE(row.find("▸") == std::string::npos);
+    const int loose_band = row_holding(pulled, "src/pick");
+    EXPECT_TRUE(loose_band > 0);
+    EXPECT_TRUE(pulled.Row(loose_band - 1).find("╭") != std::string::npos);
+    EXPECT_TRUE(pulled.Row(loose_band - 1).find("┴") != std::string::npos);
     // The box did not move with the card: it is still out at the caret.
     const auto column_of = [](const Surface& f, std::string_view glyph) {
       for (int y = 0; y < f.height; ++y) {
@@ -1407,15 +1526,19 @@ void Rendering() {
     Editor ed;
     squeezed(ed, 6);
 
-    // Room below the caret for the box, the branch row and four band rows, and
-    // that is what draws: the block and its rule are given up first, the band
-    // takes what is left, and nothing falls to the bottom row.
+    // Room below the caret for the box, the branch row, the card's two border
+    // rows and two band rows, and that is what draws: the block and its rule are
+    // given up first, the band takes what is left, and nothing falls to the
+    // bottom row. A branch row between the box and the card means the card pays
+    // for a top border of its own -- with them adjacent the box's own row is it.
     const Surface frame = draw(ed, 100, 16);
     EXPECT_EQ(frame.cursor_y, 8);
     EXPECT_TRUE(frame.Row(10).find("╰─▸ bad pattern") != std::string::npos);
-    EXPECT_TRUE(frame.Row(11).find("1 int pick0();") != std::string::npos);
-    EXPECT_TRUE(frame.Row(14).find("4 int pick3();") != std::string::npos);
-    EXPECT_EQ(ed.picker->window, std::size_t{4});
+    EXPECT_TRUE(frame.Row(11).find("╭") != std::string::npos);
+    EXPECT_TRUE(frame.Row(12).find("1 int pick0();") != std::string::npos);
+    EXPECT_TRUE(frame.Row(13).find("2 int pick1();") != std::string::npos);
+    EXPECT_TRUE(frame.Row(14).find("╰") != std::string::npos);
+    EXPECT_EQ(ed.picker->window, std::size_t{2});
     for (int y = 0; y < frame.height; ++y) {
       EXPECT_TRUE(frame.Row(y).find("ctx ") == std::string::npos);
     }
@@ -1425,7 +1548,7 @@ void Rendering() {
     EXPECT_TRUE(frame.Row(15).find("7:1") != std::string::npos);
     EXPECT_TRUE(frame.Row(15).find("bad pattern") == std::string::npos);
 
-    // The band drew four rows, so the fifth digit names nothing and is refused
+    // The band drew two rows, so the fifth digit names nothing and is refused
     // rather than opening a row nobody can see.
     PickerAccept(ed, 4);
     EXPECT_TRUE(ed.prompt_active);
@@ -1435,10 +1558,12 @@ void Rendering() {
     // rows, the window with them.
     const Surface tall = draw(ed, 100, 24);
     EXPECT_EQ(ed.picker->window, kPickerRows);
-    EXPECT_TRUE(tall.Row(11).find("ctx above") != std::string::npos);
-    EXPECT_TRUE(tall.Row(14).find("───") != std::string::npos);
-    EXPECT_TRUE(tall.Row(15).find("1 int pick0();") != std::string::npos);
-    EXPECT_TRUE(tall.Row(19).find("5 int pick4();") != std::string::npos);
+    EXPECT_TRUE(tall.Row(11).find("╭") != std::string::npos);
+    EXPECT_TRUE(tall.Row(12).find("ctx above") != std::string::npos);
+    EXPECT_TRUE(tall.Row(15).find("───") != std::string::npos);
+    EXPECT_TRUE(tall.Row(16).find("1 int pick0();") != std::string::npos);
+    EXPECT_TRUE(tall.Row(20).find("5 int pick4();") != std::string::npos);
+    EXPECT_TRUE(tall.Row(21).find("╰") != std::string::npos);
   }
 
   TEST_CASE("render: a box with no room at all keeps its keys and its message honest");

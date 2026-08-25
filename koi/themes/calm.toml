@@ -11,8 +11,8 @@
 "ui.statusline.inactive" = { fg = "foreground", bg = "accent_color" }
 "ui.virtual" = "indent"
 "ui.virtual.ruler"       = { bg = "accent_color" }
-"ui.virtual.jump-label"  = { bg = "highlight_green", fg = "foreground", modifiers = ["bold"] }
-"ui.jump.next"           = { fg = "green" }
+"ui.virtual.jump-label"  = { bg = "highlight_purple", fg = "foreground", modifiers = ["bold"] }
+"ui.jump.next"           = { fg = "foreground" }
 "ui.cursor.match"        = { bg = "accent_color" }
 "ui.cursor"              = { bg = "cursor", fg = "background" }
 "ui.debug"               = { fg = "orange" }
