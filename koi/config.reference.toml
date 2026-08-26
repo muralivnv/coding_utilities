@@ -48,7 +48,9 @@ auto-pairs                       = true # a typed ( " [ closes itself around the
 scrolloff                        = 3 # Lines kept visible above and below the cursor when scrolling, 0-100.
 line-number                      = "relative" # "absolute". Any other string means relative.
 cursorline                       = true # highlight current line, with `ui.cursorline.primary`
-excerpt-context                  = 2 # Lines of context around a hit in the excerpt views, 0-100.
+excerpt-context                  = 2 # Lines of context around a hit in the excerpt views and around
+                                     # the target in a picker's block, 0-100. Alt+= / alt+- adjust it
+                                     # from inside a picker.
 scan-workers                     = 1 # Threads for searches/references/file scans, 1-32. Raising it
                                      # applies live (and on :config-reload); lowering it takes a
                                      # restart -- the pool only ever grows while koi runs.

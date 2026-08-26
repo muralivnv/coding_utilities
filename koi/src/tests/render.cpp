@@ -1003,8 +1003,9 @@ void Rendering() {
     const Surface frame = draw(ed, 60, 16);
 
     // The box takes rows 1..3, its last row being the card's first, so the block
-    // is 4..6, the rule is 7, the band starts at 8 and the card's own bottom is
-    // 10. A card this wide is the screen's width and starts at the margin.
+    // is 4..6, the rule is 7, the band is 8..9, the count's own row is 10 and
+    // the card's bottom is 11. A card this wide is the screen's width and starts
+    // at the margin.
     EXPECT_TRUE(frame.Row(4).find("11 void Above() {}") != std::string::npos);
     EXPECT_TRUE(frame.Row(4).find("▸") == std::string::npos);
     EXPECT_TRUE(frame.Row(5).find("12   int Widget = 1;") != std::string::npos);
@@ -1015,7 +1016,7 @@ void Rendering() {
     EXPECT_TRUE(frame.Row(7).find("Widget") == std::string::npos);
     EXPECT_TRUE(frame.Row(8).find("1 int Widget = 1;") != std::string::npos);
     EXPECT_TRUE(frame.Row(8).find("▸") == std::string::npos);
-    EXPECT_TRUE(frame.Row(10).find("╰") != std::string::npos);
+    EXPECT_TRUE(frame.Row(11).find("╰") != std::string::npos);
 
     // Byte offsets into a row shift when a multi-byte glyph lands on it, and the
     // selected row wears one -- so what these compare is columns.
@@ -1032,13 +1033,20 @@ void Rendering() {
       return -1;
     };
 
-    // The line on the left, where it is at the right edge of the card -- and
-    // the same right edge on both rows, the count's column kept off them.
+    // The line on the left and the detail in a column of its own, two past the
+    // widest lead the window holds -- the same column on both rows, and nowhere
+    // near the card's far edge, which on a screen-wide card is a screen's width
+    // of nothing between the two halves of the row.
+    const int lead_at = column_of_text(frame, 8, "int Widget = 1;");
     const int a_at = column_of_text(frame, 8, "src/a.cpp:12");
     const int b_at = column_of_text(frame, 9, "src/b.cpp:12");
-    EXPECT_TRUE(a_at > column_of_text(frame, 8, "int Widget"));
+    EXPECT_EQ(lead_at, 7);
+    EXPECT_EQ(a_at, lead_at + 15 + 2);
     EXPECT_EQ(a_at, b_at);
-    EXPECT_TRUE(frame.Row(9).find("1/2/2") != std::string::npos);
+    // The count is off the rows and on one of its own, at the column the rows
+    // and the rule share.
+    EXPECT_TRUE(frame.Row(9).find("1/2/2") == std::string::npos);
+    EXPECT_EQ(column_of_text(frame, 10, "1/2/2"), 5);
 
     const auto column_of = [](const Surface& f, int y, std::string_view glyph) {
       for (int x = 0; x < f.width; ++x) {
@@ -1073,10 +1081,12 @@ void Rendering() {
     EXPECT_TRUE(band < block);
     EXPECT_TRUE(block < box);
     EXPECT_EQ(row_with(up, "13 }"), block + 1);
-    // The rule keeps its place between the two, whichever way the stack hangs --
-    // searched past the band, because the card's own border is a run of the same
-    // glyph on the far side of it.
-    EXPECT_EQ(row_with(up, "───", band), band + 2);
+    // The count stays under the list's last row when the stack hangs the other
+    // way, so it is what the rule is found past: two rows of band, the count,
+    // then the rule. Searched from the band, because the card's own border is a
+    // run of the same glyph on the far side of it.
+    EXPECT_EQ(row_with(up, "1/2/2", band), band + 2);
+    EXPECT_EQ(row_with(up, "───", band), band + 3);
 
     // A file row is its own evidence: no lines are read for it, so there is no
     // block, no rule, and the band goes back to touching the box. Text and
@@ -1101,7 +1111,7 @@ void Rendering() {
     }
   }
 
-  TEST_CASE("render: a content row leads with the line and keeps its path at the edge");
+  TEST_CASE("render: a content row leads with the line and keeps its path in a column");
   {
     Editor ed;
     ed.theme = BuiltinTheme();
@@ -1169,15 +1179,19 @@ void Rendering() {
       return -1;
     };
 
-    // The head rides the right edge instead -- ending on the same column for
-    // both rows, whatever each one's length, with the count's room kept off
-    // them: a symbol band, in other words.
+    // The head takes a column of its own instead, starting on the same one for
+    // both rows whatever each line's length: a symbol band, in other words. The
+    // lead is longer than what the widest head leaves, so it clips there rather
+    // than pushing the paths off the screen.
     const int a_at = column_of_text(frame, 8, "src/a.cpp:12");
     const int b_at = column_of_text(frame, 9, "src/b.cpp:3");
     EXPECT_TRUE(a_at > column_of_text(frame, 8, "int Widget"));
-    EXPECT_EQ(a_at + 12, b_at + 11);
-    // The selection is the first row, of two shown, of two lines scanned.
-    EXPECT_TRUE(frame.Row(9).find("1/2/2") != std::string::npos);
+    EXPECT_EQ(a_at, b_at);
+    EXPECT_EQ(a_at, 7 + (frame.width - 1 - 7 - 2 - 12) + 2);
+    // The selection is the first row, of two shown, of two lines scanned, on the
+    // row under the list.
+    EXPECT_TRUE(frame.Row(9).find("1/2/2") == std::string::npos);
+    EXPECT_EQ(column_of_text(frame, 10, "1/2/2"), 5);
 
     const auto column_of = [](const Surface& f, int y, std::string_view glyph) {
       for (int x = 0; x < f.width; ++x) {
@@ -1192,13 +1206,14 @@ void Rendering() {
     EXPECT_TRUE((above_x >= 0) && (target_x >= 0));
     EXPECT_TRUE(frame.At(target_x, 5).fg != frame.At(above_x, 4).fg);
 
-    // The card takes the screen and stops there: the count is its last column
-    // inside the wall, the wall is the screen's last, and nothing is painted
-    // past it.
+    // The card takes the screen and stops there: its wall is the screen's last
+    // column on every row it holds, the count's included, and nothing is
+    // painted past it.
     const int edge = column_of(frame, 8, "1");
     EXPECT_TRUE(edge > 0);
-    EXPECT_EQ(frame.At(frame.width - 2, 9).text, std::string{"2"});
     EXPECT_EQ(frame.At(frame.width - 1, 9).text, std::string{"│"});
+    EXPECT_EQ(frame.At(frame.width - 1, 10).text, std::string{"│"});
+    EXPECT_EQ(frame.At(frame.width - 2, 10).text, std::string{" "});
   }
 
   TEST_CASE("render: the buffers band grows to what the screen fits");
@@ -1315,23 +1330,27 @@ void Rendering() {
     state->card_w = PickerCardWidth(*state);
     ed.picker = state;
 
+    // Box on 1..3, the two rows on 4..5, the count's own row under them: a
+    // source with a block draws its details in a measured column, so there is no
+    // right edge left for the count to ride.
     const Surface scanning = draw(ed, 70, 20);
-    EXPECT_TRUE(scanning.Row(5).find("1/2/2 scanning") != std::string::npos);
+    EXPECT_TRUE(scanning.Row(6).find("1/2/2 scanning") != std::string::npos);
 
     // The pipe closes and the count is the plain answer it was waiting to be.
     state->scan->done = true;
     const Surface done = draw(ed, 70, 20);
-    EXPECT_TRUE(done.Row(5).find("scanning") == std::string::npos);
-    EXPECT_TRUE(done.Row(5).find("1/2/2") != std::string::npos);
+    EXPECT_TRUE(done.Row(6).find("scanning") == std::string::npos);
+    EXPECT_TRUE(done.Row(6).find("1/2/2") != std::string::npos);
 
     // Unless it stopped at the corpus ceiling, where a plain 2/2 would be the
-    // band claiming a slice of the project as the whole of it.
+    // band claiming a slice of the project as the whole of it. The note is the
+    // count's, so it moved with it.
     state->scan->truncated = true;
     const Surface cut = draw(ed, 70, 20);
-    EXPECT_TRUE(cut.Row(5).find("1/2/2 truncated") != std::string::npos);
+    EXPECT_TRUE(cut.Row(6).find("1/2/2 truncated") != std::string::npos);
   }
 
-  TEST_CASE("render: a card with room for one of the two keeps the line, not the detail");
+  TEST_CASE("render: a lead longer than its column clips, and a narrow card keeps the filename");
   {
     Editor ed;
     ed.theme = BuiltinTheme();
@@ -1341,48 +1360,229 @@ void Rendering() {
 
     auto state = std::make_shared<PickerState>();
     state->source = PickerState::Source::kDefs;
-    // A path most of an 80-column screen wide: keeping its column at the right
-    // edge would leave the line it belongs to nowhere to draw.
-    const std::string deep = "packages/design-system/src/components/nav/sidebar/SideBarItem.tsx:1234";
+    // A line longer than any card would give it: uncapped, the column it asked
+    // for would put every detail past the card's edge, which is the gap the
+    // measured column is here to close.
     for (int i = 0; i < 2; ++i) {
       PickerEntry row;
-      row.text = "int Widget" + std::to_string(i) + " = 1;";
+      row.text = "int Widget" + std::to_string(i) + " = " + std::string(90, 'q') + ";";
       row.read = true;
-      row.detail = deep;
-      row.target = "SideBarItem.tsx";
-      row.line = 1234;
+      row.detail = "s.cpp:12";
+      row.target = "s.cpp";
+      row.line = 12;
       state->rows.push_back(std::move(row));
       state->shown.push_back(static_cast<std::size_t>(i));
     }
     state->card_w = PickerCardWidth(*state);
     ed.picker = state;
 
-    // The line is what the row is for, so the line is what survives: the detail
-    // goes rather than the row reading as a bare digit.
-    const Surface tight = draw(ed, 80, 20);
-    EXPECT_TRUE(tight.Row(4).find("1 int Widget0 = 1;") != std::string::npos);
-    EXPECT_TRUE(tight.Row(5).find("2 int Widget1 = 1;") != std::string::npos);
-    EXPECT_TRUE(tight.Row(4).find("SideBarItem") == std::string::npos);
+    const auto column_of_text = [](const Surface& f, int y, std::string_view needle) {
+      for (int x = 0; x < f.width; ++x) {
+        std::string seen;
+        for (int at = x; (at < f.width) && (seen.size() < needle.size()); ++at) {
+          seen += f.At(at, y).text;
+        }
+        if ((seen.size() >= needle.size()) && (seen.compare(0, needle.size(), needle) == 0)) {
+          return x;
+        }
+      }
+      return -1;
+    };
 
-    // A detail with room left over for some of the line keeps its column, and
-    // the line clips beside it.
-    const std::string mid = std::string(48, 'p') + "/Item.tsx:12";
-    for (PickerEntry& row : state->rows) row.detail = mid;
-    state->card_w = PickerCardWidth(*state);
-    const Surface both = draw(ed, 80, 20);
-    EXPECT_TRUE(both.Row(4).find("1 int W") != std::string::npos);
-    EXPECT_TRUE(both.Row(4).find("int Widget0 = 1;") == std::string::npos);
-    EXPECT_TRUE(both.Row(4).find("/Item.tsx:12") != std::string::npos);
+    // What the widest detail leaves and no more: the lead clips there, the two
+    // columns after it are the gap, and the detail is in its column on both
+    // rows, flush with the card's wall -- no fixed fraction holding slack back.
+    const Surface wide = draw(ed, 80, 20);
+    const int cap = 79 - 7 - 2 - 8;
+    EXPECT_TRUE(wide.Row(4).find("1 int Widget0 = qqq") != std::string::npos);
+    EXPECT_EQ(wide.At(7 + cap - 1, 4).text, std::string{"q"});
+    EXPECT_EQ(wide.At(7 + cap, 4).text, std::string{" "});
+    EXPECT_EQ(column_of_text(wide, 4, "s.cpp:12"), 7 + cap + 2);
+    EXPECT_EQ(column_of_text(wide, 5, "s.cpp:12"), 7 + cap + 2);
 
-    // And the scanning note is width like any other: while it rides the count
-    // the detail gives way, and the rows say more of what they are about rather
-    // than blanking until the scan ends.
-    state->scan = std::make_unique<PickerScan>();
+    // A narrow card keeps the filename whole and gives the lead what is left:
+    // a line that cannot say where it points cannot be taken, so the path
+    // never loses a column to the lead.
+    const Surface narrow = draw(ed, 24, 20);
+    EXPECT_TRUE(narrow.Row(4).find("1 int Wi") != std::string::npos);
+    EXPECT_TRUE(narrow.Row(4).find("int Wid") == std::string::npos);
+    EXPECT_EQ(column_of_text(narrow, 4, "s.cpp:12"), 7 + (23 - 7 - 2 - 8) + 2);
+    EXPECT_EQ(column_of_text(narrow, 5, "s.cpp:12"), 7 + (23 - 7 - 2 - 8) + 2);
+    // The count still has its row, whatever the rows above it could fit.
+    EXPECT_EQ(column_of_text(narrow, 6, "1/2/2"), 5);
+  }
+
+  TEST_CASE("render: the detail column grows with the window and does not shrink back");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    // Five short rows and four long ones: the band's window holds five, so the
+    // long ones are only measured once the selection has scrolled onto them.
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kDefs;
+    for (int i = 0; i < 9; ++i) {
+      PickerEntry row;
+      row.text = (i < 5) ? "int a();" : ("int " + std::string(20, 'b') + "();");
+      row.read = true;
+      row.detail = "s.cpp:" + std::to_string(i + 1);
+      row.target = "s.cpp";
+      row.line = i + 1;
+      state->rows.push_back(std::move(row));
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
     state->card_w = PickerCardWidth(*state);
-    const Surface live = draw(ed, 80, 20);
-    EXPECT_TRUE(live.Row(5).find("scanning") != std::string::npos);
-    EXPECT_TRUE(live.Row(4).find("1 int Widget0 = 1;") != std::string::npos);
-    EXPECT_TRUE(live.Row(4).find("/Item.tsx:12") == std::string::npos);
+    ed.picker = state;
+
+    const auto column_of_text = [](const Surface& f, int y, std::string_view needle) {
+      for (int x = 0; x < f.width; ++x) {
+        std::string seen;
+        for (int at = x; (at < f.width) && (seen.size() < needle.size()); ++at) {
+          seen += f.At(at, y).text;
+        }
+        if ((seen.size() >= needle.size()) && (seen.compare(0, needle.size(), needle) == 0)) {
+          return x;
+        }
+      }
+      return -1;
+    };
+
+    // Only the rows drawn are measured -- the shown list is a scan's and has no
+    // ceiling -- so the four long rows below the window count for nothing yet.
+    const Surface top = draw(ed, 80, 20);
+    EXPECT_EQ(ed.picker->lead_w, 8);
+    EXPECT_EQ(ed.picker->detail_w, 7);
+    EXPECT_EQ(column_of_text(top, 4, "s.cpp:1"), 7 + 8 + 2);
+
+    // Stepped to the last row, the window is on the long ones and the column
+    // widens once to hold them.
+    for (int i = 0; i < 8; ++i) PickerStep(ed, true);
+    const Surface deep = draw(ed, 80, 20);
+    EXPECT_EQ(ed.picker->lead_w, 27);
+    EXPECT_EQ(column_of_text(deep, 8, "s.cpp:9"), 7 + 27 + 2);
+
+    // And stepping back onto the short rows leaves it where it is: a column
+    // that shrank back would move every detail on the band on every step.
+    for (int i = 0; i < 8; ++i) PickerStep(ed, false);
+    const Surface back = draw(ed, 80, 20);
+    EXPECT_EQ(ed.picker->lead_w, 27);
+    EXPECT_EQ(column_of_text(back, 4, "s.cpp:1"), 7 + 27 + 2);
+
+    // A filter is a new list, and a new list is measured again from the rows it
+    // put on the band.
+    PromptInsert(ed, "int");
+    PickerRefilter(ed);
+    EXPECT_EQ(ed.picker->lead_w, 0);
+    EXPECT_EQ(ed.picker->detail_w, 0);
+    const Surface filtered = draw(ed, 80, 20);
+    EXPECT_EQ(ed.picker->lead_w, 8);
+    EXPECT_EQ(column_of_text(filtered, 4, "s.cpp:1"), 7 + 8 + 2);
+  }
+
+  TEST_CASE("render: the count takes a row under the list, whichever way the card hangs");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    std::string text;
+    for (int i = 0; i < 12; ++i) text += "line" + std::to_string(i) + "\n";
+    ResetToOriginal(ed.doc.table, text);
+    ed.settings.scrolloff = 0;
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kRefs;
+    for (int i = 0; i < 2; ++i) {
+      PickerEntry row;
+      row.text = "int hit" + std::to_string(i) + "();";
+      row.read = true;
+      row.detail = "s.cpp:" + std::to_string(i + 1);
+      row.target = "s.cpp";
+      row.line = i + 1;
+      state->rows.push_back(std::move(row));
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    const auto row_with = [](const Surface& f, std::string_view needle) {
+      for (int y = 0; y < f.height; ++y) {
+        if (f.Row(y).find(needle) != std::string::npos) return y;
+      }
+      return -1;
+    };
+
+    // Below the caret: the two rows, then the count on the row under them,
+    // inside the card's walls rather than under them.
+    const Surface below = draw(ed, 60, 20);
+    const int last = row_with(below, "2 int hit1();");
+    EXPECT_TRUE(last > 0);
+    EXPECT_EQ(row_with(below, "1/2/2"), last + 1);
+    EXPECT_EQ(below.At(0, last + 1).text, std::string{"│"});
+    EXPECT_EQ(below.At(below.width - 1, last + 1).text, std::string{"│"});
+    EXPECT_TRUE(below.Row(last + 2).find("╰") != std::string::npos);
+    // The card's fill under it, not the row's own: nothing about the count is a
+    // list row.
+    EXPECT_TRUE(below.At(6, last + 1).bg == below.At(6, last).bg);
+
+    // Flipped above the caret, the count is still under the list -- so it is the
+    // row the box's border meets, and the list reads down to it either way.
+    ed.doc.selections.Set(Selection{11 * 6, 11 * 6, -1});
+    const Surface above = draw(ed, 60, 16);
+    const int flipped = row_with(above, "2 int hit1();");
+    EXPECT_TRUE(flipped > 0);
+    EXPECT_EQ(row_with(above, "1/2/2"), flipped + 1);
+    // The border row the card and the box share is under the count, and the
+    // input is the row after that.
+    EXPECT_EQ(row_with(above, "ᛃ"), flipped + 3);
+    EXPECT_TRUE(above.Row(flipped + 2).find("─") != std::string::npos);
+    EXPECT_TRUE(above.Row(flipped - 2).find("╭") != std::string::npos);
+  }
+
+  TEST_CASE("render: a block clamped by the screen windows around the target");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kRefs;
+    for (int i = 0; i < 2; ++i) {
+      PickerEntry row;
+      row.text = "int hit" + std::to_string(i) + "();";
+      row.read = true;
+      row.detail = "s.cpp:15";
+      row.target = "s.cpp";
+      row.line = 15;
+      state->rows.push_back(std::move(row));
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    // Seven lines read around a target near their end -- what a grown
+    // excerpt-context leaves when the screen cannot hold all of them.
+    for (int i = 0; i < 7; ++i) state->context.push_back("ctx" + std::to_string(10 + i));
+    state->context_first = 10;
+    state->context_target = 15;
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    // This side has room for six of the seven: the block clamps rather than
+    // vanishing, and the six are the ones nearest the target -- line 10 is the
+    // one given up, and the target is on the block.
+    const Surface frame = draw(ed, 60, 16);
+    EXPECT_TRUE(frame.Row(4).find("11 ctx11") != std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("15 ctx15") != std::string::npos);
+    EXPECT_TRUE(frame.Row(9).find("16 ctx16") != std::string::npos);
+    for (int y = 0; y < frame.height; ++y) {
+      EXPECT_TRUE(frame.Row(y).find("ctx10") == std::string::npos);
+    }
+    EXPECT_TRUE(frame.Row(10).find("───") != std::string::npos);
+    EXPECT_TRUE(frame.Row(11).find("1 int hit0();") != std::string::npos);
+    EXPECT_TRUE(frame.Row(13).find("1/2/2") != std::string::npos);
   }
 
   TEST_CASE("render: a clipped row stops short of the count the last row carries");
@@ -1527,18 +1727,19 @@ void Rendering() {
     squeezed(ed, 6);
 
     // Room below the caret for the box, the branch row, the card's two border
-    // rows and two band rows, and that is what draws: the block and its rule are
-    // given up first, the band takes what is left, and nothing falls to the
-    // bottom row. A branch row between the box and the card means the card pays
-    // for a top border of its own -- with them adjacent the box's own row is it.
+    // rows and two rows of card, and that is what draws: the block and its rule
+    // are given up first, then the last list row to the count's own row, and
+    // nothing falls to the bottom row. A branch row between the box and the card
+    // means the card pays for a top border of its own -- with them adjacent the
+    // box's own row is it.
     const Surface frame = draw(ed, 100, 16);
     EXPECT_EQ(frame.cursor_y, 8);
     EXPECT_TRUE(frame.Row(10).find("╰─▸ bad pattern") != std::string::npos);
     EXPECT_TRUE(frame.Row(11).find("╭") != std::string::npos);
     EXPECT_TRUE(frame.Row(12).find("1 int pick0();") != std::string::npos);
-    EXPECT_TRUE(frame.Row(13).find("2 int pick1();") != std::string::npos);
+    EXPECT_TRUE(frame.Row(13).find("1/9/9") != std::string::npos);
     EXPECT_TRUE(frame.Row(14).find("╰") != std::string::npos);
-    EXPECT_EQ(ed.picker->window, std::size_t{2});
+    EXPECT_EQ(ed.picker->window, std::size_t{1});
     for (int y = 0; y < frame.height; ++y) {
       EXPECT_TRUE(frame.Row(y).find("ctx ") == std::string::npos);
     }
@@ -1555,7 +1756,7 @@ void Rendering() {
     EXPECT_TRUE(ed.picker != nullptr);
 
     // Room for the whole stack, and the whole stack is back: block, rule, five
-    // rows, the window with them.
+    // rows, the count's row, the window with them.
     const Surface tall = draw(ed, 100, 24);
     EXPECT_EQ(ed.picker->window, kPickerRows);
     EXPECT_TRUE(tall.Row(11).find("╭") != std::string::npos);
@@ -1563,7 +1764,25 @@ void Rendering() {
     EXPECT_TRUE(tall.Row(15).find("───") != std::string::npos);
     EXPECT_TRUE(tall.Row(16).find("1 int pick0();") != std::string::npos);
     EXPECT_TRUE(tall.Row(20).find("5 int pick4();") != std::string::npos);
-    EXPECT_TRUE(tall.Row(21).find("╰") != std::string::npos);
+    EXPECT_TRUE(tall.Row(21).find("1/9/9") != std::string::npos);
+    EXPECT_TRUE(tall.Row(22).find("╰") != std::string::npos);
+  }
+
+  TEST_CASE("render: a card with room for one row keeps the count on it");
+  {
+    Editor ed;
+    squeezed(ed, 5);
+
+    // The count's row is given up before the last list row: a card holding a
+    // count and no list says nothing about anything. With nowhere to put it the
+    // count goes back to the right edge of the row it is left with, and that row
+    // gives the column up rather than having it stamped over its detail.
+    const Surface frame = draw(ed, 100, 12);
+    EXPECT_EQ(ed.picker->window, std::size_t{1});
+    EXPECT_TRUE(frame.Row(9).find("1 int pick0();") != std::string::npos);
+    EXPECT_TRUE(frame.Row(9).find("s.cpp:1") != std::string::npos);
+    EXPECT_TRUE(frame.Row(9).find("1/9/9") != std::string::npos);
+    EXPECT_TRUE(frame.Row(10).find("╰") != std::string::npos);
   }
 
   TEST_CASE("render: a box with no room at all keeps its keys and its message honest");

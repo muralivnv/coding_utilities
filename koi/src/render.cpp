@@ -1114,6 +1114,9 @@ struct PickerWant {
   int rule_rows{0};
   int band_rows{0};
   int band_grow{0};
+  // The row under the list the count takes for itself, where the rows have no
+  // right edge to hang it off (DrawPickerBand). Sources with a block only.
+  int count_rows{0};
 };
 
 // Two borders and the input between them -- the one part of the stack that
@@ -1142,6 +1145,7 @@ struct PromptFit {
   int context_rows{0};
   int rule_rows{0};
   int band_rows{0};
+  int count_rows{0};
   // The card's border rows. The far one is always spent; the near one only when
   // a branch row stands between the box and the card, because otherwise the
   // box's border row on that side is the card's.
@@ -1183,7 +1187,7 @@ PromptFit FitPromptBox(const Editor& ed, int caret_x, int caret_y, const Rect& c
   // when neither side fits whole the roomier one wins.
   const int frame = (want.band_rows > 0) ? 1 : 0;
   const int whole = kPromptBoxRows + (fit.said.empty() ? 0 : (1 + frame)) + want.context_rows +
-                    want.rule_rows + want.band_rows + frame;
+                    want.rule_rows + want.band_rows + want.count_rows + frame;
   const bool below =
       (whole <= below_room) || ((whole > above_room) && (below_room >= above_room));
   const int room = below ? below_room : above_room;
@@ -1199,12 +1203,20 @@ PromptFit FitPromptBox(const Editor& ed, int caret_x, int caret_y, const Rect& c
   }
   if (left < band_min) return fit;
 
+  // The count's row is given up after the block and before the last list row: a
+  // card holding a count and no list says nothing about anything.
+  const int count = ((want.count_rows > 0) && (left > band_min)) ? want.count_rows : 0;
+  left -= count;
+
   int band = std::min(std::max(want.band_rows, band_min), left);
   int context = 0;
   int rule = 0;
-  if ((band >= want.band_rows) && ((left - band) >= (want.context_rows + want.rule_rows))) {
-    context = want.context_rows;
-    rule = want.rule_rows;
+  if (band >= want.band_rows) {
+    // The block takes what the band leaves, down to nothing: a grown
+    // excerpt-context on a short side shows the lines nearest the target
+    // (DrawPickerContext windows them) instead of vanishing whole.
+    context = std::max(0, std::min(want.context_rows, left - band - want.rule_rows));
+    rule = (context > 0) ? want.rule_rows : 0;
     // Only a stack that fit whole grows, into whatever the block left over.
     band = std::max(band, std::min(want.band_grow, left - context - rule));
   }
@@ -1219,14 +1231,17 @@ PromptFit FitPromptBox(const Editor& ed, int caret_x, int caret_y, const Rect& c
   fit.context_rows = context;
   fit.rule_rows = rule;
   fit.band_rows = band;
+  fit.count_rows = count;
   fit.x0 = std::clamp(caret_x - 2, 0, std::max(0, width - fit.box_w));
   fit.y0 = below ? (caret_y + 1) : (caret_y - kPromptBoxRows);
   fit.x = fit.x0 + 1;
   fit.context_top = below ? (fit.y0 + kPromptBoxRows + said_rows + near)
                           : (fit.y0 - said_rows - near - context);
-  // Away from the box either way: box, block, rule, band.
+  // Away from the box either way: box, block, rule, band. The count's row is
+  // the one after the last band row in both orientations, so above the caret it
+  // is what the box's border row meets and the band starts a row higher.
   fit.rule_top = below ? (fit.context_top + context) : (fit.context_top - rule);
-  fit.band_top = below ? (fit.rule_top + rule) : (fit.rule_top - band);
+  fit.band_top = below ? (fit.rule_top + rule) : (fit.rule_top - band - count);
   return fit;
 }
 
@@ -1306,11 +1321,12 @@ void DrawPickerRule(const Editor& ed, const Palette& ui, int x0, int y, int widt
 // the row touching the box -- `touches` is false when the context block is
 // between the two and carries it instead. Digits are the accelerators; the
 // selected row wears ui.cursorline.primary, the band the editor puts under the
-// cursor's own line. A dimmed index/shown/total count rides the last row.
-void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int rows, int width,
-                    bool below, bool touches) {
+// cursor's own line. A dimmed index/shown/total count rides the last row, or
+// `count_row` gives it one of its own under the list.
+void DrawPickerBand(Editor& ed, const Palette& ui, int x0, int y0, int rows, int width, bool below,
+                    bool touches, bool count_row) {
   if (ed.picker == nullptr) return;
-  const PickerState& state = *ed.picker;
+  PickerState& state = *ed.picker;
   const Attr bg = Bg(ui.background, ui);
   const Attr fg = Fg(ui.text, ui);
   const Attr border = BorderFg(ui);
@@ -1319,9 +1335,9 @@ void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int row
   // the filter left, how many candidates there were -- and while a child is
   // still feeding it, that it is still coming: a count that stood still would
   // read as the whole answer. Its width is arithmetic rather than a string
-  // measured, because every row is laid out around it and only the last one
-  // draws it. The index is padded to n's width, so stepping from row 9 to row
-  // 10 does not widen the count and move every path under it.
+  // measured, because the row it rides is laid out around it. The index is
+  // padded to n's width, so stepping from row 9 to row 10 does not widen the
+  // count and move every path under it.
   const std::size_t shown = state.shown.size();
   const std::size_t total = PickerTotal(state);
   const std::size_t index = (shown == 0) ? 0 : (std::min(state.selected, shown - 1) + 1);
@@ -1336,12 +1352,34 @@ void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int row
   const int band_w = card.w;
   const int bx = card.x;
   const int limit = bx + band_w - 1;
-  // Where a row points rides the right edge instead of a column of its own --
-  // for every source that draws a block, whether the row leads with a name, with
-  // the line it points at, or with a matched line of the project. The count's
-  // room is kept off every row, not just the last, so the paths align.
+  // Where a row points takes a column of its own, two past the widest lead the
+  // window holds -- for every source that draws a block, whether the row leads
+  // with a name, with the line it points at, or with a matched line of the
+  // project. The card is the screen for those, and a detail at its right edge
+  // is a screen's width of nothing between the two halves of the row.
   const bool tailed = PickerShowsContext(state.source);
-  const int tail = tailed ? (limit - count_w - 1) : limit;
+  // Past the indent, the digit and the space after it -- one column each way
+  // whatever the row holds, so it is the same column on every row.
+  const int lead_x = bx + 7;
+  int lead_w = 0;
+  if (tailed) {
+    // The rows this frame draws and no others: the shown list is a scan's, with
+    // no ceiling on its length, and this runs on every keystroke. Measured
+    // before anything is drawn, so a row growing the column grows it for the
+    // whole band and not from itself down. Neither shrinks -- PickerRefilter
+    // clears both when the list is rebuilt.
+    for (int r = 0; r < rows; ++r) {
+      const std::size_t at = state.offset + static_cast<std::size_t>(r);
+      if (at >= shown) break;
+      state.lead_w = std::max(state.lead_w, DisplayWidthOf(PickerRowLead(state, at)));
+      state.detail_w = std::max(state.detail_w, DisplayWidthOf(PickerRowDetail(state, at)));
+    }
+    // The lead takes what the widest detail leaves: capped at a fraction it
+    // clipped lines a screen with room for them whole. The detail is what a
+    // row IS once the lead has clipped, so it is what a short card keeps --
+    // the lead gives way down to nothing before a path loses a column.
+    lead_w = std::clamp(state.lead_w, 0, std::max(0, limit - lead_x - 2 - state.detail_w));
+  }
 
   for (int r = 0; r < rows; ++r) {
     const int y = y0 + r;
@@ -1349,15 +1387,17 @@ void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int row
     const bool selected = (at < state.shown.size()) && (at == state.selected);
     const Attr row_bg = selected ? Bg(ui.cursorline_primary, ui) : bg;
     for (int x = 0; x < band_w; ++x) Cell(bx + x, y, ' ', fg, row_bg);
-    const bool joins = touches && (below ? (r == 0) : (r == (rows - 1)));
+    // The count's own row is the one the box meets when the card hangs above.
+    const bool joins = touches && (below ? (r == 0) : (!count_row && (r == (rows - 1))));
     int x = DrawText(bx + 1, y, limit, joins ? (below ? "╰─▸ " : "╭─▸ ") : "    ", border, row_bg);
     // A bar down the row's left edge, in what the row's text wears: the row
     // enter opens, findable without reading anything.
     if (selected) Put(bx + 1, y, "▌", Fg(ui.jump_next, ui), row_bg);
-    // A tailed row has the count's column kept off it already. An untailed one
-    // runs to the card's edge, so it gives that column up on the row the count
-    // rides, rather than being stamped over there.
-    const int text_limit = (tailed || (r != (rows - 1))) ? tail : (limit - count_w - 1);
+    // The row the count rides gives its right edge up rather than being stamped
+    // over there: an untailed row always, and a tailed one only where the stack
+    // was too short to give the count a row of its own.
+    const int text_limit =
+        ((tailed && count_row) || (r != (rows - 1))) ? limit : (limit - count_w - 1);
     if (at < state.shown.size()) {
       // Whatever holds the row -- an entry, or a byte offset into content's
       // corpus -- and whatever it leads with, resolved in one place
@@ -1375,21 +1415,19 @@ void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int row
       x = DrawText(x, y, limit, numbered ? std::to_string(r + 1) : std::string{" "}, fg | kAttrDim,
                    row_bg);
       if (tailed) {
-        // The line is what the row is for, so it is what the clip keeps: the
-        // detail takes its column only where doing so leaves some line behind.
-        const int dx = tail - DisplayWidthOf(detail);
-        if (dx > (x + 2)) {
-          DrawText(x + 1, y, dx - 1, text, text_fg, row_bg);
-          DrawText(dx, y, limit, detail, fg | kAttrDim, row_bg);
-        } else {
-          DrawText(x + 1, y, text_limit, text, text_fg, row_bg);
-        }
+        // The lead keeps its column whatever it holds and the detail starts two
+        // past it, so the details read down the band as one column. A lead
+        // longer than the column clips there; the detail always draws -- a row
+        // whose line cannot say where it points is a row that cannot be taken.
+        const int dx = lead_x + lead_w + 2;
+        DrawText(lead_x, y, dx - 2, text, text_fg, row_bg);
+        DrawText(dx, y, text_limit, detail, fg | kAttrDim, row_bg);
       } else {
         x = DrawText(x + 1, y, text_limit, text, text_fg, row_bg);
         DrawText(x, y, text_limit, detail, text_fg | kAttrDim, row_bg);
       }
     }
-    if (r == (rows - 1)) {
+    if (!count_row && (r == (rows - 1))) {
       const int cx = limit - count_w;
       // Formatted where it is drawn: what FormatIntoStringView hands back is a
       // view of a buffer the next call to it takes, so nothing here holds one.
@@ -1399,6 +1437,20 @@ void DrawPickerBand(const Editor& ed, const Palette& ui, int x0, int y0, int row
                  fg, row_bg);
       }
     }
+  }
+
+  // A row of its own under the list, at the column the rows and the rule share.
+  // The rows have no right edge left to hang it off: their detail column is a
+  // measured one now, and a count out at the card's far edge would be the only
+  // thing left reading across a screen.
+  if (count_row) {
+    const int y = y0 + rows;
+    for (int x = 0; x < band_w; ++x) Cell(bx + x, y, ' ', fg, bg);
+    const bool joins = touches && !below;
+    const int x = DrawText(bx + 1, y, limit, joins ? "╭─▸ " : "    ", border, bg);
+    DrawText(x, y, limit,
+             common::FormatIntoStringView<"%*lu/%lu/%lu%s">(index_w, index, shown, total, note), fg,
+             bg);
   }
 }
 
@@ -1422,9 +1474,21 @@ void DrawPickerContext(const Editor& ed, const Palette& ui, int x0, int y0, int 
   const Attr border = BorderFg(ui);
   const Attr match = Fg(ui.excerpt_match, ui) | Attrs(ui.excerpt_match);
 
-  // No heading over the lines: the selected row says which file this is, at the
-  // card's right edge, for every source that has a block at all.
-  const int last = static_cast<int>(state.context_first) + rows - 1;
+  // A block granted fewer rows than the lines read shows the ones nearest the
+  // target: centred on it, pulled back inside what was read at either end.
+  const std::size_t have = state.context.size();
+  std::size_t start = 0;
+  if (static_cast<std::size_t>(rows) < have) {
+    const std::size_t at = (target > state.context_first)
+                               ? static_cast<std::size_t>(target - state.context_first)
+                               : 0;
+    const std::size_t half = static_cast<std::size_t>(rows) / 2;
+    start = std::min((at > half) ? (at - half) : 0, have - static_cast<std::size_t>(rows));
+  }
+
+  // No heading over the lines: the selected row says which file this is, in the
+  // detail column, for every source that has a block at all.
+  const int last = static_cast<int>(state.context_first + static_cast<Index>(start)) + rows - 1;
   const int gutter = PickerCountDigits(static_cast<std::size_t>(std::max(1, last)));
   // The band's width, not the block's own: the lines here change with every
   // step and the card they share may not change with them. Long lines clip.
@@ -1438,9 +1502,9 @@ void DrawPickerContext(const Editor& ed, const Palette& ui, int x0, int y0, int 
     for (int x = 0; x < card_w; ++x) Cell(bx + x, y, ' ', fg, bg);
     const bool joins = touches && (below ? (r == 0) : (r == (rows - 1)));
     int x = DrawText(bx + 1, y, limit, joins ? (below ? "╰─▸ " : "╭─▸ ") : "    ", border, bg);
-    const auto at = static_cast<std::size_t>(r);
+    const auto at = start + static_cast<std::size_t>(r);
     if (at >= state.context.size()) continue;
-    const Index number = state.context_first + static_cast<Index>(r);
+    const Index number = state.context_first + static_cast<Index>(at);
     // Right-aligned in the gutter by the field width: the row's fill is already
     // drawn, so the padding the format writes is the fill it writes over.
     x = DrawText(x, y, limit, common::FormatIntoStringView<"%*td">(gutter, number), fg | kAttrDim,
@@ -1462,8 +1526,10 @@ void DrawPickerFrame(const Editor& ed, const Palette& ui, const PromptFit& fit, 
   const int bx = card.x;
   const int right = bx + card.w - 1;
 
+  // The count's row sits under the last list row in both orientations, so the
+  // band block is the rows plus it.
   int lo = fit.band_top;
-  int hi = fit.band_top + fit.band_rows - 1;
+  int hi = fit.band_top + fit.band_rows + fit.count_rows - 1;
   if (fit.context_rows > 0) {
     lo = std::min(lo, fit.context_top);
     hi = std::max(hi, fit.context_top + fit.context_rows - 1);
@@ -1684,6 +1750,9 @@ void RenderInto(Editor& ed, int width, int height) {
       // a file that has gone away, is a shorter card or none.
       want.context_rows = static_cast<int>(ed.picker->context.size());
       want.rule_rows = (want.context_rows > 0) ? 1 : 0;
+      // A source with a block draws its details in a measured column, so the
+      // count has no right edge left to ride and takes a row instead.
+      want.count_rows = PickerShowsContext(ed.picker->source) ? 1 : 0;
     }
     const PromptFit fit = prompt_at_caret
                               ? FitPromptBox(ed, caret_x, caret_y, focused_content, width, want)
@@ -1719,7 +1788,8 @@ void RenderInto(Editor& ed, int width, int height) {
         DrawPickerContext(ed, ui, fit.x0, fit.context_top, fit.context_rows, width, fit.below,
                           false);
         if (fit.rule_rows > 0) DrawPickerRule(ed, ui, fit.x0, fit.rule_top, width);
-        DrawPickerBand(ed, ui, fit.x0, fit.band_top, fit.band_rows, width, fit.below, false);
+        DrawPickerBand(ed, ui, fit.x0, fit.band_top, fit.band_rows, width, fit.below, false,
+                       fit.count_rows > 0);
         DrawPickerFrame(ed, ui, fit, width);
       }
     } else {

@@ -2668,6 +2668,17 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
       PickerAccept(ed, static_cast<int>(key.code - '1'));
       return;
     }
+    // The block's depth is excerpt-context, adjusted without leaving the
+    // prompt -- alt because bare +/- are pattern text here. Same setting the
+    // excerpt keys move, so the two surfaces never disagree; the message rides
+    // the branch row.
+    if ((ed.prompt_kind == PromptKind::kPicker) && (key.mods == kModAlt) &&
+        (key.named == NamedKey::kNone) &&
+        ((key.code == '+') || (key.code == '=') || (key.code == '-'))) {
+      AdjustExcerptContext(ed, (key.code == '-') ? -1 : 1);
+      if (ed.picker != nullptr) PickerFillShown(ed, *ed.picker);
+      return;
+    }
     if ((key.mods == kModCtrl) && (key.code == 'u')) {
       ed.prompt_input.erase(0, ed.prompt_cursor);
       ed.prompt_cursor = 0;

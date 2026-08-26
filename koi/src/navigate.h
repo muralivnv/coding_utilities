@@ -221,9 +221,6 @@ bool ChooseBufferRow(Editor& ed, std::string_view payload);
 // selection scrolls the window instead.
 inline constexpr std::size_t kPickerRows = 5;
 
-// Lines the context block shows, centred on the selected row's target.
-inline constexpr std::size_t kPickerContext = 3;
-
 // Narrowest the card is drawn, whatever the rows are: a band that shrinks to
 // two words reads as a tooltip rather than as a list. Files and buffers only --
 // everything else takes the screen (kPickerCardWide).
@@ -402,6 +399,17 @@ struct PickerState {
   // shown list changes and never on a step, so walking into a longer file does
   // not resize the card under the eyes; long rows clip instead.
   int card_w{0};
+  // The band's lead column for a source that draws a block: the width its
+  // details are aligned at, measured by the renderer over the rows one frame
+  // drew -- the shown list is unbounded and a pass over it per keystroke is
+  // not. Grows and never shrinks while the filter stands, so stepping into a
+  // longer row widens the column once instead of moving every detail on every
+  // step. Cleared with card_w, where the list is rebuilt.
+  int lead_w{0};
+  // The widest detail the same rows carried, measured the same way: the lead's
+  // column is capped at what this leaves, so a short path hands its slack to
+  // the lines instead of a fixed fraction wasting it.
+  int detail_w{0};
   // What last_picker reopens this pick with. Defs and refs keep the word they
   // were looked up for -- what is typed into their band filters that word's
   // hits, it does not name another word -- everywhere else it is what is typed.
@@ -507,8 +515,8 @@ inline int PickerCountDigits(std::size_t count) {
 // Symbol, reference and content rows carry the line they point at and draw a
 // context block around the selected one; file and buffer rows do neither -- a
 // path is its own evidence. The two go together: a source that draws a block is
-// exactly a source whose rows keep `path:line` at the card's right edge, out of
-// the column the row's own text runs in.
+// exactly a source whose rows keep `path:line` in a column of its own, out of
+// the one the row's own text runs in.
 bool PickerShowsContext(PickerState::Source source);
 
 // The card's width, from the shown rows. Called where the shown list changes
@@ -524,6 +532,11 @@ void PickerRefilter(Editor& ed);
 // Tab / arrows: move the selection through the whole filtered list, wrapping at
 // its ends, with the band's window scrolled to keep the selection on screen.
 void PickerStep(Editor& ed, bool forward);
+
+// Reads what the band's window and the context block need for the current
+// selection -- called where the selection or the list moves, and by the
+// excerpt-context keys so a new depth shows without a step.
+void PickerFillShown(Editor& ed, PickerState& state);
 
 // The window follows the selection rather than the other way round: it moves
 // only when the selection would be off it, so walking inside the band leaves

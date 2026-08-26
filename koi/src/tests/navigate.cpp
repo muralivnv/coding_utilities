@@ -1082,7 +1082,7 @@ void InProcessSymbolPickers() {
     GotoDefinition(ed);
     if (ed.picker == nullptr) return;
     EXPECT_TRUE(PickerShowsContext(ed.picker->source));
-    EXPECT_EQ(ed.picker->context.size(), kPickerContext);
+    EXPECT_EQ(ed.picker->context.size(), std::size_t{3});
     EXPECT_EQ(ed.picker->context_first, Index{1});
     EXPECT_EQ(ed.picker->context[1], std::string{"struct Widget { int a0; };"});
     EXPECT_EQ(ed.picker->context[2], std::string{"// below"});
@@ -1095,6 +1095,49 @@ void InProcessSymbolPickers() {
     PickerStep(ed, false);
     EXPECT_EQ(ed.picker->context[1], std::string{"struct Widget { int a0; };"});
     EXPECT_EQ(ed.picker->rows[0].name, std::string{"Widget"});
+    PromptCancel(ed);
+  }
+
+  TEST_CASE("picker: the block's depth is excerpt-context, adjustable from the prompt");
+  {
+    const Scratch scratch{"koi-picker-context-depth"};
+    Editor ed;
+    six_defs(scratch, ed);
+
+    // No lines around the target: the block is the target line alone.
+    ed.settings.excerpt_context = 0;
+    GotoDefinition(ed);
+    if (ed.picker == nullptr) return;
+    EXPECT_EQ(ed.picker->context.size(), std::size_t{1});
+    EXPECT_EQ(ed.picker->context_first, Index{2});
+    EXPECT_EQ(ed.picker->context[0], std::string{"struct Widget { int a0; };"});
+
+    // Alt+= grows it without leaving the prompt -- the same setting the
+    // excerpt keys move -- and the block refills at the new depth. The files
+    // are three lines, so a depth past one clamps to them.
+    const std::string typed = ed.prompt_input;
+    const KeyMaps maps = DefaultKeyMaps();
+    std::vector<Key> pending;
+    Key grow;
+    EXPECT_TRUE(ParseKey("A-=", grow));
+    HandleKeyInput(ed, maps, grow, pending);
+    EXPECT_EQ(ed.settings.excerpt_context, Index{1});
+    EXPECT_EQ(ed.picker->context.size(), std::size_t{3});
+    EXPECT_EQ(ed.picker->context_first, Index{1});
+    HandleKeyInput(ed, maps, grow, pending);
+    EXPECT_EQ(ed.settings.excerpt_context, Index{2});
+    EXPECT_EQ(ed.picker->context.size(), std::size_t{3});
+
+    // Alt+- back down. The keys are the block's, not the filter's: the prompt
+    // stays open and what was typed stays typed.
+    Key shrink;
+    EXPECT_TRUE(ParseKey("A--", shrink));
+    HandleKeyInput(ed, maps, shrink, pending);
+    HandleKeyInput(ed, maps, shrink, pending);
+    EXPECT_EQ(ed.settings.excerpt_context, Index{0});
+    EXPECT_EQ(ed.picker->context.size(), std::size_t{1});
+    EXPECT_TRUE(ed.prompt_active);
+    EXPECT_EQ(ed.prompt_input, typed);
     PromptCancel(ed);
   }
 
@@ -2443,7 +2486,7 @@ void StreamingContentPicker() {
 
     // The block reads the file, not the corpus: the corpus holds the matched
     // line and not the two around it.
-    EXPECT_EQ(ed.picker->context.size(), kPickerContext);
+    EXPECT_EQ(ed.picker->context.size(), std::size_t{3});
     EXPECT_EQ(ed.picker->context_first, Index{1});
     EXPECT_EQ(ed.picker->context_target, Index{2});
     // The row names the file at the card's right edge, so the block carries no

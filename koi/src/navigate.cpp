@@ -760,10 +760,13 @@ void PickerReadRow(Editor& ed, PickerState& state, PickerEntry& row, bool again)
   row.read = true;
 }
 
+}
+
 // The lines the band and the block need, and no others: a picker over thousands
 // of refs reads only the handful of files whose rows the window is on, and
 // scrolling is what makes it read the next. A symbol list's rows need none, so
-// the loop below is a no-op there and the block is its only read.
+// the loop below is a no-op there and the block is its only read. Outside the
+// anonymous namespace for the excerpt-context keys (commands.cpp).
 void PickerFillShown(Editor& ed, PickerState& state) {
   state.context.clear();
   state.context_first = 0;
@@ -783,10 +786,17 @@ void PickerFillShown(Editor& ed, PickerState& state) {
   }
   PickerTarget target;
   if (!PickerRowTarget(state, state.selected, target)) return;
-  PickerLinesOf(ed, state, target.path, target.line - static_cast<Index>(kPickerContext / 2),
-                static_cast<Index>(kPickerContext), state.context_first, state.context);
+  // The block's depth is the excerpt view's setting: excerpt-context lines
+  // either side of the target, one knob for both surfaces. A side too short
+  // for all of them shows the nearest (FitPromptBox clamps, DrawPickerContext
+  // windows around the target).
+  const Index around = std::max<Index>(0, ed.settings.excerpt_context);
+  PickerLinesOf(ed, state, target.path, target.line - around, (2 * around) + 1,
+                state.context_first, state.context);
   state.context_target = target.line;
 }
+
+namespace {
 
 // Symbol rows for the band: where the symbol is, dimmed at the card's right
 // edge. What leads the row is the source's business (PickerRowIsName): the
@@ -863,6 +873,8 @@ void PickerBadPatternCard(Editor& ed, PickerState& state) {
   if (state.card_w != 0) return;
   PickerFillShown(ed, state);
   state.card_w = PickerCardWidth(state);
+  state.lead_w = 0;
+  state.detail_w = 0;
 }
 
 // Opens the picker prompt over `rows`. A non-empty query arrives typed in: what
@@ -929,6 +941,8 @@ void PickerRefilter(Editor& ed) {
     if (state.scan) state.scan->filter.clear();
     PickerFillShown(ed, state);
     state.card_w = PickerCardWidth(state);
+    state.lead_w = 0;
+    state.detail_w = 0;
     return;
   }
   // Compiled fresh each keystroke, and always JIT: content's corpus is
@@ -979,6 +993,8 @@ void PickerRefilter(Editor& ed) {
   state.offset = 0;
   PickerFillShown(ed, state);
   state.card_w = PickerCardWidth(state);
+  state.lead_w = 0;
+  state.detail_w = 0;
 }
 
 void PickerStep(Editor& ed, bool forward) {
@@ -1282,6 +1298,8 @@ bool PickerCatchUp(Editor& ed, PickerState& state, PickerScan& scan) {
   state.offset = 0;
   PickerFillShown(ed, state);
   state.card_w = PickerCardWidth(state);
+  state.lead_w = 0;
+  state.detail_w = 0;
   return true;
 }
 
@@ -1442,6 +1460,9 @@ bool PickerPumpScan(Editor& ed) {
   if (state.shown.size() > was_shown) {
     // Growth only, and only over what just landed. A card that shrank mid-scan
     // would reflow the list under the reader; a keystroke recomputes it whole.
+    // lead_w is not cleared here for the same reason: rows appending is not the
+    // filter changing, and clearing it every wake is the wobble it exists to
+    // stop. The renderer only ever grows it.
     state.card_w = std::max(state.card_w, PickerCardWidthFrom(state, was_shown));
     // The rows just appended start at was_shown and run to the end, so one of
     // them is on the band only if was_shown is inside the window. Below it they
