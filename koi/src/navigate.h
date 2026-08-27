@@ -544,8 +544,9 @@ void PickerFillShown(Editor& ed, PickerState& state);
 // a resize changes how many rows the band has.
 void PickerScrollToSelected(PickerState& state);
 
-// Enter, or a digit: open the window's row `at` (0-based, so a digit names the
-// same row wherever the band is scrolled), negative opening the selected row.
+// Enter, or alt+digit: open the window's row `at` (0-based, so a digit names
+// the same row wherever the band is scrolled), negative opening the selected
+// row.
 // Closes the prompt and frees the state on success, and does nothing on a row
 // the band is not showing.
 void PickerAccept(Editor& ed, int at = -1);

@@ -391,7 +391,7 @@ tabpad = "·"
 # The last row carries a dimmed `i/n/m`: which row of the filtered list is
 # selected, how many rows the filter left, how many candidates there were.
 #
-#   1..5       take that row of the band; 0 and 6..9 still type into the
+#   alt-1..5   take that row of the band; every bare digit types into the
 #              query, and a buffers band grown past five is walked, not
 #              numbered
 #   tab / down     step the selection forward, shift-tab / up back

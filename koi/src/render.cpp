@@ -1319,9 +1319,9 @@ void DrawPickerRule(const Editor& ed, const Palette& ui, int x0, int y, int widt
 // The picker's band hangs off the box the way the branch row does: the same
 // left edge, the popup fill only as wide as what it says, the connector on
 // the row touching the box -- `touches` is false when the context block is
-// between the two and carries it instead. Digits are the accelerators; the
-// selected row wears ui.cursorline.primary, the band the editor puts under the
-// cursor's own line. A dimmed index/shown/total count rides the last row, or
+// between the two and carries it instead. Digits label the alt accelerators;
+// the selected row wears ui.cursorline.primary, the band the editor puts under
+// the cursor's own line. A dimmed index/shown/total count rides the last row, or
 // `count_row` gives it one of its own under the list.
 void DrawPickerBand(Editor& ed, const Palette& ui, int x0, int y0, int rows, int width, bool below,
                     bool touches, bool count_row) {
@@ -1407,10 +1407,11 @@ void DrawPickerBand(Editor& ed, const Palette& ui, int x0, int y0, int rows, int
       // The row enter would open wears what the branch row's destination
       // wears: ui.jump.next.
       const Attr text_fg = selected ? (Fg(ui.jump_next, ui) | Attrs(ui.jump_next)) : fg;
-      // The digit names the window's row: 1..5 wherever the band is scrolled.
-      // A band grown past those is walked rather than numbered (PickerAccept),
-      // so the rows past them wear a space -- a digit nothing honours is worse
-      // than none, and a two-digit one would shift the text column as well.
+      // The digit names the window's row for alt+digit: 1..5 wherever the band
+      // is scrolled. A band grown past those is walked rather than numbered
+      // (PickerAccept), so the rows past them wear a space -- a digit nothing
+      // honours is worse than none, and a two-digit one would shift the text
+      // column as well.
       const bool numbered = r < static_cast<int>(kPickerRows);
       x = DrawText(x, y, limit, numbered ? std::to_string(r + 1) : std::string{" "}, fg | kAttrDim,
                    row_bg);

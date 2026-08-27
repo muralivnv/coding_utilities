@@ -2658,12 +2658,13 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
       PickerStep(ed, false);
       return;
     }
-    // A digit opens that visible band row directly -- the row the digit is
-    // drawn on, wherever the window is scrolled. Digits are selection keys
-    // here and not pattern text, a literal digit in a query given up for one
-    // press. Accelerators end at five -- any other digit is still typed in,
-    // and a band grown past five (buffers) is walked rather than numbered.
-    if ((ed.prompt_kind == PromptKind::kPicker) && (key.mods == kModNone) &&
+    // Alt+digit opens that visible band row directly -- the row the digit is
+    // drawn beside, wherever the window is scrolled. Alt because a bare digit
+    // is pattern text here: a query is regularly a number, and giving those up
+    // costs more than the modifier does. Accelerators end at five -- any other
+    // digit does nothing, and a band grown past five (buffers) is walked
+    // rather than numbered.
+    if ((ed.prompt_kind == PromptKind::kPicker) && (key.mods == kModAlt) &&
         (key.named == NamedKey::kNone) && (key.code >= '1') && (key.code < ('1' + kPickerRows))) {
       PickerAccept(ed, static_cast<int>(key.code - '1'));
       return;
