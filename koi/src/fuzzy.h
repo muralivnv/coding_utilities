@@ -207,13 +207,19 @@ constexpr double FinalScore(double banded_match, double frecency_weight, bool sa
 }
 
 // The sort key, and the whole tie-break rule in one place: score descending,
-// then the shorter candidate, then the earlier first match. `score` is the
-// banded match while ranking a single clause, and FinalScore once the priors are
-// in -- the ordering is the same either way.
+// then the shorter candidate, then the earlier first match, then where the row
+// sits in the corpus. `score` is the banded match while ranking a single clause,
+// and FinalScore once the priors are in -- the ordering is the same either way.
+//
+// `order` is what makes the rule total. The sorts underneath are unstable, so
+// two rows equal on the first three keys could swap between one keystroke and
+// the next -- the same query drawing a different band twice. A corpus position
+// is the one thing about a row that no query can change, so it is the last word.
 struct RankKey {
   double score{0.0};
   std::size_t length{0};
   int first{0};
+  std::size_t order{0};
 };
 
 bool RanksBefore(const RankKey& a, const RankKey& b);

@@ -518,6 +518,7 @@ bool PickerRowTarget(const PickerState& state, std::size_t at, PickerTarget& out
 }
 
 std::size_t PickerTotal(const PickerState& state) {
+  if (state.total > 0) return state.total;
   if (state.source != PickerState::Source::kContent) return state.rows.size();
   return state.scan ? state.scan->lines : 0;
 }
@@ -768,22 +769,24 @@ void PickerReadRow(Editor& ed, PickerState& state, PickerEntry& row, bool again)
 // the loop below is a no-op there and the block is its only read. Outside the
 // anonymous namespace for the excerpt-context keys (commands.cpp).
 void PickerFillShown(Editor& ed, PickerState& state) {
-  state.context.clear();
-  state.context_first = 0;
-  state.context_target = 0;
-  if (!PickerShowsContext(state.source)) return;
-
   // The band's rows read nothing for content -- a row is the corpus line the
   // scan sent -- so only the block reads, and it reads the file: the corpus
   // holds the matched lines and not their neighbours.
-  const bool content = (state.source == PickerState::Source::kContent);
-  if (!content) {
+  if (PickerShowsContext(state.source) && (state.source != PickerState::Source::kContent)) {
     const std::size_t window = std::max<std::size_t>(1, state.window);
     const std::size_t last = std::min(state.shown.size(), state.offset + window);
     for (std::size_t r = state.offset; r < last; ++r) {
       PickerReadRow(ed, state, state.rows[state.shown[r]], true);
     }
   }
+  PickerFillContext(ed, state);
+}
+
+void PickerFillContext(Editor& ed, PickerState& state) {
+  state.context.clear();
+  state.context_first = 0;
+  state.context_target = 0;
+  if (!PickerShowsContext(state.source)) return;
   PickerTarget target;
   if (!PickerRowTarget(state, state.selected, target)) return;
   // The block's depth is the excerpt view's setting: excerpt-context lines
@@ -3776,6 +3779,9 @@ bool SaveExcerptView(Editor& ed) {
       break;
     }
     ++wrote_files;
+    // Same reason SaveBuffer records its write: the rename lands on a watched
+    // basename and would otherwise buy a sweep that finds nothing.
+    ed.self_writes.push_back(file.path);
     if (std::string broke = SpliceIntoOpenBuffer(ed, file); !broke.empty()) {
       buffer_note = " -- but the buffer on " + broke;
     }
@@ -5036,13 +5042,28 @@ SmartJumpState& SmartJumpStateOf(Editor& ed) {
 // `landed` comes back as the line the cursor is actually on, which is the
 // stored line healed, re-found and clamped -- what the status has to name.
 bool LandSmartJump(Editor& ed, const SmartMatch& match, Index column, Index& landed) {
-  if (match.path.empty()) return false;
+  if (match.path.empty()) {
+    // The one failure the open cannot report, because there is no path to
+    // open: nothing on disk answers to the row any more.
+    ed.status.Fail("cannot open " + (match.key.empty() ? match.display : match.key));
+    return false;
+  }
   const fs::path path{match.path};
-  RecordJump(ed);
 
   const bool already_here = !IsExcerptView(ed.doc) && HasDiskFile(ed.doc) &&
                             (CanonicalOf(ed.doc.file) == CanonicalOf(path));
-  if (!already_here && !OpenFile(ed, path)) return false;
+  // The departure goes into the jump list only for a landing that happens: a
+  // row for a jump that failed is a step back to where the cursor is standing.
+  // It cannot simply move below the open either -- RecordJump describes the
+  // buffer that is current when it runs, and the open has switched by then --
+  // so the open calls it at the one moment both are true.
+  if (already_here) {
+    RecordJump(ed);
+  } else if (!OpenFile(ed, path, false, [&ed] { RecordJump(ed); })) {
+    // OpenFile said why, with the reason and the spelling every other
+    // smart-jump surface uses; saying it again here would say it worse.
+    return false;
+  }
 
   Target target;
   target.path = path;
@@ -5119,10 +5140,9 @@ bool AcceptSmartJump(Editor& ed, std::size_t at, Index& landed, Index column = 0
   SmartJumpState& state = SmartJumpStateOf(ed);
   if (at >= state.matches.size()) return false;
   const SmartMatch match = state.matches[at];
-  if (!LandSmartJump(ed, match, column, landed)) {
-    ed.status.Warn("cannot open " + match.path);
-    return false;
-  }
+  // The failure said itself, in full: the reason the open gave and the path
+  // spelled the way the rest of smart jump spells it.
+  if (!LandSmartJump(ed, match, column, landed)) return false;
   state.at = at;
   // Held with the armed arrival, not written here: see CheckSmartJumpArrival.
   if (ed.project && !state.typed.empty()) {
@@ -5130,6 +5150,83 @@ bool AcceptSmartJump(Editor& ed, std::size_t at, Index& landed, Index column = 0
     ed.record.pending_target = match.key;
   }
   return true;
+}
+
+// The band the box hangs off itself while you type: the head of the ranking as
+// picker rows, so the card, the block, the letters and the count are the
+// picker's own and not a second set that has to be kept looking like them.
+// kRefs is the source whose rows point into a file and lead with that line's
+// own text, which is the shape of these exactly, and it is what makes
+// PickerShowsContext true.
+//
+// Kept between keystrokes rather than rebuilt whole: what is worth keeping is
+// the block's file cache, and dropping it would re-read the target's file on
+// every key.
+void FillSmartBand(Editor& ed, const SmartPreview& preview) {
+  if (preview.top.empty()) {
+    ed.smart_band.reset();
+    return;
+  }
+  if (!ed.smart_band) {
+    ed.smart_band = std::make_shared<PickerState>();
+    ed.smart_band->source = PickerState::Source::kRefs;
+    ed.smart_band->file_max = ed.settings.picker_file_max;
+  }
+  PickerState& band = *ed.smart_band;
+  band.rows.clear();
+  band.shown.clear();
+  // Back to row 0 on every keystroke, the way a picker's refilter puts its
+  // band back at the top: the list is a new one, and a selection carried over
+  // from the last would name a row that is not there. The arrows move it from
+  // there (SmartBandStep); typing stays typing.
+  band.selected = 0;
+  band.offset = 0;
+  for (const SmartMatch& match : preview.top) {
+    // The stored line healed against the buffer the row belongs to, the way the
+    // landing and the stepping status heal it: the number on the band is the
+    // line the cursor would arrive on, not the one the store remembers.
+    Index line = match.line;
+    AnchorShadowLine(ed, ed.doc, match.row_id, line);
+    const SmartRowText split = SmartRowAt(match, line);
+    // The two shapes a picker row has, on the rule a picker uses: a row with a
+    // line of its own leads with that line and keeps `path:line` in the detail
+    // column, and a row that is only a place -- a file match, or a stored line
+    // that came back empty -- is its path and carries no second copy of it.
+    // One evaluation now ranks all three kinds against each other, so a band
+    // holds both shapes at once and each row keeps its own.
+    PickerEntry row;
+    if (split.text.empty()) {
+      row.text = split.head;
+    } else {
+      row.text = split.text;
+      row.detail = split.head;
+    }
+    row.target = match.path;
+    row.line = std::max<Index>(1, line);
+    row.column = (match.col > 0) ? match.col : 1;
+    row.name = match.symbol;
+    // Never freshened off disk: what the ranking matched is the stored line, so
+    // that is what the band has to show, and a read per row per keystroke is
+    // the one cost the typing path cannot take.
+    row.read = true;
+    band.shown.push_back(band.rows.size());
+    band.rows.push_back(std::move(row));
+  }
+  // Five rows of however many matched, which is what the count has to say.
+  band.total = preview.count;
+  band.card_w = PickerCardWidth(band);
+  band.lead_w = 0;
+  band.detail_w = 0;
+  PickerFillContext(ed, band);
+}
+
+// The heal the ranking hands to its same-spot dedup, and the same one the band
+// above and the landing below already do row by row: where the open buffer says
+// a stored line has drifted to. Written once and given to both entry points,
+// because a preview that deduped on a different answer from the landing's would
+// show a list Enter does not walk.
+SmartHeal SmartHealOf(Editor& ed) {
+  return [&ed](std::int64_t id, Index& line) { return AnchorShadowLine(ed, ed.doc, id, line); };
 }
 
 }
@@ -5145,6 +5242,9 @@ void SmartJumpPrompt(Editor& ed) {
   // on the keystroke opening this prompt, so nothing confirmed is taken back.
   DropSmartJumpArrival(ed);
   PromptOpen(ed, PromptKind::kSmartJump);
+  // Nothing typed yet, so there is no band; a card left over from the last
+  // prompt would draw rows for a query that is gone.
+  ed.smart_band.reset();
   // The caret box hangs whatever ed.status holds off itself as its feedback
   // row, so a message left over from before the prompt would read as an answer
   // to a query not yet typed. An empty query previews to nothing; start there.
@@ -5159,22 +5259,36 @@ void SmartJumpPreview(Editor& ed) {
   if (!ed.prompt_active || (ed.prompt_kind != PromptKind::kSmartJump) || !ed.smart_jump) return;
   SmartJumpState& state = *ed.smart_jump;
   const SmartQuery query = ParseSmartQuery(ed.prompt_input);
+  // The head of the ranking and no more of it: strings for the rows the band
+  // draws, and for none of the rest. This runs on every keystroke.
+  const SmartPreview preview =
+      PreviewSmartMatches(state.corpus, query, ed.project.get(), kPickerRows, SmartHealOf(ed));
+  // The rows Enter and an alt+letter would take, drawn the way a picker draws its
+  // own. Nothing to show for a query that will not parse or that matched
+  // nothing -- the feedback below says which of the two it was.
+  FillSmartBand(ed, preview);
   // The count and the best target with its line text, so that where Enter goes
-  // is visible before it is pressed. Into ed.status, which the caret box hangs
-  // off itself as its feedback row -- and the bar leaves alone while the
-  // prompt is up. The summary and not the list: this runs on every keystroke
-  // and the rest of the ranking is strings nothing here reads.
-  const SmartSummary summary = SummariseSmartMatches(state.corpus, query, ed.project.get());
-  const std::string said = SmartJumpFeedback(query, summary);
+  // is legible even where the band could not be drawn -- a side too short for
+  // it keeps this row, and the bottom-row fallback has nothing else. Into
+  // ed.status, which the caret box hangs off itself as its feedback row, and
+  // which the bar leaves alone while the prompt is up.
+  const std::string said = SmartJumpFeedback(query, preview);
   if (said.empty()) {
     ed.status.clear();
+  } else if (!query.error.empty()) {
+    // A query that will not parse says so at the same weight here as it does
+    // on submit: one text, one severity, however it is reached.
+    ed.status.Warn(said);
   } else {
-    ed.status = said;
+    // Info, so that fixing the bad word takes the warning's colour off the
+    // line with it.
+    ed.status.Info(said);
     // Where enter would land wears its own colour in the branch row, the way
     // the stepping status paints it on the bar.
-    if (query.error.empty() && (summary.count > 0) && !summary.display.empty() &&
-        said.ends_with(summary.display)) {
-      ed.status.Highlight(said.size() - summary.display.size(), summary.display.size());
+    if (!preview.top.empty() && !preview.top.front().display.empty() &&
+        said.ends_with(preview.top.front().display)) {
+      const std::size_t size = preview.top.front().display.size();
+      ed.status.Highlight(said.size() - size, size);
     }
   }
 }
@@ -5194,9 +5308,17 @@ void OpenHandoffPicker(Editor& ed, const SmartHandoff& handoff) {
   FilePicker(ed, handoff.query);
 }
 
+// The tail of whatever the handoff says. A band filtered by the deciding
+// clause looks exactly like a band filtered by the whole query, so the terms
+// left at the door are named rather than left to be noticed.
+std::string HandoffNote(const SmartQuery& query, const SmartHandoff& handoff) {
+  const std::string dropped = SmartDroppedTerms(query, handoff.picker);
+  return dropped.empty() ? std::string{} : (", dropped " + dropped);
 }
 
-void SmartJumpSubmit(Editor& ed, std::string_view line) {
+}
+
+void SmartJumpSubmit(Editor& ed, std::string_view line, std::size_t at) {
   if (!RequireProject(ed)) return;
   SmartJumpState& state = SmartJumpStateOf(ed);
   // Reached without the prompt having been opened -- a bound query, a test --
@@ -5211,7 +5333,8 @@ void SmartJumpSubmit(Editor& ed, std::string_view line) {
     ed.status.Warn(query.error);
     return;
   }
-  std::vector<SmartMatch> matches = RankSmartMatches(state.corpus, query, ed.project.get());
+  std::vector<SmartMatch> matches =
+      RankSmartMatches(state.corpus, query, ed.project.get(), SmartHealOf(ed));
   // Either way this query is what n/N answer to now, so the picker walk that
   // held them is freed here -- one list at a time, whichever was made last.
   ed.walk.reset();
@@ -5226,15 +5349,17 @@ void SmartJumpSubmit(Editor& ed, std::string_view line) {
     state.typed.clear();
     state.at = 0;
     const SmartHandoff handoff = SmartJumpHandoff(query);
-    const std::string said = "not been there -- " + std::string{SmartPickerName(handoff.picker)};
-    ed.status = said;
+    const std::string said = "not been there -- " +
+                             std::string{SmartPickerName(handoff.picker)} +
+                             HandoffNote(query, handoff);
+    ed.status.Info(said);
     // Terms and all, so the picker opens with them typed: this has to be the
     // same place you would have got to by choosing the picker yourself.
     OpenHandoffPicker(ed, handoff);
     // Opening a prompt clears the status, so the sentence explaining the band is
     // said again over it -- and only where a band opened, so a picker that
     // refused keeps its own reason on the line.
-    if (ed.prompt_active && (ed.prompt_kind == PromptKind::kPicker)) ed.status = said;
+    if (ed.prompt_active && (ed.prompt_kind == PromptKind::kPicker)) ed.status.Info(said);
     return;
   }
 
@@ -5242,41 +5367,125 @@ void SmartJumpSubmit(Editor& ed, std::string_view line) {
   state.typed = query.typed;
   state.at = 0;
 
-  // Enter lands on the best match, always -- the way a search lands on its
-  // first hit -- and stepping is the disambiguator, not a list view. A wrong
-  // landing costs one keypress (picker_jump_next) and teaches nothing: both the
-  // row and the query credit wait out the bounce.
+  // Enter lands on the row the band has selected -- the best match until the
+  // arrows move it, the way a search lands on its first hit. A wrong landing
+  // costs one keypress (picker_jump_next) and teaches nothing: both the row and
+  // the query credit wait out the bounce.
   const std::size_t count = state.matches.size();
+  // A letter is checked against the rows the band drew before the prompt
+  // closes, so this only clamps a caller that named a row the ranking does not
+  // have.
+  const std::size_t pick = std::min(at, count - 1);
   Index landed = 0;
-  if (AcceptSmartJump(ed, 0, landed)) {
+  if (AcceptSmartJump(ed, pick, landed)) {
     // A lone match lands in silence: the cursor arriving is the whole answer,
     // and a box naming the place it already stands would be noise. Several
-    // leave the walk's box at the caret, naming the second: the first is under
-    // the cursor, and what is worth saying is where picker_jump_next would take
-    // you from it.
+    // leave the walk's box at the caret, naming the next: the one landed on is
+    // under the cursor, and what is worth saying is where picker_jump_next
+    // would take you from it.
     if (count == 1) {
       ed.status.clear();
       ed.jump_branch = false;
     } else {
       std::size_t dest = 0;
-      const std::string said = SmartNextSaid(ed, state.matches, 0, true, &dest);
-      const std::string head = SmartJumpBadge(ed) + "1/" + std::to_string(count) + "  ";
-      ed.status = head + said;
+      const std::string said = SmartNextSaid(ed, state.matches, pick, true, &dest);
+      const std::string head =
+          SmartJumpBadge(ed) + std::to_string(pick + 1) + "/" + std::to_string(count) + "  ";
+      // Plainly: a landing that happened is not the colour of whatever the
+      // line was wearing before it.
+      ed.status.Info(head + said);
       if (!said.empty()) ed.status.Highlight(head.size() + dest, said.size() - dest);
       ed.jump_branch = true;
     }
   }
 }
 
+void SmartJumpQuery(Editor& ed, std::string_view line) {
+  if (!RequireProject(ed)) return;
+  // The snapshot first, always. Submit takes one only when there is none at
+  // all, which is right for a test reaching straight in and wrong for a bound
+  // query: a corpus left standing by an earlier prompt is a picture of a store
+  // that has taken visits, edits and time since, and ranking against it would
+  // answer a question that has moved on. Opening the prompt rebuilds; so does
+  // this.
+  BuildSmartCorpus(*ed.project, SmartJumpStateOf(ed).corpus);
+  SmartJumpSubmit(ed, line);
+}
+
+bool SmartBandStep(Editor& ed, bool forward) {
+  if (!ed.prompt_active || (ed.prompt_kind != PromptKind::kSmartJump) || !ed.smart_band) {
+    return false;
+  }
+  PickerState& band = *ed.smart_band;
+  // The whole band, wrapping at its ends and not at the window's -- PickerStep,
+  // over the list smart-jump built instead of the one a filter left.
+  const std::size_t count = band.shown.size();
+  if (count == 0) return false;
+  band.selected = forward ? ((band.selected + 1) % count) : ((band.selected + count - 1) % count);
+  PickerScrollToSelected(band);
+  // The block follows the selection. Only the block: these rows came out of the
+  // store rather than off the disk, so there is no row-freshening pass to run
+  // (FillSmartBand).
+  PickerFillContext(ed, band);
+  return true;
+}
+
+void SmartJumpAcceptRow(Editor& ed, std::size_t at) {
+  if (!ed.prompt_active || (ed.prompt_kind != PromptKind::kSmartJump)) return;
+  // The rows the band drew and no others, the way a picker's letters name only
+  // what is on the screen: with no band -- no matches, a bad parse, a side too
+  // short to draw one -- there is nothing for a letter to name, and the prompt
+  // stays for the query to be fixed.
+  if (!ed.smart_band || (at >= ed.smart_band->window)) return;
+  // The window's row, wherever the band is scrolled -- what the letter is drawn
+  // beside. A shrunk side is the only thing that scrolls this band, and the
+  // arrows are the only thing that moves the selection into it.
+  at += ed.smart_band->offset;
+  if (at >= ed.smart_band->shown.size()) return;
+  const std::string line = ed.prompt_input;
+  if (line.empty()) return;
+  // Closed exactly as an Enter landing closes it -- cancel, then the history
+  // the input earned -- so the letter and Enter differ in one thing only: which
+  // row of the same ranking is landed on.
+  PromptCancel(ed);
+  std::vector<std::string>& history = PromptHistoryOf(ed);
+  if (history.empty() || (history.back() != line)) history.push_back(line);
+  ed.prompt_history_index = history.size();
+  SmartJumpSubmit(ed, line, at);
+}
+
 void SmartJumpToPicker(Editor& ed) {
   // The same door the dead end opens, one keystroke earlier: the most specific
   // clause names the picker and hands over its own terms, escaped and joined the
   // way a picker query is a pattern.
-  const SmartHandoff handoff = SmartJumpHandoff(ParseSmartQuery(ed.prompt_input));
+  const std::string line = ed.prompt_input;
+  const SmartQuery query = ParseSmartQuery(line);
+  if (!query.error.empty()) {
+    // Half a query is not what was asked for: the terms the parse got as far as
+    // are not the ones the bad word was going to narrow. Refused the way enter
+    // refuses it, and the prompt stays for the query to be fixed.
+    ed.status.Warn(query.error);
+    return;
+  }
+  const SmartHandoff handoff = SmartJumpHandoff(query);
   // Read before the cancel clears it, opened after: both halves are this one
   // keystroke, so the box at the caret is never drawn without a prompt in it.
   PromptCancel(ed);
+  // The query earned its place in the history the way enter's and alt+letter's
+  // do -- it is the same query, handed on rather than landed -- so up-arrow in
+  // the next jump prompt offers it back.
+  if (!line.empty()) {
+    std::vector<std::string>& history = PromptHistoryOf(ed);
+    if (history.empty() || (history.back() != line)) history.push_back(line);
+    ed.prompt_history_index = history.size();
+  }
   OpenHandoffPicker(ed, handoff);
+  // What the picker was not given, said over the band it explains -- and only
+  // where a band opened, so a picker that refused keeps its own reason.
+  const std::string note = HandoffNote(query, handoff);
+  if (!note.empty() && ed.prompt_active && (ed.prompt_kind == PromptKind::kPicker)) {
+    ed.status.Info(std::string{SmartPickerName(handoff.picker)} + note);
+  }
 }
 
 void SmartJumpStep(Editor& ed, bool forward) {
@@ -5292,10 +5501,8 @@ void SmartJumpStep(Editor& ed, bool forward) {
 
   const SmartMatch match = state.matches[landed];
   Index at_line = 0;
-  if (!LandSmartJump(ed, match, 0, at_line)) {
-    ed.status.Warn("cannot open " + match.path);
-    return;
-  }
+  // Nowhere to land, so nothing is said over what the open said about why.
+  if (!LandSmartJump(ed, match, 0, at_line)) return;
   state.at = landed;
   // Not an accept: stepping is how a wrong landing gets corrected, and teaching
   // `queries` every row walked past on the way is how the correction would make
@@ -5308,10 +5515,13 @@ void SmartJumpStep(Editor& ed, bool forward) {
                                         : SmartNextSaid(ed, state.matches, landed, forward, &dest);
   const std::string head =
       SmartJumpBadge(ed) + std::to_string(landed + 1) + "/" + std::to_string(count) + "  ";
-  ed.status = head + said +
-              ((!wrapped || (count == 1)) ? ""
-               : forward                  ? " -- wrapped to the top"
-                                          : " -- wrapped to the bottom");
+  // Info, not whatever the line was wearing: a step that landed is good news,
+  // and the box at the caret paints itself from the level, so a step after a
+  // failed one would arrive in the failure's colour.
+  ed.status.Info(head + said +
+                 ((!wrapped || (count == 1)) ? ""
+                  : forward                  ? " -- wrapped to the top"
+                                             : " -- wrapped to the bottom"));
   if (!said.empty()) ed.status.Highlight(head.size() + dest, said.size() - dest);
   ed.jump_branch = true;
 }
@@ -5365,10 +5575,12 @@ void SayWalk(Editor& ed, const WalkList& list, bool forward, bool wrapped) {
   }
   const std::string head =
       SmartJumpBadge(ed) + std::to_string(list.at + 1) + "/" + std::to_string(count) + "  ";
-  ed.status = head + said +
-              ((!wrapped || (count == 1)) ? ""
-               : forward                  ? " -- wrapped to the top"
-                                          : " -- wrapped to the bottom");
+  // Plain, for the same reason SmartJumpStep says it plainly: a step off a row
+  // that would not open must not inherit that row's colour.
+  ed.status.Info(head + said +
+                 ((!wrapped || (count == 1)) ? ""
+                  : forward                  ? " -- wrapped to the top"
+                                             : " -- wrapped to the bottom"));
   if (!said.empty()) ed.status.Highlight(head.size() + dest, said.size() - dest);
   ed.jump_branch = true;
 }

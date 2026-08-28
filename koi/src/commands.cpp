@@ -2616,10 +2616,14 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
           return;
         case NamedKey::kLeft: PromptMoveLeft(ed); return;
         case NamedKey::kRight: PromptMoveRight(ed); return;
+        // A band under the box is what the arrows walk, the way a picker's do:
+        // the smart-jump prompt has one whenever the query matched, and falls
+        // back to recalling its history when it has none -- an empty query or a
+        // parse error, where there is nothing to walk anyway.
         case NamedKey::kUp:
           if (ed.prompt_kind == PromptKind::kPicker) {
             PickerStep(ed, false);
-          } else {
+          } else if (!SmartBandStep(ed, false)) {
             PromptHistory(ed, true);
             PromptTyped(ed);
           }
@@ -2627,7 +2631,7 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
         case NamedKey::kDown:
           if (ed.prompt_kind == PromptKind::kPicker) {
             PickerStep(ed, true);
-          } else {
+          } else if (!SmartBandStep(ed, true)) {
             PromptHistory(ed, false);
             PromptTyped(ed);
           }
@@ -2658,16 +2662,27 @@ void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector
       PickerStep(ed, false);
       return;
     }
-    // Alt+digit opens that visible band row directly -- the row the digit is
-    // drawn beside, wherever the window is scrolled. Alt because a bare digit
-    // is pattern text here: a query is regularly a number, and giving those up
-    // costs more than the modifier does. Accelerators end at five -- any other
-    // digit does nothing, and a band grown past five (buffers) is walked
-    // rather than numbered.
-    if ((ed.prompt_kind == PromptKind::kPicker) && (key.mods == kModAlt) &&
-        (key.named == NamedKey::kNone) && (key.code >= '1') && (key.code < ('1' + kPickerRows))) {
-      PickerAccept(ed, static_cast<int>(key.code - '1'));
-      return;
+    // Alt+letter opens that visible band row directly -- the row the letter is
+    // drawn beside, wherever the window is scrolled. i j k l a, the order the
+    // hot symbols are bound in, so the reach is one already in the hands. Alt
+    // because a bare letter is pattern text here, and in the smart-jump box it
+    // is a clause keyword: giving those up costs more than the modifier does.
+    // Accelerators end at five -- any other letter does nothing, and a band
+    // grown past five (buffers) is walked rather than lettered. Smart-jump's
+    // band is the same card and takes the same letters; its landing is its own,
+    // so that the row chosen is the row credited.
+    if ((key.mods == kModAlt) && (key.named == NamedKey::kNone) && (key.code < 128)) {
+      const std::size_t row = kPickerRowKeys.find(static_cast<char>(key.code));
+      if (row != std::string_view::npos) {
+        if (ed.prompt_kind == PromptKind::kPicker) {
+          PickerAccept(ed, static_cast<int>(row));
+          return;
+        }
+        if (ed.prompt_kind == PromptKind::kSmartJump) {
+          SmartJumpAcceptRow(ed, row);
+          return;
+        }
+      }
     }
     // The block's depth is excerpt-context, adjusted without leaving the
     // prompt -- alt because bare +/- are pattern text here. Same setting the
@@ -3581,6 +3596,11 @@ void PromptSubmit(Editor& ed) {
   }
   const PromptKind kind = ed.prompt_kind;
   std::string line = ed.prompt_input;
+  // Read before the cancel below frees the band: smart-jump's enter lands on
+  // the row the band has selected, which is the best match until the arrows
+  // move it. Row 0 for every other prompt, and for a query with no band.
+  const std::size_t at =
+      ((kind == PromptKind::kSmartJump) && ed.smart_band) ? ed.smart_band->selected : 0;
   PromptCancel(ed);
 
   if (kind == PromptKind::kCommand) {
@@ -3601,18 +3621,20 @@ void PromptSubmit(Editor& ed) {
     case PromptKind::kSearch: RunSearch(ed, line); return;
     case PromptKind::kSelectRegex: SelectRegex(ed, line); return;
     case PromptKind::kSearchExcerpts: SearchExcerpts(ed, line); return;
-    case PromptKind::kSmartJump: SmartJumpSubmit(ed, line); return;
+    case PromptKind::kSmartJump: SmartJumpSubmit(ed, line, at); return;
     case PromptKind::kPicker: return;
   }
 }
 
-bool OpenFile(Editor& ed, const std::filesystem::path& path, bool open_generated) {
+bool OpenFile(Editor& ed, const std::filesystem::path& path, bool open_generated,
+              const std::function<void()>& arriving) {
 
   std::size_t existing = FindFileBuffer(ed, path);
   if ((existing >= BufferCount(ed)) && open_generated) {
     existing = FindViewBuffer(ed, path.native());
   }
   if (existing < BufferCount(ed)) {
+    if (arriving) arriving();
     SwitchToBuffer(ed, existing);
     ed.mode = Mode::kNormal;
     ApplyModeInvariants(ed);
@@ -3630,6 +3652,7 @@ bool OpenFile(Editor& ed, const std::filesystem::path& path, bool open_generated
     return false;
   }
 
+  if (arriving) arriving();
   AddBuffer(ed, std::move(fresh));
   ed.mode = Mode::kNormal;
   ApplyModeInvariants(ed);
@@ -3749,6 +3772,11 @@ bool SaveBuffer(Editor& ed, std::string_view rest, bool force, bool rerun_watche
                    " -- :w <path> to save elsewhere");
     return false;
   }
+  // The choke point for every :w, :w!, :wa and :wq -- all of them come through
+  // SaveBuffer, and this is the only rename-into-place koi does to a buffer's
+  // own file. Recorded so the watcher spends the event instead of arming a
+  // sweep for a change koi has already accounted for.
+  ed.self_writes.push_back(target.string());
   if (was_view) ed.doc.excerpts = ExcerptView{};
   if (LanguageForPath(ed.doc.file) != was) AttachSyntax(ed);
   RecordEditHere(ed);
@@ -4037,11 +4065,25 @@ ErrorCtx ReloadInto(Document& doc) {
     return MakeErrorCtx(std::errc::no_such_file_or_directory);
   }
 
-  const Index cursor_line = LineAt(doc.table, doc.selections.Primary().head) + 1;
+  // CursorOf, not head: a forward selection parks its head one grapheme past
+  // the caret, and handing that back as a column walks the cursor one right on
+  // every reload.
+  const Index cursor_at = CursorOf(doc.table, doc.selections.Primary());
+  const Index cursor_row = LineAt(doc.table, cursor_at);
+  const Index cursor_line = cursor_row + 1;
+  // 1-based byte column, which is what GoToTarget takes; it clamps one the
+  // reloaded line has grown too short for.
+  const Index cursor_column = cursor_at - LineStart(doc.table, cursor_row) + 1;
   Document fresh;
   fresh.tab_width = doc.tab_width;
   fresh.insert_spaces = doc.insert_spaces;
   if (const ErrorCtx err = LoadDocument(doc.file, fresh); err) return err;
+  // LoadDocument reads a missing file as an empty document on purpose; that is
+  // for opening a path that is not there yet, and a reload must not take it.
+  // The empty branch returns before the stamp, so a default one is that branch.
+  if (fresh.disk_stamp.mtime == std::filesystem::file_time_type::min()) {
+    return MakeErrorCtx(std::errc::no_such_file_or_directory);
+  }
 
   const std::string text = ReadDocRange(fresh.table, Interval(0, DocLength(fresh.table)));
   BreakUndoCoalescing(doc.table);
@@ -4058,6 +4100,8 @@ ErrorCtx ReloadInto(Document& doc) {
   doc.insert_spaces = fresh.insert_spaces;
   doc.read_only = fresh.read_only;
   doc.disk_stamp = fresh.disk_stamp;
+  doc.warned_stamp = FileStamp{};
+  doc.warned_reload_failed = false;
   doc.disk_blob = fresh.disk_blob;
   MarkUndoSavePoint(doc.table);
   doc.saved_undo_serial = CurrentUndoSerial(doc.table);
@@ -4067,6 +4111,8 @@ ErrorCtx ReloadInto(Document& doc) {
   Target back;
   back.line = cursor_line;
   back.has_line = true;
+  back.column = cursor_column;
+  back.has_column = true;
   GoToTarget(doc, back);
   return {};
 }
@@ -4143,49 +4189,129 @@ void ReloadEveryBuffer(Editor& ed, bool force) {
 
 // Every buffer a pane is drawing, not only the focused one. A split leaves the
 // other panes showing text their files no longer hold, and nothing else looks
-// at them: the disk check runs on focus-in alone, so a stale pane stayed stale
+// at them: the disk check ran on focus-in alone, so a stale pane stayed stale
 // until the user happened to run :reload. Buffers with no pane on them are left
 // out on purpose -- nobody is reading those, and swapping the ground under a
 // buffer the user has not looked at in an hour is the surprise this check is
 // careful to avoid for a modified one.
+//
+// Called from two places now, and the second one is why `warned_stamp` exists.
+// On focus-in this runs once per return to the terminal, so a modified buffer
+// whose file moved says its piece once and the user goes and deals with it.
+// Driven off the file watcher it runs on every write anything makes, and an
+// agent rewriting a tree hits the same held buffer over and over -- the same
+// sentence, re-raised on the status line every few milliseconds, unclearable
+// and covering whatever the user was actually being told. So the complaint is
+// keyed to the disk state it is about: same stamp, already said, stay quiet;
+// stamp moved, that is a new thing to know, say it again.
+//
+// `took` needs none of this and gets none: a reload takes the new stamp, so
+// the next sweep finds the file unchanged and the message cannot repeat by
+// construction. `failed` does need it and has it -- a reload that fails
+// leaves disk_stamp where it was, so the file reads as changed on every sweep
+// afterwards and a file koi cannot read (half-written UTF-8, a permission that
+// went away) would report its failure for as long as anything else in that
+// directory kept moving. The two share one stamp and are told apart by
+// `warned_reload_failed`, because a buffer can walk from one to the other
+// without the file changing at all -- type into a buffer whose reload failed
+// and the news becomes ":reload to take that, :w! to overwrite", which is
+// different advice and worth saying.
+//
+// A third complaint shares the stamp too: the file is not there at all and the
+// buffer is the last copy of it. Keyed on what a failed stat leaves, which is
+// a default stamp and equal to nothing on disk, so the path written again is
+// news rather than a repeat.
+//
+// Only the buffers the report names are marked as told. The message names
+// three, so the rest come back on the next sweep and get named there.
 void CheckDiskChange(Editor& ed) {
-  std::vector<std::string> took;
-  std::vector<std::string> held;
-  std::vector<std::string> failed;
+  constexpr std::size_t kMaxNamed = 3;
+
+  // A buffer with something to say, and the disk state it would be said about.
+  // The stamp is carried rather than written down where it is found: only the
+  // buffers the report actually names may be marked as told, or one folded into
+  // "and N more" goes quiet without ever having been named.
+  struct Complaint {
+    Document* doc{nullptr};
+    std::string name;
+    FileStamp stamp;
+    bool reload_failed{false};
+  };
+
+  std::vector<Complaint> took;
+  std::vector<Complaint> held;
+  std::vector<Complaint> failed;
+  std::vector<Complaint> vanished;
   std::string first_error;
+
+  // Whether this buffer's current disk state is the one it was last warned
+  // about. Reads only -- the marking is done once the report is composed.
+  const auto already_said = [](const Document& doc, const FileStamp& now, bool reload_failed) {
+    return (doc.warned_reload_failed == reload_failed) && now.SameFile(doc.warned_stamp);
+  };
 
   for (std::size_t i = 0; i < BufferCount(ed); ++i) {
     Document& doc = (ed.buffers.empty() || (i == ed.active)) ? ed.doc : ed.buffers[i];
     if (!HasDiskFile(doc)) continue;
     if (!BufferOnScreen(ed, i)) continue;
-    if (!ExternallyModified(doc)) continue;
-    if (doc.modified) {
-      held.push_back(DisplayPath(doc.file));
+
+    // One stat, and a stat that fails is news rather than silence.
+    // ExternallyModified cannot stand in for this: it folds "the file is gone"
+    // into "nothing changed", which is the case this sweep most needs to say.
+    FileStamp now;
+    if (!StampFile(doc.file.string(), now)) {
+      // Only for a file koi has read. A default disk_stamp is a buffer opened
+      // on a path that is not there yet, which is a file waiting to be written
+      // rather than one that went missing.
+      if (doc.disk_stamp.mtime == std::filesystem::file_time_type::min()) continue;
+      // The buffer is the last copy now. Keyed on the stamp a failed stat
+      // leaves, which nothing on disk can equal, so the same path written again
+      // is news rather than a repeat.
+      if (!already_said(doc, now, true)) {
+        vanished.push_back(Complaint{&doc, DisplayPath(doc.file), now, true});
+      }
       continue;
     }
+    if (now.SameFile(doc.disk_stamp)) continue;
+
+    // CanRedo and not `modified` alone: a buffer undone back to its save point
+    // reads clean, but the text the user wrote is on the redo branch, and the
+    // whole-document Apply a reload does overwrites the branch root and drops
+    // it. Nothing can reach it afterwards, so this is held, not reloaded.
+    if (doc.modified || CanRedo(doc.table)) {
+      if (!already_said(doc, now, false)) {
+        held.push_back(Complaint{&doc, DisplayPath(doc.file), now, false});
+      }
+      continue;
+    }
+
+    // Asked before the read, not after it. A file that keeps failing to load
+    // (half-written UTF-8, a torn rename) costs a whole-file read, a UTF-8 scan
+    // and a hash, and the watcher asks again on every write in that directory.
+    if (already_said(doc, now, true)) continue;
+
     if (const ErrorCtx err = ReloadInto(doc); err) {
-      failed.push_back(DisplayPath(doc.file));
+      failed.push_back(Complaint{&doc, DisplayPath(doc.file), now, true});
       if (first_error.empty()) first_error = FormatErrorCtx(err);
       continue;
     }
-    took.push_back(DisplayPath(doc.file));
+    took.push_back(Complaint{&doc, DisplayPath(doc.file), now, false});
     // Somebody else wrote this file: a branch switch, a rebase, a formatter.
     // This is the moment the stored lines stopped being true, and the one
     // trigger the design names first.
     StartAnchorHeal(ed, doc.file, {}, false);
   }
 
-  if (took.empty() && held.empty() && failed.empty()) return;
+  if (took.empty() && held.empty() && failed.empty() && vanished.empty()) return;
 
   // Named rather than counted. "3 files changed on disk" is a fact the reader
   // then has to go and turn into names one buffer at a time, which is the work
   // this message exists to save them.
-  const auto list = [](const std::vector<std::string>& names) {
-    constexpr std::size_t kMaxNamed = 3;
+  const auto list = [](const std::vector<Complaint>& names) {
     std::string out;
     for (std::size_t i = 0; (i < names.size()) && (i < kMaxNamed); ++i) {
       if (i > 0) out += ", ";
-      out += names[i];
+      out += names[i].name;
     }
     if (names.size() > kMaxNamed) {
       out += " and " + std::to_string(names.size() - kMaxNamed) + " more";
@@ -4193,11 +4319,27 @@ void CheckDiskChange(Editor& ed) {
     return out;
   };
 
+  // Told means named. The rest keep the stamp they had and come back on the
+  // next sweep, by which time the named ones are quiet and the next three fit.
+  const auto mark_named = [](std::vector<Complaint>& names) {
+    for (std::size_t i = 0; (i < names.size()) && (i < kMaxNamed); ++i) {
+      names[i].doc->warned_stamp = std::move(names[i].stamp);
+      names[i].doc->warned_reload_failed = names[i].reload_failed;
+    }
+  };
+  mark_named(held);
+  mark_named(failed);
+  mark_named(vanished);
+
   std::string report;
   if (!took.empty()) report = list(took) + " changed on disk -- reloaded";
   if (!held.empty()) {
     if (!report.empty()) report += "; ";
     report += list(held) + " changed on disk -- :reload to take that, :w! to overwrite";
+  }
+  if (!vanished.empty()) {
+    if (!report.empty()) report += "; ";
+    report += list(vanished) + " is gone from disk -- :w to put it back";
   }
   if (!failed.empty()) {
     if (!report.empty()) report += "; ";
@@ -4398,6 +4540,17 @@ constexpr std::array kTypable = std::to_array<TypableDef>({
     {"jump-symbol", "<n>", "go to the nth most looked-up symbol",
      [](Editor& ed, std::string_view rest) {
        if (int v = 0; SlotOf(ed, "jump-symbol", rest, v)) JumpToHotSymbol(ed, v);
+     }},
+    {"smart-jump", "<query>", "run a smart-jump query without the prompt, for binding to a key",
+     [](Editor& ed, std::string_view rest) {
+       // Everything after the verb is the query, quotes and digits included.
+       // Nothing at all is not one -- the prompt cannot submit an empty query
+       // either -- so it says so rather than ranking the whole corpus.
+       if (rest.empty()) {
+         ed.status.Warn(":smart-jump wants a query");
+         return;
+       }
+       SmartJumpQuery(ed, rest);
      }},
 });
 

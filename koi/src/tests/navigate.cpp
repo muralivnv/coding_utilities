@@ -512,7 +512,7 @@ void InProcessPicker() {
     PromptCancel(ed);
   }
 
-  TEST_CASE("picker: alt+digit opens the window's row, wherever it is scrolled");
+  TEST_CASE("picker: alt+letter opens the window's row, wherever it is scrolled");
   {
     const Scratch scratch{"koi-picker-digit-window"};
     Editor ed;
@@ -520,21 +520,21 @@ void InProcessPicker() {
     BufferPicker(ed);
     if (ed.picker == nullptr) return;
 
-    // Scrolled by one, so the band shows rows 1..5 and `A-1` is the second row
-    // of the list -- the digit names what is drawn beside it, not the list's
+    // Scrolled by one, so the band shows rows 1..5 and `A-i` is the second row
+    // of the list -- the letter names what is drawn beside it, not the list's
     // own numbering.
     Presser press;
     for (std::size_t i = 0; i < kPickerRows; ++i) press(ed, "tab");
     EXPECT_EQ(ed.picker->offset, std::size_t{1});
     const std::string second = ed.picker->rows[ed.picker->shown[1]].target;
-    press(ed, "A-1");
+    press(ed, "A-i");
     EXPECT_FALSE(ed.prompt_active);
     EXPECT_TRUE(ed.walk != nullptr);
     if (ed.walk == nullptr) return;
     EXPECT_EQ(ed.walk->rows[ed.walk->at].target, second);
   }
 
-  TEST_CASE("picker: alt+digit opens that row, and one past the band does nothing");
+  TEST_CASE("picker: alt+letter opens that row, and one past the band does nothing");
   {
     const Scratch scratch{"koi-picker-digits"};
     Editor ed;
@@ -547,32 +547,36 @@ void InProcessPicker() {
     EXPECT_EQ(ed.prompt_input, std::string{"char"});
     EXPECT_EQ(ed.picker->shown.size(), std::size_t{1});
 
-    // A bare digit is pattern text, whether or not it names a drawn row.
+    // A bare letter is pattern text, whether or not it names a drawn row, and
+    // so is a bare digit -- the accelerators wear alt, and nothing else does.
     press(ed, "9");
     EXPECT_EQ(ed.prompt_input, std::string{"char9"});
     EXPECT_TRUE(ed.picker->shown.empty());
     press(ed, "backspace");
     EXPECT_EQ(ed.prompt_input, std::string{"char"});
-    press(ed, "1");
-    EXPECT_EQ(ed.prompt_input, std::string{"char1"});
+    press(ed, "i");
+    EXPECT_EQ(ed.prompt_input, std::string{"chari"});
     EXPECT_TRUE(ed.prompt_active);
     press(ed, "backspace");
     EXPECT_EQ(ed.prompt_input, std::string{"char"});
-
-    // The accelerators end at the band height, so A-9 opens nothing and types
-    // nothing.
-    press(ed, "A-9");
+    // The digits the accelerators used to be do nothing at all now.
+    press(ed, "A-1");
     EXPECT_TRUE(ed.prompt_active);
     EXPECT_EQ(ed.prompt_input, std::string{"char"});
 
-    // One row shown, so A-2 is past the band's end: nothing opens, nothing is
+    // Only i j k l a are accelerators, so A-z opens nothing and types nothing.
+    press(ed, "A-z");
+    EXPECT_TRUE(ed.prompt_active);
+    EXPECT_EQ(ed.prompt_input, std::string{"char"});
+
+    // One row shown, so A-j is past the band's end: nothing opens, nothing is
     // typed, and the prompt stays for the pattern to be fixed.
-    press(ed, "A-2");
+    press(ed, "A-j");
     EXPECT_TRUE(ed.prompt_active);
     EXPECT_TRUE(ed.picker != nullptr);
     EXPECT_EQ(ed.prompt_input, std::string{"char"});
 
-    press(ed, "A-1");
+    press(ed, "A-i");
     EXPECT_FALSE(ed.prompt_active);
     EXPECT_TRUE(ed.picker == nullptr);
     EXPECT_EQ(ed.doc.file.filename().string(), std::string{"charlie.txt"});

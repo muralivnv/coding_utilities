@@ -54,6 +54,24 @@ excerpt-context                  = 2 # Lines of context around a hit in the exce
 scan-workers                     = 1 # Threads for searches/references/file scans, 1-32. Raising it
                                      # applies live (and on :config-reload); lowering it takes a
                                      # restart -- the pool only ever grows while koi runs.
+
+# Pick up files rewritten behind koi's back -- a formatter, a rebase, an agent --
+# as they are written, rather than only when the terminal regains focus. One
+# inotify watch per directory holding an open buffer, read on the main thread as
+# part of the wait koi already blocks in: nothing polls, and an idle editor with
+# a quiet disk costs exactly what it did before. A clean buffer is reloaded, a
+# modified one is warned about once per disk state and never overwritten. Off
+# leaves the focus-in check as the only trigger.
+auto-reload                      = true
+# Quiet time a burst of writes must go before the sweep runs, 0-2000ms. Spent as
+# the timeout of that same wait and only while a change is pending. Coalesces an
+# agent rewriting twenty files into one reload, and usually lands after a writer
+# that truncates in place has finished. A floor, not a promise: a gesture still
+# in flight -- a paste arriving, a chord waiting on its next key, a held drag --
+# holds the sweep until it ends, since a reload underneath one moves the text
+# out from under the rest of it.
+auto-reload-debounce-ms          = 50
+
 trim_trailing_whitespace_on_save = false # default is true. Runs on :w. Note the underscores:
                                          # this is the only key that is not kebab-case.
 record                           = false # whether to record key presses, into keylog.db
@@ -205,7 +223,11 @@ tabpad = "·"
 # Command names
 # ---------------------------------------------------------------------------
 #
-# `"C-s" = ":w"`.
+# `"C-s" = ":w"`. An argument rides along with the command, so a query can be a
+# key of its own:
+#
+#   [keys.normal.space]
+#   g = ":smart-jump c disk_deadline"
 #
 # Typeable Commands:
 #     w/write  w!/write!  wa/write-all  q/quit  q!/quit!  qa/quit-all
@@ -224,7 +246,7 @@ tabpad = "·"
 #     from  from-watched  from-with-msg  from-watched-with-msg  from-cancel  watch  unwatch
 #     pins-excerpt  messages
 #     sh/run-shell-command  pipe  pipe-to  insert-output  append-output
-#     pick  pin  clear-pin  jump-pin  jump-symbol
+#     pin  clear-pin  jump-pin  jump-symbol  smart-jump
 #
 # Static commands:
 #   add_newline_above                   goto_definition                     page_cursor_half_down
@@ -323,37 +345,84 @@ tabpad = "·"
 #
 # Press "h" (the default binding) and type. The rules:
 #
-#   - terms are whitespace-separated, and every term must match
-#   - terms before any keyword match the file
-#   - a bare single letter is a clause keyword: c content, d definition, f file
-#   - bare digits are a line number; quote them ('640') for a file called 640
+#   - terms are whitespace-separated, and every term must match something
+#   - a term routes itself by what it matched: a path gets you files, a line's
+#     own text gets you lines, a definition's name gets you definitions. All
+#     three come back in one list, ranked against each other
+#   - a term that matched a path AND a text is worth the better of the two, not
+#     both -- a file whose name is in every line of it cannot bury the line that
+#     actually says something
+#   - a line or a definition has to have been found by its own text by some
+#     term. One found only by the file it sits in is not offered: its file row
+#     is already there and says the same thing
+#   - c, d and f are still there, and now they only pin: c a term to line text,
+#     d to definition names, f to paths. Reach for one when a word is
+#     ambiguous and you know which half you meant
+#   - bare digits are a line number; quote them ('640') for a file called 640.
+#     A number means a line, so it rules files and definitions out
 #   - a match term needs two characters -- that is what keeps single letters
 #     free to be keywords; a one-letter term is an error, quoted or not
 #
-#   key cpp            a visited file matching key and cpp
-#   key cpp c split    ... then a visited line in it containing split
-#   nav d pin          visited definitions matching pin, in files matching nav
+#   keymap             the file: nothing else has that in its own text
+#   splitnode          the visited lines: no path has that in it
+#   key split          the visited split line in keymap.cpp -- `key` matched the
+#                      path, `split` matched the line. piece_tree's split lines
+#                      fail `key` on both counts
+#   disk_deadline      the definition first, then the lines that mention it
+#   key cpp c split    the same thing said with the keyword, when `split` would
+#                      otherwise have found a file too
 #   key 640            the visited line in keymap.cpp nearest 640
 #
 # While typing, a box at the caret holds the query -- its sigil ᛃ, the j
-# rune; icons off spells it jump: -- and the match count and where enter
-# would go hang off the box. It flips above the caret when there is no room
-# below, and a terminal too small for it falls back to the bottom row.
+# rune; icons off spells it jump: -- and under it hangs the card the pickers
+# draw: a band of the top five matches in ranked order, a count row saying
+# five of how many, and above them a block of the lines around the selected
+# row, excerpt-context deep. Every row says where it points, at the line the text
+# has actually drifted to rather than the one the store remembers. A band ranks
+# files, definitions and lines against each other, so it holds all three at
+# once: a row with a line of its own leads with that line and points at a
+# `path:line` beside it, and a row that is only a place is its path alone. The
+# card shows whenever anything matched, one match included, and it is the
+# whole of the feedback -- only a query with nothing to draw, a parse error or
+# a dead end, hangs its answer off the box on a branch row instead. It flips above
+# the caret when there is no room below; a short side gives up the block, then
+# the count, then band rows down to one, before it gives up the box; and a
+# terminal too small for any of it falls back to the bottom row.
 # A landing or a step leaves the same rounded box at the caret, wearing the
 # same ᛃ and naming where the next press of the walk would go; the first key
 # that is not a step buries it, and the bar stays out of it entirely. The
 # destination in either box is painted `ui.jump.next` -- green in the
 # shipped themes -- so it never reads as a file name.
 #
-#   enter      land on the best match
+#   enter      land on the selected row -- the best match, until the arrows
+#              move it
+#   up / down  walk the band's rows, wrapping at its ends; the block and the
+#              count follow. With no band up -- an empty query, a parse
+#              error -- they recall the query history instead
+#   alt-i..a   land on that row of the band directly -- i j k l a, top to
+#              bottom, wherever the band is scrolled, and the same letters as
+#              the `space i/j/k/l/a` hot symbols. Alt because a bare letter is
+#              a clause keyword here, the way a bare digit is the line clause
 #   b          step to the next match of the last query, "B" back -- and the
 #              same two keys walk a picker's rows after a pick, whichever list
 #              was made last; the box at the caret names where the next press
 #              would go, and says so when that press wraps around the list
-#   tab        hand the terms to the picker the most specific clause names --
-#              file, symbol or content. A query with no matches goes to that
-#              picker on enter as well
+#   tab        hand the terms to a picker, which does search the project. A
+#              query that pinned something goes where the most specific keyword
+#              says -- content, then symbol, then file -- and only that
+#              keyword's terms travel, with the line naming the ones left
+#              behind. A bare query named no kind, so it goes to the content
+#              picker with all of it: a content row carries its path, its line
+#              and that line's text, which is the only door that can still mean
+#              any of the three. A query that will not parse is refused here
+#              rather than handed over half-read. A query with no matches goes
+#              to that same picker on enter as well
 #   esc        cancel; stepping still works for the last submitted query
+#
+# The prompt is not the only door. `:smart-jump key cpp c split` runs the query
+# it is handed and lands exactly as enter would -- same ranking, same box, same
+# stepping afterwards -- so a place you keep going back to can be one key
+# ([keys.*] above). Everything after the command name is the query.
 #
 # A wrong landing costs nothing: it is recorded only after you have stood in it
 # for ~2 seconds or edited there, so a jump you step away from teaches the
@@ -388,12 +457,15 @@ tabpad = "·"
 # where keeping it would leave the text no room. A file or buffer row is its
 # own path, so it carries no second copy of it.
 #
-# The last row carries a dimmed `i/n/m`: which row of the filtered list is
-# selected, how many rows the filter left, how many candidates there were.
+# Each row is labelled with the letter that takes it -- i, j, k, l, a down the
+# band -- and the last row carries a dimmed `i/n/m`: which row of the filtered
+# list is selected, how many rows the filter left, how many candidates there
+# were.
 #
-#   alt-1..5   take that row of the band; every bare digit types into the
-#              query, and a buffers band grown past five is walked, not
-#              numbered
+#   alt-i..a   take that row of the band -- i j k l a, the letter drawn beside
+#              it, and the same letters the smart-jump band takes. Every bare
+#              letter types into the query, and a buffers band grown past five
+#              is walked, not lettered
 #   tab / down     step the selection forward, shift-tab / up back
 #   enter      take the selection
 #   esc        cancel -- the only way out; backspace on an empty query

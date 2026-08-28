@@ -304,6 +304,8 @@ ErrorCtx LoadDocument(const fs::path& path, Document& doc) {
   doc.view_name.clear();
   doc.read_only = false;
   doc.disk_stamp = FileStamp{};
+  doc.warned_stamp = FileStamp{};
+  doc.warned_reload_failed = false;
   doc.disk_blob.clear();
   doc.saved_undo_serial = 0;
   // The one call site that wants a missing file to read as an empty document --
@@ -568,6 +570,10 @@ ErrorCtx SaveDocumentAs(Document& doc, const fs::path& path, std::string* wrote)
   // Re-stamped from the file we just wrote, not from the text we wrote into it.
   doc.disk_stamp = FileStamp{};
   std::ignore = StampFile(path.string(), doc.disk_stamp);
+  // Buffer and file agree again, so whatever the disk check last complained
+  // about is settled and the next foreign write is news.
+  doc.warned_stamp = FileStamp{};
+  doc.warned_reload_failed = false;
   std::error_code recover_ec;
   fs::remove(RecoveryPathFor(path.string()), recover_ec);
   if (wrote != nullptr) *wrote = std::move(text);
@@ -1509,8 +1515,16 @@ void PromptCancel(Editor& ed) {
     ed.prompt_return_ranges.clear();
   }
   // The picker's rows live only while its prompt does; the accept path moves
-  // them out before coming through here.
+  // them out before coming through here. Smart-jump's band is the same deal --
+  // the ranked list it was built from outlives the prompt, the card does not.
   ed.picker.reset();
+  ed.smart_band.reset();
+  // The smart-jump box's feedback is about the query being typed -- the count,
+  // "not been there", a parse error -- and it dies with the prompt it was
+  // written for rather than being left stranded on the bar. The paths that
+  // accept instead of cancelling come through here first and write their own
+  // status after, so this clears nothing they said.
+  if (ed.prompt_active && (ed.prompt_kind == PromptKind::kSmartJump)) ed.status.clear();
   ed.prompt_active = false;
   ed.prompt_input.clear();
   ed.prompt_cursor = 0;
@@ -1699,7 +1713,7 @@ StatusLine StatusBar(const Editor& ed, const Document& doc, const SelectionSet& 
   const bool branch_has_it =
       (ed.prompt_active && ed.prompt_box_said &&
        ((ed.prompt_kind == PromptKind::kSmartJump) || (ed.prompt_kind == PromptKind::kPicker))) ||
-      ed.jump_branch;
+      (ed.jump_branch && ed.jump_branch_said);
   if (focused && (!hint.empty() || (!branch_has_it && !ed.status.empty()))) {
     const StatusLevel level = hint.empty() ? ed.status.level() : StatusLevel::kInfo;
     const StatusTone tone = (level == StatusLevel::kError)     ? StatusTone::kError

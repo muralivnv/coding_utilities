@@ -117,13 +117,16 @@ void TreeIndentFuzz(Rng& rng);
 // smartjump.cpp -- the parser, the corpus snapshot, the pipeline and the landing
 void SmartJumpParsing();
 void SmartJumpPipeline();
+void SmartJumpOneSpotOneRow();
 void SmartJumpBranchDiffPrior();
 void SmartJumpFeedbackText();
 void SmartJumpLanding();
 void SmartJumpAdaptiveLoop();
 void SmartJumpStepping();
+void SmartJumpTypedCommand();
 void SmartJumpBounceRule();
 void SmartJumpArrivalRules();
+void SmartJumpModeless();
 void SmartJumpSnapshotCost();
 
 // jumplist.cpp -- the jump list
@@ -332,6 +335,11 @@ void ColumnMapping();
 void CrlfLines();
 void GraphemeQueriesMatchAFullWalk();
 void ClustersLongerThanTheReadWindowStillSegment();
+
+// watch.cpp -- the inotify file watcher and the disk check it drives
+void FileWatcherReportsWhatMovedUnderIt();
+void FileWatcherArmingAndFailure();
+void EventDrivenDiskCheckDoesNotRepeatItself();
 
 // windows.cpp -- the window/pane layer in editor.cpp, seen through render.cpp
 void AdversarialWindows(Rng& rng);

@@ -458,6 +458,8 @@ void ReadSettings(const toml::table& root, Settings& settings, std::vector<std::
   ed.Flag("cursorline", settings.cursorline);
   ed.Number("excerpt-context", settings.excerpt_context, 0, 100);
   ed.Number("scan-workers", settings.scan_workers, 1, 32);
+  ed.Flag("auto-reload", settings.auto_reload);
+  ed.Number("auto-reload-debounce-ms", settings.auto_reload_debounce_ms, 0, 2000);
   ed.Bytes("picker-corpus-max-bytes", settings.picker_corpus_max, std::int64_t{4} << 20,
            std::int64_t{64} << 30);
   ed.Bytes("picker-file-max-bytes", settings.picker_file_max, std::int64_t{1} << 20,

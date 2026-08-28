@@ -1,6 +1,7 @@
 #ifndef KOI_COMMANDS_H_
 #define KOI_COMMANDS_H_
 
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -139,7 +140,13 @@ bool OpenTarget(Editor& ed, std::string_view spec);
 // visit recorded. The callers that want the visit counted go through OpenAt or
 // OpenTarget; the ones that do not -- the jump list, smart jump -- are the ones
 // that have their own idea of when an arrival counts.
-bool OpenFile(Editor& ed, const std::filesystem::path& path, bool open_generated = false);
+//
+// `arriving` runs once the open is certain and while the buffer being left is
+// still the current one -- the only moment a caller can describe the departure
+// and know the arrival is going to happen. Nothing runs for an open that
+// failed.
+bool OpenFile(Editor& ed, const std::filesystem::path& path, bool open_generated = false,
+              const std::function<void()>& arriving = {});
 
 void HandleKeyInput(Editor& ed, const KeyMaps& maps, const Key& key, std::vector<Key>& pending);
 

@@ -115,14 +115,32 @@ void GoToLastEdit(Editor& ed);
 // sweep; nothing after this touches disk until Enter.
 void SmartJumpPrompt(Editor& ed);
 
-// One keystroke: re-score the whole snapshot and say what Enter would do. Does
-// nothing unless the smart-jump prompt is the one that is open.
+// One keystroke: re-score the whole snapshot, say what Enter would do, and
+// build the band of the top rows the box hangs off itself (Editor::smart_band).
+// Does nothing unless the smart-jump prompt is the one that is open.
 void SmartJumpPreview(Editor& ed);
 
-// Enter. Lands on the best match, always -- stepping is the disambiguator, not
-// a list view. Nothing found says so and hands the query to the picker; this
-// never widens on its own.
-void SmartJumpSubmit(Editor& ed, std::string_view line);
+// Enter, or an alt+letter. Lands on match `at` -- the band's selected row for
+// Enter, which is the best one until the arrows move it. Nothing found says so
+// and hands the query to the picker; this never widens on its own.
+void SmartJumpSubmit(Editor& ed, std::string_view line, std::size_t at = 0);
+
+// The same query, without the prompt: `:smart-jump key cpp`, and so any key
+// bound to it. Takes the snapshot the prompt takes on the way in, because the
+// one a past prompt left behind is a store that has moved on since -- visits,
+// edits, frecency -- and then submits exactly as enter does.
+void SmartJumpQuery(Editor& ed, std::string_view line);
+
+// Alt+letter on the band: land on the row the letter names, closing the prompt
+// exactly as Enter's landing closes it. A letter past the rows the band drew
+// names nothing and leaves the prompt standing, the way a picker's does.
+void SmartJumpAcceptRow(Editor& ed, std::size_t at);
+
+// Up/down in the smart-jump prompt: move the band's selection the way PickerStep
+// moves a picker's -- wrapping at the list's ends, the window scrolled to keep
+// it on screen, the block following it. False when there is no band to walk, so
+// the arrows fall through to the history the prompt otherwise recalls.
+bool SmartBandStep(Editor& ed, bool forward);
 
 // Tab: close the prompt and hand what is typed to the picker the deciding
 // clause names -- the same handoff the dead end makes, one keystroke earlier.
@@ -220,6 +238,14 @@ bool ChooseBufferRow(Editor& ed, std::string_view payload);
 // grows past this to whatever the screen fits (RenderInto); everywhere else the
 // selection scrolls the window instead.
 inline constexpr std::size_t kPickerRows = 5;
+
+// What alt names a band row with, in row order: the same i/j/k/l/a the hot
+// symbols are bound to, so the reach is one already in the hands. A letter
+// rather than a digit for the reason the digit needed alt -- bare letters are
+// query text, and in the smart-jump box a bare letter is a clause keyword.
+// Every band answers to these, and the renderer draws them as the row labels.
+inline constexpr std::string_view kPickerRowKeys = "ijkla";
+static_assert(kPickerRowKeys.size() == kPickerRows);
 
 // Narrowest the card is drawn, whatever the rows are: a band that shrinks to
 // two words reads as a tooltip rather than as a list. Files and buffers only --
@@ -395,6 +421,11 @@ struct PickerState {
   std::size_t selected{0};
   std::size_t offset{0};
   std::size_t window{kPickerRows};
+  // What the count's m says when the rows are not the whole answer: smart-jump
+  // builds the top five of a ranked list into one of these, and rows.size()
+  // there would say five of five. Zero -- every picker -- means the rows are
+  // the answer and PickerTotal counts them.
+  std::size_t total{0};
   // The one width the block and the band are both drawn at. Computed when the
   // shown list changes and never on a step, so walking into a longer file does
   // not resize the card under the eyes; long rows clip instead.
@@ -538,15 +569,21 @@ void PickerStep(Editor& ed, bool forward);
 // excerpt-context keys so a new depth shows without a step.
 void PickerFillShown(Editor& ed, PickerState& state);
 
+// The block's half of that: the selected row's target, the lines around it at
+// excerpt-context depth, through the same file cache. Split out because
+// smart-jump's band wants the block and not the row-freshening pass -- its rows
+// come out of the store, not off the disk.
+void PickerFillContext(Editor& ed, PickerState& state);
+
 // The window follows the selection rather than the other way round: it moves
 // only when the selection would be off it, so walking inside the band leaves
 // the rows where the eyes left them. Called on a step, and by the renderer when
 // a resize changes how many rows the band has.
 void PickerScrollToSelected(PickerState& state);
 
-// Enter, or alt+digit: open the window's row `at` (0-based, so a digit names
-// the same row wherever the band is scrolled), negative opening the selected
-// row.
+// Enter, or an alt+letter: open the window's row `at` (0-based, so a letter
+// names the same row wherever the band is scrolled), negative opening the
+// selected row.
 // Closes the prompt and frees the state on success, and does nothing on a row
 // the band is not showing.
 void PickerAccept(Editor& ed, int at = -1);

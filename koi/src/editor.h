@@ -48,6 +48,15 @@ class StatusMessage {
     return *this;
   }
 
+  // Plain, and plain over anything: operator= keeps the level it found, so a
+  // message written after a warning wears the warning's colour. A caller whose
+  // message is good news -- a landing, a count -- says so here.
+  void Info(std::string text) {
+    Keep();
+    text_ = std::move(text);
+    target_from_ = target_len_ = 0;
+    level_ = StatusLevel::kInfo;
+  }
   void Warn(std::string text) {
     Keep();
     text_ = std::move(text);
@@ -290,6 +299,17 @@ struct Document {
 
   FileStamp disk_stamp;
 
+  // The disk state CheckDiskChange has already complained about for this
+  // buffer, and which of its two complaints it made.
+  //
+  // Only ever read next to a stamp that is not `disk_stamp`: this one is the
+  // state we told the user about, `disk_stamp` is the state the text came from,
+  // and a held buffer's are different by definition. Cleared wherever the two
+  // meet again -- load, reload, save -- so the next foreign write is news
+  // rather than a repeat. See CheckDiskChange for why it exists at all.
+  FileStamp warned_stamp;
+  bool warned_reload_failed{false};
+
   // git's blob id of the file on disk, taken at load and re-taken at save --
   // the two moments the bytes are already in hand. Empty when there is no file
   // behind the buffer or it was too big to be worth hashing (kMaxBlobBytes).
@@ -479,6 +499,16 @@ struct Settings {
   // rather than under a live one.
   std::uintmax_t picker_corpus_max{kDefaultPickerCorpusMax};
   std::uintmax_t picker_file_max{kDefaultPickerFileMax};
+  // Whether a file rewritten by something else -- a formatter, a rebase, an
+  // agent -- is taken up as it happens rather than at the next focus-in. Off
+  // leaves koi exactly where it was: the terminal's focus event is the only
+  // trigger. There is no interval to go with this and there never will be --
+  // see watch.h, nothing polls.
+  bool auto_reload{true};
+  // How long a burst of writes has to go quiet before koi sweeps. Spent as the
+  // timeout of the wait the loop already blocks in, and only while a change is
+  // actually pending, so an idle editor still waits forever on nothing.
+  Index auto_reload_debounce_ms{50};
 };
 
 struct WrapMetrics {
@@ -728,6 +758,13 @@ struct Editor {
   // (anchor.h), which the same pump that drains the scans calls.
   std::vector<std::shared_ptr<AnchorJob>> anchor_jobs;
 
+  // Paths koi has just written itself, for the event loop to hand to the file
+  // watcher before its next drain. A save renames into place, which reaches the
+  // watch looking exactly like somebody else's write; the watcher cannot see
+  // the save and the save cannot see the watcher, so the turn carries it.
+  // Drained every turn -- what nothing collects is dropped by the next Stop().
+  std::vector<std::string> self_writes;
+
   std::vector<std::string> registers;
 
   // What we last handed the system clipboard, one entry per selection at the
@@ -764,6 +801,11 @@ struct Editor {
   // a stack squeezed out of that row, or a box with no room to draw at all,
   // hands the message back to the bar rather than dropping it.
   bool prompt_box_said{false};
+  // The same deal for the arrival's branch box: true only while it actually
+  // drew this frame. A pane too narrow for the box, or a caret with no room
+  // above or below it, leaves the step feedback to the bar instead of dropping
+  // it. Written by the renderer before the focused bar is drawn.
+  bool jump_branch_said{false};
 
   bool prompt_active{false};
   PromptKind prompt_kind{PromptKind::kCommand};
@@ -802,6 +844,13 @@ struct Editor {
   // one: freed on accept and on cancel alike. Held by pointer for the same
   // reason smart_jump is.
   std::shared_ptr<PickerState> picker;
+
+  // The smart-jump band: the top of the ranking, rebuilt on every keystroke
+  // into the same thing a picker's band is drawn from, so the two are one card
+  // and one renderer. Null when nothing matches, when the query will not parse,
+  // and whenever the smart-jump prompt is not the one open. Kept across
+  // keystrokes rather than rebuilt whole so the block's file cache survives one.
+  std::shared_ptr<PickerState> smart_band;
 
   // What a pick left behind for picker_jump_next to walk: the filtered rows,
   // capped and owned. Outlives its prompt the way smart_jump does, and only a

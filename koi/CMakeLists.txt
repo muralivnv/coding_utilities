@@ -26,7 +26,8 @@ set(KOI_LIB_SOURCES
     src/navigate.cpp
     src/smartjump.cpp
     src/error.cpp
-    src/fuzzy.cpp)
+    src/fuzzy.cpp
+    src/watch.cpp)
 
 add_library(koi_lib STATIC ${KOI_LIB_SOURCES})
 target_include_directories(koi_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -81,6 +82,7 @@ set(KOI_TEST_SOURCES
     src/tests/thread_pool.cpp
     src/tests/undo_history.cpp
     src/tests/unicode.cpp
+    src/tests/watch.cpp
     src/tests/windows.cpp)
 
 # The test objects are built through an object library so that compiling them

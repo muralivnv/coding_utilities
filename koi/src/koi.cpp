@@ -8,14 +8,17 @@
 #undef TB_IMPL
 
 #include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <clocale>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <iterator>
@@ -45,6 +48,7 @@
 #include "syntax.h"
 #include "theme.h"
 #include "unicode.h"
+#include "watch.h"
 
 namespace koi {
 
@@ -332,8 +336,45 @@ int Run(const char* arg, std::optional<std::string> piped) {
     config_errors.push_back("theme " + ed.settings.theme + " not found; using the built-in one");
   };
 
+  // The file watcher and the little that surrounds it. `watch_signature` is a
+  // hash of the file-backed buffers, compared once per turn so that Arm -- the
+  // only part of this that canonicalises paths or calls into the kernel -- runs
+  // when the buffer set actually changes rather than on a timer.
+  FileWatcher watcher;
+  std::vector<std::string> watch_paths;
+  std::size_t watch_signature = kNoWatchSignature;
+  // Set only while a burst of writes is settling; empty the rest of the time,
+  // which is what keeps the idle wait a wait with no timeout on it.
+  std::optional<std::chrono::steady_clock::time_point> disk_deadline;
+
+  const auto rearm_watch = [&ed, &watcher, &watch_paths] {
+    watch_paths.clear();
+    for (std::size_t i = 0; i < BufferCount(ed); ++i) {
+      const Document& doc = BufferAt(ed, i);
+      if (HasDiskFile(doc)) watch_paths.push_back(doc.file.string());
+    }
+    // Every file-backed buffer, not only the ones a pane is drawing. Buffers
+    // share directories, so the extra watches are usually none at all, and it
+    // means a split or a buffer switch does not have to re-arm anything --
+    // BufferOnScreen is CheckDiskChange's business and stays there.
+    watcher.Arm(watch_paths);
+  };
+
+  const auto apply_watch = [&ed, &watcher, &watch_signature, &disk_deadline] {
+    disk_deadline.reset();
+    if (!ed.settings.auto_reload) {
+      watcher.Stop();
+      return;
+    }
+    std::ignore = watcher.Start();
+    // Whatever was armed belongs to the watcher that has just been stopped and
+    // started, or to a config that no longer applies.
+    watch_signature = kNoWatchSignature;
+  };
+
   load_config();
   apply_recording();
+  apply_watch();
   // After the config, so the pool starts at scan-workers rather than growing
   // to it on the first scan.
   StartScanWorker(ed.settings.scan_workers);
@@ -395,6 +436,52 @@ int Run(const char* arg, std::optional<std::string> piped) {
     // an event just handled. What arrived joins the bottom of the band before
     // anything draws.
     PickerPumpScan(ed);
+    // Saves this turn's commands made, handed over before anything drains: the
+    // rename has already happened and its event is already queued, so the token
+    // has to be in place before the read that would otherwise report it.
+    for (const std::string& path : ed.self_writes) watcher.ExpectSelfWrite(path);
+    ed.self_writes.clear();
+    if (watcher.Fd() >= 0) {
+      if (const std::size_t signature = WatchSignature(ed);
+          (signature != watch_signature) || watcher.NeedsRearm()) {
+        watch_signature = signature;
+        rearm_watch();
+      }
+      // A read() that finds EAGAIN, on the turns the idle wait below did not
+      // already do this. It is here for the loop's *other* waits -- pasting,
+      // chord, draining, scanning, busy -- where termbox owns the wait and the
+      // inotify fd is in no poll set at all.
+      disk_deadline = NextDiskDeadline(disk_deadline, watcher.Drain(),
+                                       std::chrono::steady_clock::now(),
+                                       ed.settings.auto_reload_debounce_ms);
+    }
+    // Outside the guard above on purpose: the problem worth reporting most is
+    // inotify_init1 failing, and that leaves Fd() at -1 -- so asking in there
+    // would be asking exactly when the answer can never arrive.
+    if (std::string problem = watcher.TakeProblem(); !problem.empty()) ed.status.Warn(problem);
+    // The debounce, expired. Deliberately not a timer and not a thread: the
+    // deadline is spent as the timeout of the wait below, and this is where it
+    // is collected. Waiting narrows the window on a writer caught mid-write --
+    // truncate-then-write in place is the shape that tears -- but does not
+    // close it, and does not need to: a torn read leaves a stamp that does not
+    // match what the writer finally leaves behind, so the next event brings us
+    // straight back here and the file is read again.
+    // Not while the user is halfway through something. A paste arrives as one
+    // key event per character, each of them landing here with the buffer still
+    // clean -- so a reload underneath it would take the buffer and the rest of
+    // the paste would go into different text at an offset that means nothing.
+    // Same for the other half-finished gestures: the reload moves the cursor,
+    // and an armed find-char, a typed count, a held drag or a chord waiting on
+    // its next key are all measured from where the cursor was. Held, not
+    // dropped: the deadline stays armed and the first turn after the gesture
+    // ends collects it.
+    const bool mid_gesture = pasting || (drag_anchor >= 0) || !pending.empty() ||
+                             (ed.pending_char != PendingChar::kNone) || (ed.pending_count != 0);
+    if (disk_deadline && !mid_gesture && (std::chrono::steady_clock::now() >= *disk_deadline)) {
+      disk_deadline.reset();
+      CheckDiskChange(ed);
+      MaybeRefreshExcerptView(ed);
+    }
     const bool busy = PumpCommandJobs(ed, pasting || ed.prompt_active ||
                                               (ed.mode == Mode::kInsert) || queued.has_value() ||
                                               (drag_anchor >= 0) || (drag_divider >= 0));
@@ -429,11 +516,118 @@ int Run(const char* arg, std::optional<std::string> piped) {
       constexpr int kJobPollMs = 80;
       constexpr int kPickerPollMs = 40;
       const int wait = chord ? kChordTimeoutMs : kRecordFlushMs;
+
+      // The idle branch: nothing typed, nothing running, nothing to redraw.
+      // termbox's own wait selects on the tty and its resize pipe and nothing
+      // else, so an inotify fd handed to it would sit unread until the user
+      // happened to press a key -- which is the entire feature. This is the one
+      // branch that is replaced, and it keeps termbox's contract: block with no
+      // timeout unless there is a debounce actually pending.
+      //
+      // Returns TB_OK with `ev` filled, a termbox error, or kLoopAgain for "go
+      // round again, nothing happened". kLoopAgain is safe to be `continue`d on
+      // because no editor state was touched -- and it must be, since TB_OK
+      // with a zeroed event would be dispatched as a key press.
+      constexpr int kLoopAgain = 1;  // TB_OK is 0 and every termbox error is negative.
+      const auto idle_wait = [&]() -> int {
+        int ttyfd = -1;
+        int resizefd = -1;
+        if ((watcher.Fd() < 0) || (tb_get_fds(&ttyfd, &resizefd) != TB_OK)) {
+          return tb_poll_event(&ev);
+        }
+        // Not an optimisation -- correctness. termbox reads the tty in blocks
+        // and parses events out of its own buffer, so bytes it has already
+        // taken off the fd leave nothing for poll() to see: block first and koi
+        // would sit there with an event in hand. Asked once, here, and again
+        // below only when the tty actually became readable -- the wake that
+        // matters for idle cost is the one from inotify, and that one has no
+        // reason to go near termbox at all.
+        if (const int ready = tb_peek_event(&ev, 0); !IncompleteTermboxRead(ready)) return ready;
+        for (;;) {
+          struct pollfd fds[3] = {{.fd = ttyfd, .events = POLLIN, .revents = 0},
+                                  {.fd = resizefd, .events = POLLIN, .revents = 0},
+                                  {.fd = watcher.Fd(), .events = POLLIN, .revents = 0}};
+          int timeout = -1;
+          if (disk_deadline) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  *disk_deadline - std::chrono::steady_clock::now())
+                                  .count();
+            // Clamped for the same reason NextDiskDeadline clamps: a clock that
+            // jumped is the one way `left` comes out silly.
+            timeout = static_cast<int>(std::clamp<std::int64_t>(left, 0, kMaxDebounceMs));
+          }
+          const int ready = ::poll(fds, 3, timeout);
+          if (ready < 0) {
+            if (errno == EINTR) return kLoopAgain;  // the top of the loop re-checks the hangup
+            // A poll set this one cannot poll is not something to retry in a
+            // loop that would then spin. Drop the watcher and finish this wait
+            // the way koi waited before there was one -- and say so, because
+            // the fallback lasts for the rest of the run and a feature that
+            // stops working without a word reads as one that never worked.
+            // Read before close(), which is free to leave its own errno here.
+            const std::string why{std::strerror(errno)};
+            watcher.Stop();
+            disk_deadline.reset();
+            ed.status.Warn("auto-reload off: " + why + " -- :config-reload to try again");
+            return tb_poll_event(&ev);
+          }
+          if (ready == 0) return kLoopAgain;  // the debounce expired; the top of the loop sweeps
+          if ((fds[0].revents | fds[1].revents) != 0) {
+            // Readable is not the same as decodable: a half-arrived escape
+            // sequence gives termbox nothing to return, and falling through
+            // with a zeroed `ev` would dispatch a key nobody pressed.
+            const int got = tb_peek_event(&ev, 0);
+            if (!IncompleteTermboxRead(got)) return got;
+            // The partial codes join NO_EVENT here: all of them mean "not a
+            // whole event yet", and all are answered by going back to poll. The
+            // bytes that came are in termbox's buffer now, so the tty is no
+            // longer readable and this cannot spin.
+            continue;
+          }
+          // Only the watcher fired. inotify has no name filter in the kernel,
+          // so this is every entry that moved in a directory holding one of
+          // koi's files -- object files, .git churn, an agent's temporaries.
+          // Drain says whether any of it was ours. When it was not, go back to
+          // poll from right here rather than returning: a turn of the outer
+          // loop would repaint the whole screen, and under a running build that
+          // is a continuous redraw of a frame not one cell of which changed.
+          disk_deadline = NextDiskDeadline(disk_deadline, watcher.Drain(),
+                                           std::chrono::steady_clock::now(),
+                                           ed.settings.auto_reload_debounce_ms);
+        }
+      };
+
+      // An armed debounce bounds a wait that is only a polling interval: the
+      // sweep runs between waits, so a fixed timeout collects it that late and
+      // the reload lands past the quiet time the config promises. Only for the
+      // waits whose expiry means nothing on its own -- the paste stall, the
+      // chord timeout and the record flush above expire *into* an action, and
+      // cutting one short would apply a paste or end a chord early. Those are
+      // the gestures the sweep is held for anyway.
+      const auto capped = [&disk_deadline, mid_gesture](int ms) {
+        // A deadline the gesture guard is holding is nothing to hurry for --
+        // shortening the wait for it would poll at the 1ms floor until the
+        // gesture ends.
+        if (!disk_deadline || mid_gesture) return ms;
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              *disk_deadline - std::chrono::steady_clock::now())
+                              .count();
+        return static_cast<int>(std::clamp<std::int64_t>(left, 1, ms));
+      };
       const int rc = pasting               ? tb_peek_event(&ev, kPasteStallMs)
                      : (chord || draining) ? tb_peek_event(&ev, wait)
-                     : scanning            ? tb_peek_event(&ev, kPickerPollMs)
-                     : busy                ? tb_peek_event(&ev, kJobPollMs)
-                                           : tb_poll_event(&ev);
+                     : scanning            ? tb_peek_event(&ev, capped(kPickerPollMs))
+                     : busy                ? tb_peek_event(&ev, capped(kJobPollMs))
+                                           : idle_wait();
+      if (rc == kLoopAgain) continue;
+      // Reachable from every branch above, and never an error: termbox says
+      // these when it is holding the front of an event and wants the rest of it
+      // -- an escape sequence for NEED_MORE, a multi-byte character for TB_ERR.
+      // NO_EVENT stays out of it because the timeout branches below read that
+      // one as their deadline expiring. The break is for codes that mean the
+      // terminal is gone; falling into it here quit the editor over a keystroke
+      // that arrived in two reads.
+      if ((rc == TB_ERR_NEED_MORE) || (rc == TB_ERR)) continue;
       if (rc != TB_OK) {
         if (HangupRequested()) break;
         if (rc == TB_ERR_NO_EVENT) {
@@ -513,7 +707,14 @@ int Run(const char* arg, std::optional<std::string> piped) {
       continue;
     }
     if (ev.type == TB_EVENT_FOCUS_IN) {
+      // Note what this does and what the watcher path deliberately does not:
+      // dropping pending input is right here, because the user's attention
+      // actually left the terminal and a half-typed chord is stale. A file
+      // written behind koi's back is not that -- eating an armed find-char
+      // because a formatter ran would be the feature making the editor worse.
       drop_pending_input();
+      // The sweep below is the one the debounce was going to ask for.
+      disk_deadline.reset();
       CheckDiskChange(ed);
       MaybeRefreshExcerptView(ed);
       continue;
@@ -654,6 +855,9 @@ int Run(const char* arg, std::optional<std::string> piped) {
 
       apply_theme();
       apply_recording();
+      // auto-reload takes effect here rather than at the next start: the
+      // watcher is stopped or started outright, and the next turn re-arms it.
+      apply_watch();
       if (config_errors.empty()) {
         ed.status = "reloaded " + DisplayPath(ConfigPath());
       } else {

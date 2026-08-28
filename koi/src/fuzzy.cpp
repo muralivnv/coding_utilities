@@ -580,7 +580,8 @@ bool RanksBefore(const RankKey& a, const RankKey& b) {
   if (a.score > b.score) return true;
   if (b.score > a.score) return false;
   if (a.length != b.length) return a.length < b.length;
-  return a.first < b.first;
+  if (a.first != b.first) return a.first < b.first;
+  return a.order < b.order;
 }
 
 }  // namespace koi

@@ -39,6 +39,9 @@ void RunUnicodeTests(Rng& rng) {
   BracketedPaste();
   DiskChangeOnFocus();
   DiskStampIsMtimeAndSize();
+  FileWatcherReportsWhatMovedUnderIt();
+  FileWatcherArmingAndFailure();
+  EventDrivenDiskCheckDoesNotRepeatItself();
   InsertMotionCollapse();
   TrimOnSave();
   KeyMapTrie();
@@ -324,13 +327,16 @@ int main(int argc, char** /*argv*/) {
   // Step 6: the parser, the prompt, the landing and the bounce.
   koi::SmartJumpParsing();
   koi::SmartJumpPipeline();
+  koi::SmartJumpOneSpotOneRow();
   koi::SmartJumpBranchDiffPrior();
   koi::SmartJumpFeedbackText();
   koi::SmartJumpLanding();
   koi::SmartJumpAdaptiveLoop();
   koi::SmartJumpStepping();
+  koi::SmartJumpTypedCommand();
   koi::SmartJumpBounceRule();
   koi::SmartJumpArrivalRules();
+  koi::SmartJumpModeless();
   koi::SmartJumpSnapshotCost();
 
   // Round 8.

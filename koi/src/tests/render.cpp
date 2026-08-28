@@ -907,9 +907,226 @@ void Rendering() {
     const Surface floor = draw(low, 60, 12);
     EXPECT_TRUE(floor.Row(7).find("╭") != std::string::npos);
     EXPECT_TRUE(floor.Row(8).find("12 zz/yy.cpp") != std::string::npos);
+    // The box drew, so the bar knows to stay out of it.
+    EXPECT_TRUE(ed.jump_branch_said);
+    EXPECT_TRUE(low.jump_branch_said);
   }
 
-  TEST_CASE("render: the picker's band hangs off the box, with digits and a count");
+  TEST_CASE("render: a box with nowhere to draw hands the step feedback back to the bar");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    ed.status = "12 zz/yy.cpp";
+    ed.jump_branch = true;
+
+    // Four rows: one for the bar, and the caret's own -- the box needs three
+    // and there is room for it neither below the caret nor above it.
+    const Surface frame = draw(ed, 60, 4);
+    EXPECT_FALSE(ed.jump_branch_said);
+    for (int y = 0; y < (frame.height - 1); ++y) {
+      EXPECT_TRUE(frame.Row(y).find("╭") == std::string::npos);
+    }
+    // So the bar says it rather than the message going nowhere.
+    EXPECT_TRUE(frame.Row(frame.height - 1).find("zz/yy.cpp") != std::string::npos);
+  }
+
+  // The smart-jump band is a PickerState like any other -- what builds it is
+  // navigate.cpp's business and is tested there. What these are about is that
+  // the smart-jump prompt draws one at all, on the picker's own card and with
+  // its own geometry.
+  const auto smart_band = [](std::size_t rows, std::size_t total) {
+    auto band = std::make_shared<PickerState>();
+    band->source = PickerState::Source::kRefs;
+    for (std::size_t i = 0; i < rows; ++i) {
+      PickerEntry row;
+      row.text = "SplitNode" + std::to_string(i) + "(&node);";
+      row.detail = "koi/src/piece_tree.cpp:" + std::to_string(210 + i);
+      row.target = "koi/src/piece_tree.cpp";
+      row.line = static_cast<Index>(210 + i);
+      row.column = 1;
+      row.read = true;
+      band->shown.push_back(band->rows.size());
+      band->rows.push_back(std::move(row));
+    }
+    band->total = total;
+    band->context = {"void Above() {}", "  SplitNode0(&node);", "}"};
+    band->context_first = 209;
+    band->context_target = 210;
+    band->card_w = PickerCardWidth(*band);
+    return band;
+  };
+
+  TEST_CASE("render: the smart-jump band is the picker's card, block and count and all");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    // BuiltinTheme paints no cursorline, so row 0 wearing the selection would
+    // be the popup fill and prove nothing.
+    ed.theme.scopes["ui.cursorline.primary"] = Style{{}, Color{true, 0x303030}, 0};
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\ncharlie\ndelta\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kSmartJump);
+    PromptInsert(ed, "sp");
+    // What the preview leaves on the status. While the band draws, the card is
+    // the feedback: no branch row under the box, and the bar told to leave the
+    // message alone -- either would say what the card already says.
+    ed.status = "9  koi/src/piece_tree.cpp:210  SplitNode0(&node);";
+    ed.smart_band = smart_band(5, 9);
+
+    const Surface frame = draw(ed, 70, 24);
+
+    const auto row_of = [&frame](std::string_view needle) {
+      for (int y = 0; y < frame.height; ++y) {
+        if (frame.Row(y).find(needle) != std::string::npos) return y;
+      }
+      return -1;
+    };
+
+    // Box, then the card directly: block, rule, the five rows in rank order,
+    // the count's own row, and the card's bottom under all of it.
+    const int input_y = frame.cursor_y;
+    EXPECT_TRUE(frame.Row(input_y).find("ᛃ sp") != std::string::npos);
+    EXPECT_EQ(row_of("╰─▸"), -1);
+    EXPECT_TRUE(ed.prompt_box_said);
+    const int block_y = row_of("209 void Above() {}");
+    EXPECT_EQ(block_y, input_y + 2);
+    EXPECT_EQ(row_of("210   SplitNode0(&node);"), block_y + 1);
+    EXPECT_EQ(row_of("211 }"), block_y + 2);
+    // The rule between the block and the rows, with nothing of either on it.
+    const int rule_y = block_y + 3;
+    EXPECT_TRUE(frame.Row(rule_y).find("───") != std::string::npos);
+    EXPECT_TRUE(frame.Row(rule_y).find("SplitNode") == std::string::npos);
+    // Labelled with the letter that takes the row, not a digit: i j k l a down
+    // the band, the order the hot symbols are bound in.
+    for (int i = 0; i < 5; ++i) {
+      const std::string want =
+          std::string{kPickerRowKeys[i]} + " SplitNode" + std::to_string(i) + "(&node);";
+      EXPECT_EQ(row_of(want), rule_y + 1 + i);
+      EXPECT_TRUE(frame.Row(rule_y + 1 + i).find("koi/src/piece_tree.cpp:" +
+                                                 std::to_string(210 + i)) != std::string::npos);
+    }
+    // Five rows of nine matches, on a row of its own, and the card closed under
+    // it. Never `1/5/5`: the band is the head of the ranking, not all of it.
+    EXPECT_EQ(row_of("1/5/9"), rule_y + 6);
+    EXPECT_TRUE(frame.Row(rule_y + 7).find("╰") != std::string::npos);
+    EXPECT_TRUE(frame.Row(rule_y + 7).find("╯") != std::string::npos);
+
+    // Row 0 is the implied selection -- what enter lands on -- so it wears the
+    // bar and the cursorline band, and no other row does.
+    EXPECT_TRUE(frame.Row(rule_y + 1).find("▌") != std::string::npos);
+    EXPECT_TRUE(frame.Row(rule_y + 2).find("▌") == std::string::npos);
+    const auto column_of = [&frame](int y, std::string_view glyph) {
+      for (int x = 0; x < frame.width; ++x) {
+        if (frame.At(x, y).text == glyph) return x;
+      }
+      return -1;
+    };
+    const int first_x = column_of(rule_y + 1, "S");
+    const int second_x = column_of(rule_y + 2, "S");
+    EXPECT_TRUE((first_x >= 0) && (second_x >= 0));
+    EXPECT_TRUE(frame.At(first_x, rule_y + 1).bg != frame.At(second_x, rule_y + 2).bg);
+
+    // The arrows move that selection, and the bar, the cursorline and the block
+    // all follow it down the band.
+    ed.smart_band->selected = 2;
+    const Surface moved = draw(ed, 70, 24);
+    EXPECT_TRUE(moved.Row(rule_y + 1).find("▌") == std::string::npos);
+    EXPECT_TRUE(moved.Row(rule_y + 3).find("▌") != std::string::npos);
+    EXPECT_TRUE(moved.Row(rule_y + 6).find("3/5/9") != std::string::npos);
+    EXPECT_TRUE(moved.At(second_x, rule_y + 2).bg !=
+                moved.At(column_of(rule_y + 3, "S"), rule_y + 3).bg);
+  }
+
+  TEST_CASE("render: a smart-jump band of one is still a band, and none is none");
+  {
+    const auto rows_with = [](const Surface& frame, std::string_view needle) {
+      int count = 0;
+      for (int y = 0; y < frame.height; ++y) {
+        if (frame.Row(y).find(needle) != std::string::npos) ++count;
+      }
+      return count;
+    };
+
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\ncharlie\ndelta\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kSmartJump);
+    PromptInsert(ed, "sp");
+    // The feedback names the same destination the band's one row is: with the
+    // card up, neither the branch row nor the bar may repeat it.
+    ed.status = "1  koi/src/piece_tree.cpp:210  SplitNode0(&node);";
+    ed.smart_band = smart_band(1, 1);
+
+    const Surface one = draw(ed, 70, 24);
+    // The block's target line and the one band row -- the row's own detail
+    // rides beside it, not under it, and the feedback nowhere at all.
+    EXPECT_EQ(rows_with(one, "SplitNode"), 2);
+    EXPECT_EQ(rows_with(one, "i SplitNode0(&node);"), 1);
+    EXPECT_TRUE(rows_with(one, "1/1/1") == 1);
+
+    // Nothing matched, or the query will not parse: no card at all, and the
+    // feedback the preview left is the whole of what the box says.
+    ed.smart_band.reset();
+    ed.status = "not been there";
+    const Surface none = draw(ed, 70, 24);
+    EXPECT_EQ(rows_with(none, "SplitNode"), 0);
+    EXPECT_EQ(rows_with(none, "╰─▸ not been there"), 1);
+  }
+
+  TEST_CASE("render: the smart-jump band flips above the caret and shrinks before the box does");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    std::string text;
+    for (int i = 0; i < 60; ++i) text += "line\n";
+    ResetToOriginal(ed.doc.table, text);
+    ed.settings.scrolloff = 0;
+    const Index end = DocLength(ed.doc.table);
+    ed.doc.selections.Set(Selection{end, end, -1});
+    PromptOpen(ed, PromptKind::kSmartJump);
+    PromptInsert(ed, "sp");
+    ed.smart_band = smart_band(5, 9);
+
+    // Against the floor the whole stack takes the rows above the caret: the
+    // card first, then the box, in that order up the screen.
+    const Surface up = draw(ed, 70, 24);
+    const auto row_of = [](const Surface& frame, std::string_view needle) {
+      for (int y = 0; y < frame.height; ++y) {
+        if (frame.Row(y).find(needle) != std::string::npos) return y;
+      }
+      return -1;
+    };
+    EXPECT_TRUE(up.cursor_y > row_of(up, "i SplitNode0(&node);"));
+    EXPECT_TRUE(row_of(up, "i SplitNode0(&node);") < row_of(up, "a SplitNode4(&node);"));
+    EXPECT_TRUE(row_of(up, "209 void Above() {}") > row_of(up, "a SplitNode4(&node);"));
+
+    // A side with room for the box and a couple of rows keeps the box and gives
+    // up the block, then the count's row, then band rows down to one. The
+    // letters follow what was drawn, never a row that was not.
+    Editor tight;
+    tight.theme = BuiltinTheme();
+    ResetToOriginal(tight.doc.table, "alpha\nbravo\ncharlie\ndelta\n");
+    tight.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(tight, PromptKind::kSmartJump);
+    PromptInsert(tight, "sp");
+    tight.smart_band = smart_band(5, 9);
+
+    const Surface squeezed = draw(tight, 70, 9);
+    EXPECT_TRUE(squeezed.Row(squeezed.cursor_y).find("ᛃ sp") != std::string::npos);
+    EXPECT_TRUE(row_of(squeezed, "i SplitNode0(&node);") >= 0);
+    EXPECT_EQ(row_of(squeezed, "209 void Above() {}"), -1);
+    EXPECT_TRUE(tight.smart_band->window >= std::size_t{1});
+    EXPECT_TRUE(tight.smart_band->window < std::size_t{5});
+    for (std::size_t r = tight.smart_band->window; r < 5; ++r) {
+      const std::string gone = std::string{kPickerRowKeys[r]} + " SplitNode" + std::to_string(r);
+      EXPECT_EQ(row_of(squeezed, gone), -1);
+    }
+  }
+
+  TEST_CASE("render: the picker's band hangs off the box, with row letters and a count");
   {
     Editor ed;
     ed.theme = BuiltinTheme();
@@ -935,12 +1152,14 @@ void Rendering() {
 
     const Surface frame = draw(ed, 60, 16);
 
-    // Every row on the same text column, and the digit on each is what opens
-    // it. No connector back to the box: the card is boxed itself now and shares
-    // the box's border row, so an arrow would point at what it is joined to.
-    EXPECT_TRUE(frame.Row(4).find("1 alpha.cpp:12") != std::string::npos);
-    EXPECT_TRUE(frame.Row(5).find("2 charlie.cpp:12") != std::string::npos);
-    EXPECT_TRUE(frame.Row(6).find("3 echo.cpp:12") != std::string::npos);
+    // Every row on the same text column, and the letter on each is the alt
+    // chord that opens it -- the same i j k l a a smart-jump band wears, on a
+    // band of files. No connector back to the box: the card is boxed itself now
+    // and shares the box's border row, so an arrow would point at what it is
+    // joined to.
+    EXPECT_TRUE(frame.Row(4).find("i alpha.cpp:12") != std::string::npos);
+    EXPECT_TRUE(frame.Row(5).find("j charlie.cpp:12") != std::string::npos);
+    EXPECT_TRUE(frame.Row(6).find("k echo.cpp:12") != std::string::npos);
     for (int y = 0; y < frame.height; ++y) {
       EXPECT_TRUE(frame.Row(y).find("▸") == std::string::npos);
     }
@@ -1014,7 +1233,7 @@ void Rendering() {
     // list, and nothing of the block's own on it.
     EXPECT_TRUE(frame.Row(7).find("───") != std::string::npos);
     EXPECT_TRUE(frame.Row(7).find("Widget") == std::string::npos);
-    EXPECT_TRUE(frame.Row(8).find("1 int Widget = 1;") != std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("i int Widget = 1;") != std::string::npos);
     EXPECT_TRUE(frame.Row(8).find("▸") == std::string::npos);
     EXPECT_TRUE(frame.Row(11).find("╰") != std::string::npos);
 
@@ -1074,7 +1293,7 @@ void Rendering() {
       }
       return -1;
     };
-    const int band = row_with(up, "1 int Widget = 1;");
+    const int band = row_with(up, "i int Widget = 1;");
     const int block = row_with(up, "12   int Widget = 1;");
     const int box = row_with(up, "ᛃ");
     EXPECT_TRUE((band >= 0) && (block >= 0) && (box >= 0));
@@ -1103,8 +1322,8 @@ void Rendering() {
     // No block and no rule, so the band starts on the row under the one the box
     // and the card share, and the card's bottom is straight under the last row.
     EXPECT_TRUE(plain.Row(3).find("├") != std::string::npos);
-    EXPECT_TRUE(plain.Row(4).find("1 src/a.cpp:12") != std::string::npos);
-    EXPECT_TRUE(plain.Row(5).find("2 src/b.cpp:12") != std::string::npos);
+    EXPECT_TRUE(plain.Row(4).find("i src/a.cpp:12") != std::string::npos);
+    EXPECT_TRUE(plain.Row(5).find("j src/b.cpp:12") != std::string::npos);
     EXPECT_TRUE(plain.Row(6).find("╰") != std::string::npos);
     for (int y = 0; y < plain.height; ++y) {
       EXPECT_TRUE(plain.Row(y).find("Above") == std::string::npos);
@@ -1159,10 +1378,10 @@ void Rendering() {
     // The row leads with the line, trimmed as a defs row's line is, and the
     // `path:line:` head is off it: what clips is the far end of the line, not
     // its first columns.
-    EXPECT_TRUE(frame.Row(8).find("1 int Widget = 1;  // xxx") != std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("i int Widget = 1;  // xxx") != std::string::npos);
     EXPECT_TRUE(frame.Row(8).find("src/a.cpp:12:") == std::string::npos);
     EXPECT_TRUE(frame.Row(8).find("ZZEND") == std::string::npos);
-    EXPECT_TRUE(frame.Row(9).find("2 another line") != std::string::npos);
+    EXPECT_TRUE(frame.Row(9).find("j another line") != std::string::npos);
 
     // Byte offsets into a row shift when a multi-byte glyph lands on it, and the
     // selected row wears one -- so what these compare is columns.
@@ -1237,16 +1456,17 @@ void Rendering() {
     // Room below the caret for all twelve: every buffer is on screen, which is
     // the whole point of reading a buffer list.
     const Surface tall = draw(ed, 60, 24);
-    EXPECT_TRUE(tall.Row(4).find("1 buffer0.txt") != std::string::npos);
+    EXPECT_TRUE(tall.Row(4).find("i buffer0.txt") != std::string::npos);
     EXPECT_TRUE(tall.Row(15).find("buffer11.txt") != std::string::npos);
     EXPECT_EQ(ed.picker->window, std::size_t{12});
 
-    // The digits stop where the accept gate stops: a grown band is walked past
-    // its fifth row, so those rows carry no number to press, and the text
-    // column is the same one a numbered row uses.
-    EXPECT_TRUE(tall.Row(8).find("5 buffer4.txt") != std::string::npos);
-    EXPECT_TRUE(tall.Row(9).find("6 buffer5.txt") == std::string::npos);
-    EXPECT_TRUE(tall.Row(15).find("12 buffer11.txt") == std::string::npos);
+    // The letters stop where the accept gate stops: a grown band is walked past
+    // its fifth row, so those rows carry no letter to press, and the text
+    // column is the same one a lettered row uses.
+    EXPECT_TRUE(tall.Row(8).find("a buffer4.txt") != std::string::npos);
+    const std::size_t sixth = tall.Row(9).find("buffer5.txt");
+    EXPECT_TRUE(sixth != std::string::npos);
+    if (sixth >= 2) EXPECT_EQ(tall.Row(9).substr(sixth - 2, 2), std::string{"  "});
     EXPECT_EQ(tall.Row(15).find("buffer11.txt"), tall.Row(5).find("buffer1.txt"));
 
     // The index is padded to the shown count's width, so stepping past the
@@ -1262,14 +1482,14 @@ void Rendering() {
     // A short screen takes what it can and the rest is walked: the box still
     // hangs off the caret rather than falling to the bottom row.
     const Surface squat = draw(ed, 60, 12);
-    EXPECT_TRUE(squat.Row(4).find("1 buffer0.txt") != std::string::npos);
+    EXPECT_TRUE(squat.Row(4).find("i buffer0.txt") != std::string::npos);
     EXPECT_TRUE(ed.picker->window < std::size_t{12});
     EXPECT_TRUE(ed.picker->window >= kPickerRows);
 
     // Files is not buffers: five rows and a window over the rest.
     state->source = PickerState::Source::kFiles;
     const Surface files = draw(ed, 60, 24);
-    EXPECT_TRUE(files.Row(8).find("5 buffer4.txt") != std::string::npos);
+    EXPECT_TRUE(files.Row(8).find("a buffer4.txt") != std::string::npos);
     EXPECT_TRUE(files.Row(9).find("buffer5.txt") == std::string::npos);
     EXPECT_EQ(ed.picker->window, kPickerRows);
   }
@@ -1292,13 +1512,13 @@ void Rendering() {
     ed.picker = state;
 
     // Stepped to the last row: the window has scrolled to the end of the list,
-    // the digits still number the five rows drawn, and the count says how far
+    // the letters still label the five rows drawn, and the count says how far
     // in the list the band is showing from.
     for (int i = 0; i < 8; ++i) PickerStep(ed, true);
     EXPECT_EQ(ed.picker->offset, std::size_t{4});
     const Surface frame = draw(ed, 60, 20);
-    EXPECT_TRUE(frame.Row(4).find("1 file4.txt") != std::string::npos);
-    EXPECT_TRUE(frame.Row(8).find("5 file8.txt") != std::string::npos);
+    EXPECT_TRUE(frame.Row(4).find("i file4.txt") != std::string::npos);
+    EXPECT_TRUE(frame.Row(8).find("a file8.txt") != std::string::npos);
     EXPECT_TRUE(frame.Row(8).find("9/9/9") != std::string::npos);
     // Drawing settles the window, it does not move it.
     EXPECT_EQ(ed.picker->offset, std::size_t{4});
@@ -1394,22 +1614,238 @@ void Rendering() {
     // rows, flush with the card's wall -- no fixed fraction holding slack back.
     const Surface wide = draw(ed, 80, 20);
     const int cap = 79 - 7 - 2 - 8;
-    EXPECT_TRUE(wide.Row(4).find("1 int Widget0 = qqq") != std::string::npos);
+    EXPECT_TRUE(wide.Row(4).find("i int Widget0 = qqq") != std::string::npos);
     EXPECT_EQ(wide.At(7 + cap - 1, 4).text, std::string{"q"});
     EXPECT_EQ(wide.At(7 + cap, 4).text, std::string{" "});
     EXPECT_EQ(column_of_text(wide, 4, "s.cpp:12"), 7 + cap + 2);
     EXPECT_EQ(column_of_text(wide, 5, "s.cpp:12"), 7 + cap + 2);
 
-    // A narrow card keeps the filename whole and gives the lead what is left:
-    // a line that cannot say where it points cannot be taken, so the path
-    // never loses a column to the lead.
+    // A card too narrow to hold both gives the lead its floor -- a hair over
+    // half the row -- and the path takes what is left from its end: a row whose
+    // line is three columns wide says nothing about which row to take, and a
+    // path clipped from the front still names its file.
     const Surface narrow = draw(ed, 24, 20);
-    EXPECT_TRUE(narrow.Row(4).find("1 int Wi") != std::string::npos);
-    EXPECT_TRUE(narrow.Row(4).find("int Wid") == std::string::npos);
-    EXPECT_EQ(column_of_text(narrow, 4, "s.cpp:12"), 7 + (23 - 7 - 2 - 8) + 2);
-    EXPECT_EQ(column_of_text(narrow, 5, "s.cpp:12"), 7 + (23 - 7 - 2 - 8) + 2);
+    const int floor_w = ((23 - 7 - 2) * 11) / 20;
+    EXPECT_TRUE(narrow.Row(4).find("i int Wid") != std::string::npos);
+    EXPECT_TRUE(narrow.Row(4).find("int Widg") == std::string::npos);
+    EXPECT_EQ(narrow.At(7 + floor_w + 2, 4).text, std::string{"…"});
+    EXPECT_EQ(column_of_text(narrow, 4, "cpp:12"), 7 + floor_w + 3);
+    EXPECT_EQ(column_of_text(narrow, 5, "cpp:12"), 7 + floor_w + 3);
     // The count still has its row, whatever the rows above it could fit.
     EXPECT_EQ(column_of_text(narrow, 6, "1/2/2"), 5);
+  }
+
+  TEST_CASE("render: the row the count rides keeps a path, column and all");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kDefs;
+    // A lead that wants more column than any narrow card would give it, beside
+    // a path wide enough that the lead is held at its floor rather than at what
+    // the path leaves.
+    for (int i = 0; i < 2; ++i) {
+      PickerEntry row;
+      row.text = "ZZlead = SplitNode(&node);";
+      row.read = true;
+      row.detail = "koi/src/piece_tree.cpp:210";
+      row.target = "koi/src/piece_tree.cpp";
+      row.line = 210;
+      state->rows.push_back(std::move(row));
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    const auto column_of_text = [](const Surface& f, int y, std::string_view needle) {
+      for (int x = 0; x < f.width; ++x) {
+        std::string seen;
+        for (int at = x; (at < f.width) && (seen.size() < needle.size()); ++at) {
+          seen += f.At(at, y).text;
+        }
+        if ((seen.size() >= needle.size()) && (seen.compare(0, needle.size(), needle) == 0)) {
+          return x;
+        }
+      }
+      return -1;
+    };
+
+    // Seven rows: the bar takes one and the caret's own is the top, so the box
+    // takes 1..3 and one row is left under it. The count's row goes before the
+    // last list row does, so the count rides the one row the band has.
+    const Surface ride = draw(ed, 24, 7);
+    EXPECT_EQ(column_of_text(ride, 4, "i ZZle"), 5);
+    EXPECT_TRUE(ride.Row(5).find("╰") != std::string::npos);
+    EXPECT_EQ(column_of_text(ride, 6, "1/2/2"), -1);
+
+    // The card is the screen at the margin, so the row runs 0..23 and its text
+    // stops at 23. `1/2/2` is five columns and gives up a sixth as its blank, so
+    // the row's own limit is 17 and the column is measured from that: 17 - 7 - 2
+    // is 8 to share, the lead's floor is (8 * 11) / 20 = 4, and the path starts
+    // two past that at 13 with four columns to draw itself in.
+    const int lead_w = ((23 - 5 - 1 - 7 - 2) * 11) / 20;
+    EXPECT_EQ(lead_w, 4);
+    const int dx = 7 + lead_w + 2;
+    EXPECT_EQ(column_of_text(ride, 4, "…210"), dx);
+    // A blank between the path and the count, and the count whole after it.
+    EXPECT_EQ(ride.At(17, 4).text, std::string{" "});
+    EXPECT_EQ(column_of_text(ride, 4, "1/2/2"), 18);
+
+    // Given room for its own row the count takes it back, and the rows keep the
+    // wider column they had: the floor is measured off the whole row again.
+    const Surface own = draw(ed, 24, 20);
+    const int wide_w = ((23 - 7 - 2) * 11) / 20;
+    EXPECT_EQ(wide_w, 7);
+    EXPECT_EQ(column_of_text(own, 4, "…pp:210"), 7 + wide_w + 2);
+    EXPECT_EQ(column_of_text(own, 5, "…pp:210"), 7 + wide_w + 2);
+    EXPECT_EQ(column_of_text(own, 6, "1/2/2"), 5);
+
+    // Wide enough that the floor is a fraction and not a rounding: the card is
+    // the screen, the row runs 0..39, the count has its own row so the whole of
+    // 39 - 7 - 2 is 30 to share. The path wants 26 of them and would leave the
+    // lead 4, so the floor is what the lead gets -- (30 * 11) / 20 = 16, which
+    // is a column more than a tenth-of-twenty floor would give. The lead is 26
+    // and clips at 16; two past it the path starts at 25 with 14 columns and
+    // takes them from its end.
+    const Surface floored = draw(ed, 40, 20);
+    const int floor_w = ((39 - 7 - 2) * 11) / 20;
+    EXPECT_EQ(floor_w, 16);
+    EXPECT_TRUE(floored.Row(4).find("i ZZlead = SplitNo") != std::string::npos);
+    EXPECT_TRUE(floored.Row(4).find("ZZlead = SplitNod") == std::string::npos);
+    EXPECT_EQ(column_of_text(floored, 4, "…_tree.cpp:210"), 7 + floor_w + 2);
+    EXPECT_EQ(column_of_text(floored, 5, "…_tree.cpp:210"), 7 + floor_w + 2);
+  }
+
+  TEST_CASE("render: one deep path does not squeeze the lines off the band");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kDefs;
+    // Rows that fit beside a short path, and one hit under a path deep enough
+    // to want the whole row for itself.
+    const std::string deep = "/home/murali/.local/share/chezmoi/dot_config/devshell/bash.sh";
+    for (int i = 0; i < 2; ++i) {
+      PickerEntry row;
+      row.text = "function(add_grammar NAME SOURCE_DIR)";
+      row.read = true;
+      row.detail = (i == 0) ? "CMakeLists.txt:22" : (deep + ":378");
+      row.target = (i == 0) ? "CMakeLists.txt" : deep;
+      row.line = 12;
+      state->rows.push_back(std::move(row));
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    // The lead keeps its floor, so both lines read whole instead of clipping to
+    // a few columns behind the deep path.
+    const Surface out = draw(ed, 80, 20);
+    EXPECT_TRUE(out.Row(4).find("i function(add_grammar NAME SOURCE_DIR)") != std::string::npos);
+    EXPECT_TRUE(out.Row(5).find("j function(add_grammar NAME SOURCE_DIR)") != std::string::npos);
+    // The lead asked for less than its floor, so the column stands where the
+    // lines end and the path takes the rest: the short path whole, the deep
+    // one keeping the end that says where the row points.
+    const std::string_view line{"function(add_grammar NAME SOURCE_DIR)"};
+    const int dx = 7 + static_cast<int>(line.size()) + 2;
+    EXPECT_EQ(out.At(dx, 4).text, std::string{"C"});
+    EXPECT_EQ(out.At(dx, 5).text, std::string{"…"});
+    EXPECT_TRUE(out.Row(5).find("devshell/bash.sh:378") != std::string::npos);
+    EXPECT_TRUE(out.Row(5).find("/home/murali") == std::string::npos);
+  }
+
+  TEST_CASE("render: a row that is only a place takes the whole row and keeps its end");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    const std::string deep = "/home/murali/.local/share/chezmoi/dot_config/devshell/bash.sh";
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kRefs;
+    // The smart band's two shapes: a line row, and a file row that carries no
+    // second copy of its path (FillSmartBand).
+    for (int i = 0; i < 2; ++i) {
+      PickerEntry row;
+      row.text = (i == 0) ? "tooey --height 50" : deep;
+      row.detail = (i == 0) ? "s.cpp:12" : std::string{};
+      row.read = true;
+      row.target = (i == 0) ? "s.cpp" : deep;
+      row.line = 12;
+      state->rows.push_back(std::move(row));
+      state->shown.push_back(static_cast<std::size_t>(i));
+    }
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    // Drawn from the lead column to the card's wall, front-clipped, so the row
+    // says which file it is. The line row's columns are the short detail's:
+    // nothing was measured off the place row.
+    const Surface out = draw(ed, 44, 20);
+    EXPECT_TRUE(out.Row(4).find("tooey --height 50  s.cpp:12") != std::string::npos);
+    EXPECT_EQ(out.At(7, 5).text, std::string{"…"});
+    EXPECT_TRUE(out.Row(5).find("devshell/bash.sh") != std::string::npos);
+    EXPECT_TRUE(out.Row(5).find("/home/murali") == std::string::npos);
+  }
+
+  TEST_CASE("render: a content row with no head keeps its front and clips its end");
+  {
+    Editor ed;
+    ed.theme = BuiltinTheme();
+    ResetToOriginal(ed.doc.table, "alpha\nbravo\n");
+    ed.doc.selections.Set(Selection{0, 0, -1});
+    PromptOpen(ed, PromptKind::kPicker);
+
+    // A scanned line with no `path:line:` on it, so the lead is the whole line
+    // and the detail comes back empty -- the same branch a place row takes,
+    // and the other shape it has to draw. Longer than the card, so one end of
+    // it goes.
+    const std::string corpus = "ZZFRONT names it, then " + std::string(90, 'w') + " ZZEND\n";
+    auto stream = common::MmapStreamFromBytes(corpus.data(), corpus.size());
+    EXPECT_TRUE(stream.has_value());
+    if (!stream) return;
+
+    auto state = std::make_shared<PickerState>();
+    state->source = PickerState::Source::kContent;
+    state->scan = std::make_unique<PickerScan>();
+    state->scan->out = std::move(*stream);
+    state->scan->parsed = corpus.size();
+    state->scan->lines = 1;
+    state->scan->done = true;
+    state->shown = {0};
+    state->card_w = PickerCardWidth(*state);
+    ed.picker = state;
+
+    const auto column_of_text = [](const Surface& f, int y, std::string_view needle) {
+      for (int x = 0; x < f.width; ++x) {
+        std::string seen;
+        for (int at = x; (at < f.width) && (seen.size() < needle.size()); ++at) {
+          seen += f.At(at, y).text;
+        }
+        if ((seen.size() >= needle.size()) && (seen.compare(0, needle.size(), needle) == 0)) {
+          return x;
+        }
+      }
+      return -1;
+    };
+
+    // Head-first from the lead column, like any other line: a row with no head
+    // is a line of the project, and what says which line it is is its front.
+    // So the far end clips, and nothing was walked off the near one.
+    const Surface out = draw(ed, 60, 20);
+    EXPECT_EQ(column_of_text(out, 4, "ZZFRONT names it, then www"), 7);
+    EXPECT_TRUE(out.Row(4).find("…") == std::string::npos);
+    EXPECT_TRUE(out.Row(4).find("ZZEND") == std::string::npos);
   }
 
   TEST_CASE("render: the detail column grows with the window and does not shrink back");
@@ -1518,7 +1954,7 @@ void Rendering() {
     // Below the caret: the two rows, then the count on the row under them,
     // inside the card's walls rather than under them.
     const Surface below = draw(ed, 60, 20);
-    const int last = row_with(below, "2 int hit1();");
+    const int last = row_with(below, "j int hit1();");
     EXPECT_TRUE(last > 0);
     EXPECT_EQ(row_with(below, "1/2/2"), last + 1);
     EXPECT_EQ(below.At(0, last + 1).text, std::string{"│"});
@@ -1532,7 +1968,7 @@ void Rendering() {
     // row the box's border meets, and the list reads down to it either way.
     ed.doc.selections.Set(Selection{11 * 6, 11 * 6, -1});
     const Surface above = draw(ed, 60, 16);
-    const int flipped = row_with(above, "2 int hit1();");
+    const int flipped = row_with(above, "j int hit1();");
     EXPECT_TRUE(flipped > 0);
     EXPECT_EQ(row_with(above, "1/2/2"), flipped + 1);
     // The border row the card and the box share is under the count, and the
@@ -1581,7 +2017,7 @@ void Rendering() {
       EXPECT_TRUE(frame.Row(y).find("ctx10") == std::string::npos);
     }
     EXPECT_TRUE(frame.Row(10).find("───") != std::string::npos);
-    EXPECT_TRUE(frame.Row(11).find("1 int hit0();") != std::string::npos);
+    EXPECT_TRUE(frame.Row(11).find("i int hit0();") != std::string::npos);
     EXPECT_TRUE(frame.Row(13).find("1/2/2") != std::string::npos);
   }
 
@@ -1736,7 +2172,7 @@ void Rendering() {
     EXPECT_EQ(frame.cursor_y, 8);
     EXPECT_TRUE(frame.Row(10).find("╰─▸ bad pattern") != std::string::npos);
     EXPECT_TRUE(frame.Row(11).find("╭") != std::string::npos);
-    EXPECT_TRUE(frame.Row(12).find("1 int pick0();") != std::string::npos);
+    EXPECT_TRUE(frame.Row(12).find("i int pick0();") != std::string::npos);
     EXPECT_TRUE(frame.Row(13).find("1/9/9") != std::string::npos);
     EXPECT_TRUE(frame.Row(14).find("╰") != std::string::npos);
     EXPECT_EQ(ed.picker->window, std::size_t{1});
@@ -1749,7 +2185,7 @@ void Rendering() {
     EXPECT_TRUE(frame.Row(15).find("7:1") != std::string::npos);
     EXPECT_TRUE(frame.Row(15).find("bad pattern") == std::string::npos);
 
-    // The band drew two rows, so the fifth digit names nothing and is refused
+    // The band drew two rows, so the fifth letter names nothing and is refused
     // rather than opening a row nobody can see.
     PickerAccept(ed, 4);
     EXPECT_TRUE(ed.prompt_active);
@@ -1762,8 +2198,8 @@ void Rendering() {
     EXPECT_TRUE(tall.Row(11).find("╭") != std::string::npos);
     EXPECT_TRUE(tall.Row(12).find("ctx above") != std::string::npos);
     EXPECT_TRUE(tall.Row(15).find("───") != std::string::npos);
-    EXPECT_TRUE(tall.Row(16).find("1 int pick0();") != std::string::npos);
-    EXPECT_TRUE(tall.Row(20).find("5 int pick4();") != std::string::npos);
+    EXPECT_TRUE(tall.Row(16).find("i int pick0();") != std::string::npos);
+    EXPECT_TRUE(tall.Row(20).find("a int pick4();") != std::string::npos);
     EXPECT_TRUE(tall.Row(21).find("1/9/9") != std::string::npos);
     EXPECT_TRUE(tall.Row(22).find("╰") != std::string::npos);
   }
@@ -1779,7 +2215,7 @@ void Rendering() {
     // gives the column up rather than having it stamped over its detail.
     const Surface frame = draw(ed, 100, 12);
     EXPECT_EQ(ed.picker->window, std::size_t{1});
-    EXPECT_TRUE(frame.Row(9).find("1 int pick0();") != std::string::npos);
+    EXPECT_TRUE(frame.Row(9).find("i int pick0();") != std::string::npos);
     EXPECT_TRUE(frame.Row(9).find("s.cpp:1") != std::string::npos);
     EXPECT_TRUE(frame.Row(9).find("1/9/9") != std::string::npos);
     EXPECT_TRUE(frame.Row(10).find("╰") != std::string::npos);
@@ -1803,7 +2239,7 @@ void Rendering() {
       EXPECT_TRUE(frame.Row(y).find("pick") == std::string::npos);
     }
 
-    // No band, no accelerators: every digit names a row that was never drawn.
+    // No band, no accelerators: every letter names a row that was never drawn.
     PickerAccept(ed, 0);
     EXPECT_TRUE(ed.prompt_active);
     EXPECT_TRUE(ed.picker != nullptr);
@@ -1827,7 +2263,7 @@ void Rendering() {
               EXPECT_TRUE((frame.cursor_x >= 0) && (frame.cursor_x < w));
               EXPECT_TRUE((frame.cursor_y >= 0) && (frame.cursor_y < h));
             }
-            // The window is what the digits accept on, so it may never be more
+            // The window is what the letters accept on, so it may never be more
             // than the band drew: a row that never fit is a row the eyes never
             // saw.
             EXPECT_TRUE(ed.picker->window <= kPickerRows);
